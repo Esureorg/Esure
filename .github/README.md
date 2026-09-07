@@ -1,18 +1,18 @@
-# Esure organization defaults
+# Community resources
 
-This repository contains the default community health files used across Esure
-repositories.
+This directory contains the project automation and community standards for the
+Esure monorepo.
 
-GitHub applies supported files from this special `.github` repository when an
-individual repository does not provide its own override.
+## Contents
 
-## Included
+- [`workflows/ci.yml`](workflows/ci.yml) validates the backend and frontend on
+  pushes and pull requests.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) explains the contributor workflow.
+- [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) defines expected community conduct.
+- [`SECURITY.md`](SECURITY.md) explains how to report vulnerabilities safely.
+- [`ISSUE_TEMPLATE`](ISSUE_TEMPLATE) provides structured bug and feature forms.
+- [`PULL_REQUEST_TEMPLATE.md`](PULL_REQUEST_TEMPLATE.md) provides the pull
+  request review checklist.
 
-- Organization profile
-- Contribution guide
-- Code of conduct
-- Security policy
-- Bug and feature issue forms
-- Pull request template
-- Reusable Node.js CI workflow template
-
+For the product overview, setup instructions, architecture, deployment, and MVP
+status, return to the [main project README](../README.md).

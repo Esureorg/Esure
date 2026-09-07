@@ -39,6 +39,48 @@ take longer than subsequent requests.
 
 See the [MVP specification](esure-docs/MVP.md) for the complete product scope.
 
+## Why Esure
+
+A realistic Stellar payment test spans account creation, Friendbot funding,
+trustline configuration, transaction submission, ledger confirmation, and
+balance verification. Rebuilding that flow manually makes failures difficult to
+reproduce and easy to misdiagnose. Esure packages the full process into
+versioned scenarios that can be executed repeatedly and inspected through one
+consistent report format.
+
+Esure is useful for:
+
+- payment and remittance teams validating integration assumptions;
+- wallet developers testing asset and trustline behavior;
+- educators demonstrating common Stellar transaction flows;
+- contributors reproducing protocol-level failures safely on Testnet; and
+- CI workflows that need deterministic validation without storing secret keys.
+
+## Included scenarios
+
+| Scenario | Purpose | Expected result |
+| --- | --- | --- |
+| `xlm-payment` | Fund two accounts, transfer 5 XLM, and verify the recipient balance change | Pass |
+| `issued-asset-payment` | Create a TESTUSD trustline, issue 100 TESTUSD, and verify the final balance | Pass |
+| `missing-trustline` | Attempt an issued-asset payment without a recipient trustline | Controlled `op_no_trust` failure |
+
+Each run generates fresh Testnet accounts, so repeated executions remain
+isolated from previous runs.
+
+## How a run works
+
+1. The dashboard requests the published scenario catalogue from the backend.
+2. The user selects a scenario and starts a run through the same-origin proxy.
+3. The backend validates the bounded scenario definition before generating any
+   accounts or making network requests.
+4. The runner creates isolated accounts, obtains Testnet funds, and executes
+   each declared operation in order.
+5. Assertions compare the observed transaction result or balance with the
+   scenario expectation.
+6. The frontend polls the run endpoint and renders progress, transaction links,
+   assertions, and sanitized failures.
+7. The final structured report is available from the report endpoint.
+
 ## Architecture
 
 ```text
@@ -133,6 +175,22 @@ npm run dev
 
 Open [http://localhost:3000](http://localhost:3000).
 
+### 5. Run a scenario from the API
+
+```bash
+curl -X POST http://127.0.0.1:3001/api/v1/runs \
+  -H "content-type: application/json" \
+  -d '{"scenarioId":"issued-asset-payment","inputs":{}}'
+```
+
+The response contains a run ID. Use it to retrieve progress and the final
+report:
+
+```bash
+curl http://127.0.0.1:3001/api/v1/runs/RUN_ID
+curl http://127.0.0.1:3001/api/v1/runs/RUN_ID/report
+```
+
 ## API overview
 
 | Method | Endpoint | Purpose |
@@ -148,6 +206,34 @@ Open [http://localhost:3000](http://localhost:3000).
 The complete contract is available from the deployed
 [OpenAPI document](https://esure.onrender.com/openapi.json) and the
 [API documentation](esure-docs/API.md).
+
+## Configuration reference
+
+### Frontend
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `ESURE_BACKEND_URL` | `http://127.0.0.1:3001` | Server-only backend origin used by the Next.js proxy |
+
+### Backend
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `HOST` | `127.0.0.1` | Bind address; use `0.0.0.0` on Render |
+| `PORT` | `3001` | HTTP port; Render supplies this automatically |
+| `LOG_LEVEL` | `info` | Fastify application log level |
+| `RUN_TIMEOUT_MS` | `120000` | Maximum duration of a complete run |
+| `STEP_TIMEOUT_MS` | `30000` | Maximum duration of one scenario step |
+| `MAX_CONCURRENT_RUNS` | `2` | Maximum simultaneous executions |
+| `MAX_STORED_RUNS` | `500` | Hard limit for retained in-memory runs |
+| `RUN_RETENTION_MS` | `3600000` | Retention time for terminal in-memory runs |
+| `RATE_LIMIT_MAX` | `120` | General request limit per rate-limit window |
+| `RUN_RATE_LIMIT_MAX` | `10` | Stricter run-creation limit per window |
+| `PERSISTENCE_MODE` | `disabled` | Use `published` only after configuring PostgreSQL |
+| `DATABASE_URL` | unset | Runtime application connection for published persistence |
+
+Review [`esure-backend/.env.example`](esure-backend/.env.example) for every
+supported setting and its safe default.
 
 ## Development and testing
 
@@ -183,6 +269,49 @@ roles. See the [persistence guide](esure-docs/PERSISTENCE.md) before enabling it
 Set `ESURE_BACKEND_URL` in Vercel to the public Render backend origin. Keep
 secrets and migration credentials in the hosting provider environment settings;
 never commit them to the repository.
+
+## Current MVP status
+
+| Area | Status |
+| --- | --- |
+| Declarative scenario validation | Implemented |
+| XLM and issued-asset Testnet execution | Implemented |
+| Expected-failure reporting | Implemented |
+| Dashboard and report rendering | Implemented |
+| Unit and API test suite | Implemented |
+| Monorepo CI | Implemented |
+| Published scenario PostgreSQL catalogue | Optional foundation implemented |
+| Persistent run execution and evidence | Planned |
+| Automated primary browser journey | Planned |
+
+Active work is tracked in [GitHub Issues](https://github.com/Esureorg/Esure/issues).
+
+## Troubleshooting
+
+### The deployed dashboard takes a long time to load
+
+The free Render backend can sleep after inactivity. Wait for the first request
+to wake the service, then retry. Check the
+[health endpoint](https://esure.onrender.com/health) if the delay continues.
+
+### The frontend cannot reach the backend
+
+Confirm that `ESURE_BACKEND_URL` contains the backend origin without a trailing
+API path, for example `https://esure.onrender.com`, and redeploy the frontend
+after changing a Vercel environment variable.
+
+### The backend fails readiness in published mode
+
+Published mode fails closed when `DATABASE_URL` is missing or migrations are
+stale. Apply the role bootstrap, migrations, and fixture reconciliation from the
+[persistence guide](esure-docs/PERSISTENCE.md), or return to
+`PERSISTENCE_MODE=disabled` while developing without PostgreSQL.
+
+### A live Testnet run fails during funding
+
+Friendbot and Horizon are external Testnet services and can be temporarily
+unavailable or rate limited. Inspect the sanitized run error, wait briefly, and
+retry with a new isolated run.
 
 ## Security
 
