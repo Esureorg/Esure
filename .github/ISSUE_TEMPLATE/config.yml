@@ -1,0 +1,9 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/esure-labs/.github/security/advisories/new
+    about: Report suspected vulnerabilities privately.
+  - name: Stellar developer documentation
+    url: https://developers.stellar.org
+    about: Check protocol and SDK documentation before reporting integration behavior.
+

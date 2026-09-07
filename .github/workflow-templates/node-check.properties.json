@@ -1,0 +1,7 @@
+{
+  "name": "Esure Node check",
+  "description": "Install dependencies and run the repository check command on Node.js 24.",
+  "iconName": "octicon check-circle",
+  "categories": ["JavaScript", "TypeScript"]
+}
+

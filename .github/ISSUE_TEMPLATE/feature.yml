@@ -1,0 +1,44 @@
+name: Feature proposal
+description: Propose a focused improvement to Esure
+title: "feat: "
+labels: ["type:feature", "status:needs-triage"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What developer problem should Esure solve?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe observable behavior, not only an implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Proposed scope
+      description: Include what should deliberately remain out of scope.
+    validations:
+      required: true
+  - type: dropdown
+    id: network
+    attributes:
+      label: Network impact
+      options:
+        - Testnet only
+        - No network interaction
+        - Soroban test fixture
+        - Mainnet (not eligible during MVP)
+    validations:
+      required: true
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Contribution
+      options:
+        - label: I am willing to implement this after maintainer approval and assignment.
+

@@ -1,0 +1,6 @@
+target/
+.stellar/
+*.wasm
+.env*
+!.env.example
+

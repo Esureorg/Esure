@@ -1,0 +1,60 @@
+name: Bug report
+description: Report reproducible incorrect behavior in Esure
+title: "bug: "
+labels: ["type:bug", "status:needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: Do not report security vulnerabilities here. Follow SECURITY.md.
+  - type: dropdown
+    id: repository
+    attributes:
+      label: Affected component
+      options:
+        - Frontend
+        - Backend
+        - Contracts
+        - Documentation
+        - Organization tooling
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Observed behavior
+      description: Explain what happened and include sanitized output when useful.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      placeholder: |
+        1. Start...
+        2. Request...
+        3. Observe...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: input
+    id: revision
+    attributes:
+      label: Version or commit
+      placeholder: v0.1.0 or commit SHA
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed secret keys, credentials, and personal information.
+          required: true
+        - label: This is not a private security vulnerability.
+          required: true
+
