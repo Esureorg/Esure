@@ -9,3 +9,10 @@ coverage/
 .vercel/
 .DS_Store
 Thumbs.db
+test-results/
+playwright-report/
+blob-report/
+AGENTS.md
+CLAUDE.md
+
+
