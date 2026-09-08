@@ -14,15 +14,26 @@ export function Dashboard() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    let active = true;
     const controller = new AbortController();
     listScenarios(controller.signal)
       .then((items) => {
+        if (!active) return;
         setScenarios(items);
         setSelectedId(items[0]?.id ?? "");
       })
-      .catch((reason: unknown) => setError(readError(reason)))
-      .finally(() => setLoading(false));
-    return () => controller.abort();
+      .catch((reason: unknown) => {
+        if (!active) return;
+        if (reason instanceof DOMException && reason.name === "AbortError") return;
+        setError(readError(reason));
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
   }, []);
 
   useEffect(() => {
