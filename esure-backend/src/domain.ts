@@ -111,6 +111,14 @@ export interface LedgerExecution {
   assertions: AssertionResult[];
 }
 
+export interface FriendbotRetryConfig {
+  maxAttempts?: number;
+  baseDelayMs?: number;
+  maxDelayMs?: number;
+  factor?: number;
+  random?: () => number;
+}
+
 export interface LedgerGateway {
   execute(scenario: ValidatedScenario, options?: LedgerExecutionOptions): Promise<LedgerExecution>;
 }
@@ -120,4 +128,6 @@ export interface LedgerExecutionOptions {
   stepTimeoutMs?: number;
   onStep?: (step: StepResult) => void;
   onAssertion?: (assertion: AssertionResult) => void;
+  friendbotRetry?: FriendbotRetryConfig;
 }
+
