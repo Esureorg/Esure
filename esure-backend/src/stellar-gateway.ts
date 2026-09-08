@@ -9,6 +9,7 @@ import {
 } from "@stellar/stellar-sdk";
 import type {
   AssertionResult,
+  FriendbotRetryConfig,
   LedgerExecution,
   LedgerExecutionOptions,
   LedgerGateway,
@@ -20,6 +21,60 @@ import type {
 } from "./domain.js";
 import { SafeRunError, StepTimeoutError, withTimeout } from "./errors.js";
 
+export type { FriendbotRetryConfig };
+
+export interface StellarGatewayOptions {
+  friendbotRetry?: FriendbotRetryConfig;
+  fetch?: typeof fetch;
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
+}
+
+export const DEFAULT_FRIENDBOT_RETRY_CONFIG = {
+  maxAttempts: 3,
+  baseDelayMs: 1_000,
+  maxDelayMs: 4_000,
+  factor: 2,
+} as const;
+
+export function calculateRetryDelay(
+  attempt: number,
+  config: FriendbotRetryConfig = {},
+): number {
+  const baseDelayMs = config.baseDelayMs ?? DEFAULT_FRIENDBOT_RETRY_CONFIG.baseDelayMs;
+  const maxDelayMs = config.maxDelayMs ?? DEFAULT_FRIENDBOT_RETRY_CONFIG.maxDelayMs;
+  const factor = config.factor ?? DEFAULT_FRIENDBOT_RETRY_CONFIG.factor;
+  const random = config.random ?? Math.random;
+
+  const exponential = baseDelayMs * Math.pow(factor, Math.max(0, attempt - 1));
+  const bounded = Math.min(maxDelayMs, exponential);
+  return Math.floor(random() * bounded);
+}
+
+export function signalSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason ?? new Error("The operation was aborted."));
+      return;
+    }
+    let timer: NodeJS.Timeout | undefined;
+    const onAbort = () => {
+      if (timer !== undefined) clearTimeout(timer);
+      cleanup();
+      reject(signal?.reason ?? new Error("The operation was aborted."));
+    };
+    const cleanup = () => {
+      signal?.removeEventListener("abort", onAbort);
+    };
+    if (signal) {
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+    timer = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, ms);
+  });
+}
+
 interface StepOutcome {
   result: StepResult;
   transactionCode?: string;
@@ -29,9 +84,15 @@ interface StepOutcome {
 
 export class StellarTestnetGateway implements LedgerGateway {
   readonly #server: Horizon.Server;
+  readonly #options: StellarGatewayOptions;
 
-  constructor(horizonUrl: string, private readonly friendbotUrl: string) {
+  constructor(
+    horizonUrl: string,
+    private readonly friendbotUrl: string,
+    options: StellarGatewayOptions = {},
+  ) {
     this.#server = new Horizon.Server(horizonUrl);
+    this.#options = options;
   }
 
   async execute(scenario: ValidatedScenario, options: LedgerExecutionOptions = {}): Promise<LedgerExecution> {
@@ -44,7 +105,7 @@ export class StellarTestnetGateway implements LedgerGateway {
     const funded = scenario.accounts.filter((account) => account.fund);
     if (funded.length) {
       await this.performRequiredStep("fund-accounts", "fundAccounts", options, steps, async (signal) => {
-        await Promise.all(funded.map((account) => this.fund(required(accounts, account.id), signal)));
+        await Promise.all(funded.map((account) => this.fund(required(accounts, account.id), signal, options.friendbotRetry)));
         return basicStep("fund-accounts", "fundAccounts", "Test accounts funded.");
       });
     }
@@ -166,17 +227,75 @@ export class StellarTestnetGateway implements LedgerGateway {
     }
   }
 
-  private async fund(keypair: Keypair, signal: AbortSignal): Promise<void> {
+  async fundAccount(
+    publicKey: string,
+    signal?: AbortSignal,
+    retryOverrides?: FriendbotRetryConfig,
+  ): Promise<void> {
     const url = new URL(this.friendbotUrl);
-    url.searchParams.set("addr", keypair.publicKey());
-    let response: Response;
-    try { response = await fetch(url, { signal }); }
-    catch (error) {
-      if (signal.aborted) throw error;
-      throw new SafeRunError({ code: "FRIENDBOT_UNAVAILABLE", message: "Friendbot could not be reached.", category: "network", retryable: true, failedStepId: "fund-accounts" });
+    url.searchParams.set("addr", publicKey);
+
+    const retryConfig = {
+      maxAttempts: Math.max(1, retryOverrides?.maxAttempts ?? this.#options.friendbotRetry?.maxAttempts ?? DEFAULT_FRIENDBOT_RETRY_CONFIG.maxAttempts),
+      baseDelayMs: retryOverrides?.baseDelayMs ?? this.#options.friendbotRetry?.baseDelayMs ?? DEFAULT_FRIENDBOT_RETRY_CONFIG.baseDelayMs,
+      maxDelayMs: retryOverrides?.maxDelayMs ?? this.#options.friendbotRetry?.maxDelayMs ?? DEFAULT_FRIENDBOT_RETRY_CONFIG.maxDelayMs,
+      factor: retryOverrides?.factor ?? this.#options.friendbotRetry?.factor ?? DEFAULT_FRIENDBOT_RETRY_CONFIG.factor,
+      random: retryOverrides?.random ?? this.#options.friendbotRetry?.random ?? Math.random,
+    };
+
+    const fetchFn = this.#options.fetch ?? fetch;
+    const sleepFn = this.#options.sleep ?? signalSleep;
+
+    let attempt = 0;
+    while (attempt < retryConfig.maxAttempts) {
+      if (signal?.aborted) {
+        throw signal.reason ?? new Error("The operation was aborted.");
+      }
+      attempt += 1;
+
+      let response: Response;
+      try {
+        response = await fetchFn(url, { ...(signal && { signal }) });
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        if (attempt >= retryConfig.maxAttempts) {
+          throw new SafeRunError({
+            code: "FRIENDBOT_UNAVAILABLE",
+            message: "Friendbot could not be reached.",
+            category: "network",
+            retryable: true,
+            failedStepId: "fund-accounts",
+          });
+        }
+        const delay = calculateRetryDelay(attempt, retryConfig);
+        await sleepFn(delay, signal);
+        continue;
+      }
+
+      if (response.ok) {
+        return;
+      }
+
+      const isRetryable = response.status === 429 || response.status >= 500;
+      if (!isRetryable || attempt >= retryConfig.maxAttempts) {
+        throw new SafeRunError({
+          code: "FRIENDBOT_UNAVAILABLE",
+          message: `Friendbot rejected the funding request with HTTP ${response.status}.`,
+          category: "network",
+          retryable: isRetryable,
+          failedStepId: "fund-accounts",
+        });
+      }
+
+      const delay = calculateRetryDelay(attempt, retryConfig);
+      await sleepFn(delay, signal);
     }
-    if (!response.ok) throw new SafeRunError({ code: "FRIENDBOT_UNAVAILABLE", message: `Friendbot rejected the funding request with HTTP ${response.status}.`, category: "network", retryable: response.status === 429 || response.status >= 500, failedStepId: "fund-accounts" });
   }
+
+  private async fund(keypair: Keypair, signal: AbortSignal, retryOverrides?: FriendbotRetryConfig): Promise<void> {
+    return this.fundAccount(keypair.publicKey(), signal, retryOverrides);
+  }
+
 
   private async submit(source: Keypair, operations: Array<ReturnType<typeof Operation.payment> | ReturnType<typeof Operation.changeTrust>>) {
     const account = await this.#server.loadAccount(source.publicKey());
