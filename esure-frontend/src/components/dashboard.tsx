@@ -150,10 +150,20 @@ export function Dashboard() {
 
 function RunView({ run }: { run: RunReport }) {
   const pending = !terminalStatuses.has(run.status);
+  const createdLabel = formatLocaleDateTime(run.createdAt);
+  const completedLabel = run.completedAt ? formatLocaleDateTime(run.completedAt) : null;
+  const durationLabel = run.completedAt ? computeDuration(run.createdAt, run.completedAt) : null;
+
   return (
     <div className="report-grid">
       <div className="timeline-card">
-        <div className="report-meta"><span>RUN ID</span><div className="id-cell"><code>{run.id}</code><CopyButton value={run.id} label="run ID" /></div><span>NETWORK</span><code>{run.network}</code></div>
+        <div className="report-meta">
+          <span>RUN ID</span><div className="id-cell"><code>{run.id}</code><CopyButton value={run.id} label="run ID" /></div>
+          <span>NETWORK</span><code>{run.network}</code>
+          <span>CREATED</span><code title={run.createdAt}>{createdLabel}</code>
+          {completedLabel ? <><span>COMPLETED</span><code title={run.completedAt}>{completedLabel}</code></> : null}
+          {durationLabel ? <><span>DURATION</span><code>{durationLabel}</code></> : null}
+        </div>
         {pending && <div className="running-row"><span className="spinner" /><div><strong>{titleCase(run.status)}</strong><span>Esure is executing this flow on Stellar Testnet.</span></div></div>}
         {run.steps.map((step, index) => (
           <div className="timeline-row" key={step.id}>
@@ -228,3 +238,25 @@ function readError(reason: unknown): string {
 
 function humanize(value: string): string { return value.split("-").map(titleCase).join(" "); }
 function titleCase(value: string): string { return value.charAt(0).toUpperCase() + value.slice(1); }
+
+function formatLocaleDateTime(iso: string): string {
+  try {
+    return new Intl.DateTimeFormat(undefined, {
+      dateStyle: "medium",
+      timeStyle: "short",
+    }).format(new Date(iso));
+  } catch {
+    return iso;
+  }
+}
+
+function computeDuration(startIso: string, endIso: string): string {
+  const start = new Date(startIso).getTime();
+  const end = new Date(endIso).getTime();
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return "";
+  const seconds = Math.max(0, Math.round((end - start) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  return `${minutes}m ${remainingSeconds}s`;
+}

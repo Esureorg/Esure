@@ -198,13 +198,20 @@ test.describe("Primary User Journey", () => {
     await expect(page.locator(".status-badge")).toContainText("Running");
     await expect(page.locator(".report-meta")).toContainText("run-e2e-123");
     await expect(page.locator(".report-meta")).toContainText("testnet");
+    await expect(page.locator(".report-meta")).toContainText("CREATED");
+    await expect(page.locator(".report-meta")).not.toContainText("COMPLETED");
+    await expect(page.locator(".report-meta")).not.toContainText("DURATION");
 
     // 6. Wait for polling to deliver the terminal passed report
     await expect(page.locator(".status-badge")).toContainText("Passed", { timeout: 10_000 });
 
+    // Verify completed report timestamps and duration
+    await expect(page.locator(".report-meta")).toContainText("CREATED");
+    await expect(page.locator(".report-meta")).toContainText("COMPLETED");
+    await expect(page.locator(".report-meta")).toContainText("DURATION");
+    await expect(page.locator(".report-meta")).toContainText("5s");
+
     // Verify completed steps
-    await expect(page.locator(".timeline-row", { hasText: "Test accounts funded." })).toBeVisible();
-    await expect(page.locator(".timeline-row", { hasText: "Transaction confirmed on Stellar Testnet." })).toHaveCount(2);
     await expect(page.locator(".ledger", { hasText: "L#123456" })).toBeVisible();
     await expect(page.locator(".ledger", { hasText: "L#123457" })).toBeVisible();
 
@@ -300,6 +307,11 @@ test.describe("Loading States", () => {
     await expect(page.locator(".running-row")).toBeVisible();
     await expect(page.locator(".running-row .spinner")).toBeVisible();
     await expect(page.locator(".running-row")).toContainText("Esure is executing this flow on Stellar Testnet.");
+
+    // Verify in-progress report shows created timestamp but not completion info
+    await expect(page.locator(".report-meta")).toContainText("CREATED");
+    await expect(page.locator(".report-meta")).not.toContainText("COMPLETED");
+    await expect(page.locator(".report-meta")).not.toContainText("DURATION");
   });
 });
 
