@@ -172,3 +172,13 @@ footer { border-top:1px solid var(--line); min-height:80px; display:flex; justif
   .section-heading { flex-direction:column; }
 }
 @media (prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}
+
+.scenario-filters { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:20px; }
+.filter-pill { padding:8px 16px; background:transparent; border:1px solid var(--line); border-radius:99px; font:600 12px var(--font-mono); color:var(--muted); cursor:pointer; transition:all .15s ease; text-transform:uppercase; letter-spacing:.05em; }
+.filter-pill:hover { border-color:var(--deep); color:var(--ink); }
+.filter-pill.active { background:var(--deep); border-color:var(--deep); color:var(--paper); }
+.filter-pill:focus-visible { outline:2px solid var(--deep); outline-offset:2px; }
+.empty-scenarios { grid-column:1 / -1; min-height:200px; border:1px dashed var(--line); border-radius:3px; display:flex; flex-direction:column; justify-content:center; align-items:center; text-align:center; padding:30px; background:#f8f6f0; }
+.empty-scenarios strong { font-size:18px; color:var(--ink); margin-bottom:6px; }
+.empty-scenarios p { margin:0; color:var(--muted); font-size:14px; }
+

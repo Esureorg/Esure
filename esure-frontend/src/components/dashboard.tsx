@@ -5,8 +5,27 @@ import { ApiError, getRun, listScenarios, startRun, type RunReport, type Scenari
 
 const terminalStatuses = new Set(["passed", "failed"]);
 
+export type ScenarioFilter = "all" | "xlm" | "issued-asset" | "expected-failure";
+
+export const FILTER_OPTIONS: { key: ScenarioFilter; label: string }[] = [
+  { key: "all", label: "All" },
+  { key: "xlm", label: "XLM" },
+  { key: "issued-asset", label: "Issued Asset" },
+  { key: "expected-failure", label: "Expected Failure" },
+];
+
+export function filterScenario(scenario: ScenarioSummary, filter: ScenarioFilter): boolean {
+  if (filter === "all") return true;
+  const text = `${scenario.id} ${scenario.name} ${scenario.description}`.toLowerCase();
+  if (filter === "xlm") return text.includes("xlm");
+  if (filter === "issued-asset") return text.includes("issued") || text.includes("testusd") || scenario.id === "issued-asset-payment";
+  if (filter === "expected-failure") return text.includes("fail") || text.includes("missing-trustline") || scenario.id === "missing-trustline";
+  return true;
+}
+
 export function Dashboard() {
   const [scenarios, setScenarios] = useState<ScenarioSummary[]>([]);
+  const [filter, setFilter] = useState<ScenarioFilter>("all");
   const [selectedId, setSelectedId] = useState<string>("");
   const [run, setRun] = useState<RunReport | null>(null);
   const [loading, setLoading] = useState(true);
@@ -35,6 +54,20 @@ export function Dashboard() {
       controller.abort();
     };
   }, []);
+
+  const filteredScenarios = useMemo(() => {
+    return scenarios.filter((s) => filterScenario(s, filter));
+  }, [scenarios, filter]);
+
+  useEffect(() => {
+    if (filteredScenarios.length > 0) {
+      if (!filteredScenarios.some((s) => s.id === selectedId)) {
+        setSelectedId(filteredScenarios[0].id);
+      }
+    } else {
+      setSelectedId("");
+    }
+  }, [filteredScenarios, selectedId]);
 
   useEffect(() => {
     if (!run || terminalStatuses.has(run.status)) return;
@@ -105,26 +138,51 @@ export function Dashboard() {
       <section className="workspace shell">
         <div className="section-heading">
           <div><p className="eyebrow">01 / CHOOSE A FLOW</p><h2>Test scenarios</h2></div>
-          <span className="scenario-count">{scenarios.length.toString().padStart(2, "0")} AVAILABLE</span>
+          <span className="scenario-count">{filteredScenarios.length.toString().padStart(2, "0")} AVAILABLE</span>
+        </div>
+
+        <div className="scenario-filters" role="tablist" aria-label="Scenario filter options">
+          {FILTER_OPTIONS.map((option) => (
+            <button
+              key={option.key}
+              type="button"
+              role="tab"
+              aria-selected={filter === option.key}
+              aria-controls="scenario-grid"
+              className={`filter-pill ${filter === option.key ? "active" : ""}`}
+              onClick={() => setFilter(option.key)}
+            >
+              {option.label}
+            </button>
+          ))}
         </div>
 
         {error && <div className="error-banner" role="alert"><WarningIcon /><div><strong>Couldn&apos;t complete the request</strong><span>{error}</span></div></div>}
 
-        <div className="scenario-grid" aria-busy={loading}>
-          {loading ? [1, 2, 3].map((item) => <div className="scenario-card skeleton" key={item} />) : scenarios.map((scenario, index) => (
-            <button
-              type="button"
-              className={`scenario-card ${selectedId === scenario.id ? "selected" : ""}`}
-              key={scenario.id}
-              onClick={() => setSelectedId(scenario.id)}
-            >
-              <span className="card-index">0{index + 1}</span>
-              <ScenarioIcon kind={scenario.id} />
-              <span className="scenario-name">{scenario.name}</span>
-              <span className="scenario-description">{scenario.description}</span>
-              <span className="version">V{scenario.version}</span>
-            </button>
-          ))}
+        <div className="scenario-grid" id="scenario-grid" aria-busy={loading}>
+          {loading ? (
+            [1, 2, 3].map((item) => <div className="scenario-card skeleton" key={item} />)
+          ) : filteredScenarios.length === 0 ? (
+            <div className="empty-scenarios" role="status" aria-live="polite">
+              <strong>No scenarios found</strong>
+              <p>No scenarios match the selected filter (&quot;{FILTER_OPTIONS.find((o) => o.key === filter)?.label}&quot;).</p>
+            </div>
+          ) : (
+            filteredScenarios.map((scenario, index) => (
+              <button
+                type="button"
+                className={`scenario-card ${selectedId === scenario.id ? "selected" : ""}`}
+                key={scenario.id}
+                onClick={() => setSelectedId(scenario.id)}
+              >
+                <span className="card-index">0{index + 1}</span>
+                <ScenarioIcon kind={scenario.id} />
+                <span className="scenario-name">{scenario.name}</span>
+                <span className="scenario-description">{scenario.description}</span>
+                <span className="version">V{scenario.version}</span>
+              </button>
+            ))
+          )}
         </div>
 
         <div className="launch-panel">
