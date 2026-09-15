@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { ApiError, getRun, listScenarios, startRun, type RunReport, type ScenarioSummary } from "@/lib/api";
 
 const terminalStatuses = new Set(["passed", "failed"]);
@@ -31,29 +31,38 @@ export function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [catalogueError, setCatalogueError] = useState<string | null>(null);
 
-  useEffect(() => {
+  const loadScenarios = useCallback(() => {
     let active = true;
     const controller = new AbortController();
+    
+    setLoading(true);
+    setCatalogueError(null);
+    
     listScenarios(controller.signal)
       .then((items) => {
         if (!active) return;
         setScenarios(items);
-        setSelectedId(items[0]?.id ?? "");
       })
       .catch((reason: unknown) => {
         if (!active) return;
         if (reason instanceof DOMException && reason.name === "AbortError") return;
-        setError(readError(reason));
+        setCatalogueError(readError(reason));
       })
       .finally(() => {
         if (active) setLoading(false);
       });
+      
     return () => {
       active = false;
       controller.abort();
     };
   }, []);
+
+  useEffect(() => {
+    return loadScenarios();
+  }, [loadScenarios]);
 
   const filteredScenarios = useMemo(() => {
     return scenarios.filter((s) => filterScenario(s, filter));
@@ -162,6 +171,12 @@ export function Dashboard() {
         <div className="scenario-grid" id="scenario-grid" aria-busy={loading}>
           {loading ? (
             [1, 2, 3].map((item) => <div className="scenario-card skeleton" key={item} />)
+          ) : catalogueError ? (
+            <div className="empty-scenarios" role="alert" aria-live="polite">
+              <strong>Couldn&apos;t load scenarios</strong>
+              <p>{catalogueError}</p>
+              <button type="button" className="run-button run-button--secondary" style={{ marginTop: '16px', minWidth: 'auto', padding: '10px 16px' }} onClick={loadScenarios}>Retry</button>
+            </div>
           ) : filteredScenarios.length === 0 ? (
             <div className="empty-scenarios" role="status" aria-live="polite">
               <strong>No scenarios found</strong>

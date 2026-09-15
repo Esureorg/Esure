@@ -11,7 +11,7 @@ export default defineConfig({
     environment: "jsdom",
     include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
     exclude: ["**/node_modules/**", "**/dist/**", "**/e2e/**"],
-    environment: "jsdom",
+    pool: "forks",
     setupFiles: ["./vitest.setup.ts"],
   },
 });
