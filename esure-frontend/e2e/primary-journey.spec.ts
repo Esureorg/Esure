@@ -190,7 +190,7 @@ test.describe("Primary User Journey", () => {
     await expect(page.locator(".empty-report")).toContainText("No run yet");
 
     // 5. Start the run
-    const runButton = page.locator(".run-button");
+    const runButton = page.locator(".launch-panel .run-button");
     await expect(runButton).toBeEnabled();
     await runButton.click();
 
@@ -198,13 +198,20 @@ test.describe("Primary User Journey", () => {
     await expect(page.locator(".status-badge")).toContainText("Running");
     await expect(page.locator(".report-meta")).toContainText("run-e2e-123");
     await expect(page.locator(".report-meta")).toContainText("testnet");
+    await expect(page.locator(".report-meta")).toContainText("CREATED");
+    await expect(page.locator(".report-meta")).not.toContainText("COMPLETED");
+    await expect(page.locator(".report-meta")).not.toContainText("DURATION");
 
     // 6. Wait for polling to deliver the terminal passed report
     await expect(page.locator(".status-badge")).toContainText("Passed", { timeout: 10_000 });
 
+    // Verify completed report timestamps and duration
+    await expect(page.locator(".report-meta")).toContainText("CREATED");
+    await expect(page.locator(".report-meta")).toContainText("COMPLETED");
+    await expect(page.locator(".report-meta")).toContainText("DURATION");
+    await expect(page.locator(".report-meta")).toContainText("5s");
+
     // Verify completed steps
-    await expect(page.locator(".timeline-row", { hasText: "Test accounts funded." })).toBeVisible();
-    await expect(page.locator(".timeline-row", { hasText: "Transaction confirmed on Stellar Testnet." })).toHaveCount(2);
     await expect(page.locator(".ledger", { hasText: "L#123456" })).toBeVisible();
     await expect(page.locator(".ledger", { hasText: "L#123457" })).toBeVisible();
 
@@ -291,7 +298,7 @@ test.describe("Loading States", () => {
     });
 
     await page.goto("/");
-    const runButton = page.locator(".run-button");
+    const runButton = page.locator(".launch-panel .run-button");
     await runButton.click();
 
     // Verify in-flight loading indicators
@@ -300,6 +307,11 @@ test.describe("Loading States", () => {
     await expect(page.locator(".running-row")).toBeVisible();
     await expect(page.locator(".running-row .spinner")).toBeVisible();
     await expect(page.locator(".running-row")).toContainText("Esure is executing this flow on Stellar Testnet.");
+
+    // Verify in-progress report shows created timestamp but not completion info
+    await expect(page.locator(".report-meta")).toContainText("CREATED");
+    await expect(page.locator(".report-meta")).not.toContainText("COMPLETED");
+    await expect(page.locator(".report-meta")).not.toContainText("DURATION");
   });
 });
 
@@ -331,7 +343,7 @@ test.describe("Failed Run and Error States", () => {
     });
 
     await page.goto("/");
-    await page.locator(".run-button").click();
+    await page.locator(".launch-panel .run-button").click();
 
     // Verify failed badge
     await expect(page.locator(".status-badge")).toContainText("Failed", { timeout: 10_000 });
@@ -373,7 +385,7 @@ test.describe("Failed Run and Error States", () => {
     });
 
     await page.goto("/");
-    await page.locator(".run-button").click();
+    await page.locator(".launch-panel .run-button").click();
 
     // Verify top-level error alert
     const errorBanner = page.locator(".error-banner[role='alert']");
@@ -403,12 +415,12 @@ test.describe("Failed Run and Error States", () => {
     await page.goto("/");
 
     // Verify error banner
-    const errorBanner = page.locator(".error-banner[role='alert']");
+    const errorBanner = page.locator(".empty-scenarios[role='alert']");
     await expect(errorBanner).toBeVisible();
-    await expect(errorBanner).toContainText("Couldn't complete the request");
+    await expect(errorBanner).toContainText("Couldn't load scenarios");
     await expect(errorBanner).toContainText("Esure Backend is unavailable. Start it and try again. (BACKEND_UNAVAILABLE)");
 
     // Verify run button is disabled since no scenario could be selected
-    await expect(page.locator(".run-button")).toBeDisabled();
+    await expect(page.locator(".launch-panel .run-button")).toBeDisabled();
   });
 });

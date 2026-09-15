@@ -1,9 +1,10 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, fireEvent } from "@testing-library/react";
-import { Dashboard } from "./dashboard";
-import { getRun, listScenarios, startRun, type RunReport } from "../lib/api";
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react";
+import { Dashboard, filterScenario } from "./dashboard";
+import * as api from "@/lib/api";
+import { type RunReport } from "@/lib/api";
 
-// Mock next/navigation
+// --- URL Restoration Mocks ---
 const mockPush = vi.fn();
 const mockReplace = vi.fn();
 let mockSearchParams = new URLSearchParams();
@@ -13,34 +14,31 @@ vi.mock("next/navigation", () => ({
   usePathname: () => "/dashboard",
   useSearchParams: () => mockSearchParams,
 }));
+// -----------------------------
 
-// Mock API
-vi.mock("../lib/api", () => ({
-  getRun: vi.fn(),
-  listScenarios: vi.fn(),
-  startRun: vi.fn(),
-  ApiError: class ApiError extends Error {
-    code: string;
-    constructor(message: string, code: string) {
-      super(message);
-      this.code = code;
-    }
+const mockScenarios: api.ScenarioSummary[] = [
+  {
+    id: "xlm-payment",
+    version: 1,
+    name: "XLM payment",
+    description: "Fund two Testnet accounts, send XLM, and verify the recipient balance.",
+    contentHash: "hash1",
   },
-}));
-
-const mockScenario = {
-  id: "test-scenario",
-  name: "Test Scenario",
-  description: "A test scenario",
-  version: 1,
-  schemaVersion: 1,
-  contentHash: "hash",
-  network: "testnet",
-  accounts: [],
-  assets: [],
-  steps: [],
-  assertions: [],
-};
+  {
+    id: "issued-asset-payment",
+    version: 1,
+    name: "Issued asset payment",
+    description: "Issue TESTUSD and send it to a recipient through a trustline.",
+    contentHash: "hash2",
+  },
+  {
+    id: "missing-trustline",
+    version: 1,
+    name: "Missing trustline",
+    description: "Verify that an asset payment fails when the recipient has no trustline.",
+    contentHash: "hash3",
+  },
+];
 
 const mockRun: RunReport = {
   id: "run-123",
@@ -56,20 +54,215 @@ const mockRun: RunReport = {
   summary: { stepsPassed: 0, stepsFailed: 0, assertionsPassed: 0, assertionsFailed: 0 },
 };
 
+describe("filterScenario helper", () => {
+  it("includes all scenarios when filter is 'all'", () => {
+    mockScenarios.forEach((scenario) => {
+      expect(filterScenario(scenario, "all")).toBe(true);
+    });
+  });
+
+  it("filters XLM scenarios correctly", () => {
+    expect(filterScenario(mockScenarios[0], "xlm")).toBe(true);
+    expect(filterScenario(mockScenarios[1], "xlm")).toBe(false);
+    expect(filterScenario(mockScenarios[2], "xlm")).toBe(false);
+  });
+
+  it("filters Issued Asset scenarios correctly", () => {
+    expect(filterScenario(mockScenarios[0], "issued-asset")).toBe(false);
+    expect(filterScenario(mockScenarios[1], "issued-asset")).toBe(true);
+    expect(filterScenario(mockScenarios[2], "issued-asset")).toBe(false);
+  });
+
+  it("filters Expected Failure scenarios correctly", () => {
+    expect(filterScenario(mockScenarios[0], "expected-failure")).toBe(false);
+    expect(filterScenario(mockScenarios[1], "expected-failure")).toBe(false);
+    expect(filterScenario(mockScenarios[2], "expected-failure")).toBe(true);
+  });
+});
+
+describe("Dashboard component scenario filtering", () => {
+  beforeEach(() => {
+    vi.spyOn(api, "listScenarios").mockResolvedValue(mockScenarios);
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+
+  it("renders all scenarios by default with 'All' filter active", async () => {
+    render(<Dashboard />);
+    await waitFor(() => {
+      expect(screen.getByText("03 AVAILABLE")).toBeDefined();
+    });
+
+    const allTab = screen.getByRole("tab", { name: "All" });
+    expect(allTab.getAttribute("aria-selected")).toBe("true");
+
+    expect(screen.getAllByText("XLM payment").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Issued asset payment").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Missing trustline").length).toBeGreaterThan(0);
+  });
+
+  it("filters scenarios when clicking 'XLM'", async () => {
+    render(<Dashboard />);
+    await waitFor(() => {
+      expect(screen.getByText("03 AVAILABLE")).toBeDefined();
+    });
+
+    const xlmTab = screen.getByRole("tab", { name: "XLM" });
+    fireEvent.click(xlmTab);
+
+    expect(xlmTab.getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByText("01 AVAILABLE")).toBeDefined();
+    expect(screen.getAllByText("XLM payment").length).toBeGreaterThan(0);
+    expect(screen.queryByText("Issued asset payment")).toBeNull();
+    expect(screen.queryByText("Missing trustline")).toBeNull();
+  });
+
+  it("filters scenarios when clicking 'Issued Asset'", async () => {
+    render(<Dashboard />);
+    await waitFor(() => {
+      expect(screen.getByText("03 AVAILABLE")).toBeDefined();
+    });
+
+    const issuedTab = screen.getByRole("tab", { name: "Issued Asset" });
+    fireEvent.click(issuedTab);
+
+    expect(issuedTab.getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByText("01 AVAILABLE")).toBeDefined();
+    expect(screen.queryByText("XLM payment")).toBeNull();
+    expect(screen.getAllByText("Issued asset payment").length).toBeGreaterThan(0);
+    expect(screen.queryByText("Missing trustline")).toBeNull();
+  });
+
+  it("filters scenarios when clicking 'Expected Failure'", async () => {
+    render(<Dashboard />);
+    await waitFor(() => {
+      expect(screen.getByText("03 AVAILABLE")).toBeDefined();
+    });
+
+    const failureTab = screen.getByRole("tab", { name: "Expected Failure" });
+    fireEvent.click(failureTab);
+
+    expect(failureTab.getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByText("01 AVAILABLE")).toBeDefined();
+    expect(screen.queryByText("XLM payment")).toBeNull();
+    expect(screen.queryByText("Issued asset payment")).toBeNull();
+    expect(screen.getAllByText("Missing trustline").length).toBeGreaterThan(0);
+  });
+
+  it("displays empty results message when no scenarios match filter", async () => {
+    vi.spyOn(api, "listScenarios").mockResolvedValue([mockScenarios[0]]); // Only XLM scenario
+
+    render(<Dashboard />);
+    await waitFor(() => {
+      expect(screen.getByText("01 AVAILABLE")).toBeDefined();
+    });
+
+    const failureTab = screen.getByRole("tab", { name: "Expected Failure" });
+    fireEvent.click(failureTab);
+
+    expect(screen.getByText("00 AVAILABLE")).toBeDefined();
+    expect(screen.getByText("No scenarios found")).toBeDefined();
+    expect(screen.getByRole("status")).toBeDefined();
+  });
+});
+
+describe("Dashboard component catalogue loading and retry", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+  it("handles initial failure and repeated failure", async () => {
+    const listScenariosMock = vi.spyOn(api, "listScenarios").mockRejectedValue(new Error("Network Error"));
+
+    render(<Dashboard />);
+    
+    // Wait for the failure to render
+    await waitFor(() => {
+      expect(screen.getByText("Couldn't load scenarios")).toBeDefined();
+    });
+    expect(screen.getByText("Network Error")).toBeDefined();
+    
+    const retryButton = screen.getByRole("button", { name: "Retry" });
+    
+    // Repeated failure
+    listScenariosMock.mockRejectedValueOnce(new Error("Still Failed"));
+    fireEvent.click(retryButton);
+    
+    await waitFor(() => {
+      expect(screen.getByText("Still Failed")).toBeDefined();
+    });
+  });
+
+  it("handles successful retry after failure", async () => {
+    const listScenariosMock = vi.spyOn(api, "listScenarios").mockRejectedValueOnce(new Error("Network Error"));
+    
+    render(<Dashboard />);
+    
+    await waitFor(() => {
+      expect(screen.getByText("Couldn't load scenarios")).toBeDefined();
+    });
+    
+    // Setup for success
+    listScenariosMock.mockResolvedValueOnce(mockScenarios);
+    
+    const retryButton = screen.getByRole("button", { name: "Retry" });
+    fireEvent.click(retryButton);
+    
+    // Should clear error and show scenarios
+    await waitFor(() => {
+      expect(screen.queryByText("Couldn't load scenarios")).toBeNull();
+      expect(screen.getAllByText("XLM payment").length).toBeGreaterThan(0);
+    });
+  });
+
+  it("displays distinct empty success state", async () => {
+    vi.spyOn(api, "listScenarios").mockResolvedValue([]);
+    
+    render(<Dashboard />);
+    
+    await waitFor(() => {
+      expect(screen.getByText("No scenarios found")).toBeDefined();
+      expect(screen.getByText("No scenarios match the selected filter (\"All\").")).toBeDefined();
+      expect(screen.queryByText("Couldn't load scenarios")).toBeNull();
+    });
+  });
+
+  it("aborts requests on unmount", () => {
+    const abortSpy = vi.spyOn(AbortController.prototype, "abort");
+    const { unmount } = render(<Dashboard />);
+    unmount();
+    expect(abortSpy).toHaveBeenCalled();
+  });
+});
+
 describe("Dashboard URL Restoration", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.restoreAllMocks();
     mockSearchParams = new URLSearchParams();
-    vi.mocked(listScenarios).mockResolvedValue([mockScenario]);
+    vi.spyOn(api, "listScenarios").mockResolvedValue([mockScenarios[0]]);
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
   });
 
   it("updates URL with runId without reloading when startRun is called", async () => {
-    vi.mocked(startRun).mockResolvedValue(mockRun);
+    const startRunMock = vi.spyOn(api, "startRun").mockResolvedValue(mockRun);
     
     render(<Dashboard />);
     
     // Wait for scenarios to load
-    const elements = await screen.findAllByText("Test Scenario");
+    const elements = await screen.findAllByText("XLM payment");
     
     // Click scenario to select it
     fireEvent.click(elements[0]);
@@ -79,7 +272,7 @@ describe("Dashboard URL Restoration", () => {
     fireEvent.click(runButton);
     
     await waitFor(() => {
-      expect(startRun).toHaveBeenCalledWith("test-scenario");
+      expect(startRunMock).toHaveBeenCalledWith("xlm-payment");
     });
     
     expect(mockReplace).toHaveBeenCalledWith("/dashboard?runId=run-123", { scroll: false });
@@ -87,7 +280,8 @@ describe("Dashboard URL Restoration", () => {
 
   it("restores run when runId is in URL", async () => {
     mockSearchParams = new URLSearchParams("?runId=run-456");
-    vi.mocked(getRun).mockResolvedValue({ ...mockRun, id: "run-456" });
+    const getRunMock = vi.spyOn(api, "getRun").mockResolvedValue({ ...mockRun, id: "run-456" });
+    const startRunMock = vi.spyOn(api, "startRun");
     
     render(<Dashboard />);
     
@@ -95,16 +289,16 @@ describe("Dashboard URL Restoration", () => {
     expect(screen.getByText("Restoring run...")).toBeDefined();
     
     // Should call getRun
-    expect(getRun).toHaveBeenCalledWith("run-456", expect.any(AbortSignal));
+    expect(getRunMock).toHaveBeenCalledWith("run-456", expect.any(AbortSignal));
     
     // Should display the run ID eventually
     await screen.findByText("run-456");
-    expect(startRun).not.toHaveBeenCalled(); // Absense of POST request on restore
+    expect(startRunMock).not.toHaveBeenCalled(); // Absense of POST request on restore
   });
 
   it("shows unavailable state for missing run", async () => {
     mockSearchParams = new URLSearchParams("?runId=invalid-run");
-    vi.mocked(getRun).mockRejectedValue(new Error("Not found"));
+    const getRunMock = vi.spyOn(api, "getRun").mockRejectedValue(new Error("Not found"));
     
     render(<Dashboard />);
     
