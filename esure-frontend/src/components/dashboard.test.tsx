@@ -2,6 +2,19 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react";
 import { Dashboard, filterScenario } from "./dashboard";
 import * as api from "@/lib/api";
+import { type RunReport } from "@/lib/api";
+
+// --- URL Restoration Mocks ---
+const mockPush = vi.fn();
+const mockReplace = vi.fn();
+let mockSearchParams = new URLSearchParams();
+
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: mockPush, replace: mockReplace }),
+  usePathname: () => "/dashboard",
+  useSearchParams: () => mockSearchParams,
+}));
+// -----------------------------
 
 const mockScenarios: api.ScenarioSummary[] = [
   {
@@ -26,6 +39,20 @@ const mockScenarios: api.ScenarioSummary[] = [
     contentHash: "hash3",
   },
 ];
+
+const mockRun: RunReport = {
+  id: "run-123",
+  scenarioId: "test-scenario",
+  scenarioVersion: 1,
+  scenarioSchemaVersion: 1,
+  scenarioContentHash: "hash",
+  network: "testnet",
+  status: "passed",
+  createdAt: new Date().toISOString(),
+  steps: [],
+  assertions: [],
+  summary: { stepsPassed: 0, stepsFailed: 0, assertionsPassed: 0, assertionsFailed: 0 },
+};
 
 describe("filterScenario helper", () => {
   it("includes all scenarios when filter is 'all'", () => {
@@ -217,3 +244,72 @@ describe("Dashboard component catalogue loading and retry", () => {
   });
 });
 
+describe("Dashboard URL Restoration", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    mockSearchParams = new URLSearchParams();
+    vi.spyOn(api, "listScenarios").mockResolvedValue([mockScenarios[0]]);
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+  it("updates URL with runId without reloading when startRun is called", async () => {
+    const startRunMock = vi.spyOn(api, "startRun").mockResolvedValue(mockRun);
+    
+    render(<Dashboard />);
+    
+    // Wait for scenarios to load
+    const elements = await screen.findAllByText("XLM payment");
+    
+    // Click scenario to select it
+    fireEvent.click(elements[0]);
+    
+    // Click run
+    const runButton = screen.getByRole("button", { name: /Run on Testnet/i });
+    fireEvent.click(runButton);
+    
+    await waitFor(() => {
+      expect(startRunMock).toHaveBeenCalledWith("xlm-payment");
+    });
+    
+    expect(mockReplace).toHaveBeenCalledWith("/dashboard?runId=run-123", { scroll: false });
+  });
+
+  it("restores run when runId is in URL", async () => {
+    mockSearchParams = new URLSearchParams("?runId=run-456");
+    const getRunMock = vi.spyOn(api, "getRun").mockResolvedValue({ ...mockRun, id: "run-456" });
+    const startRunMock = vi.spyOn(api, "startRun");
+    
+    render(<Dashboard />);
+    
+    // Should show restoring state immediately
+    expect(screen.getByText("Restoring run...")).toBeDefined();
+    
+    // Should call getRun
+    expect(getRunMock).toHaveBeenCalledWith("run-456", expect.any(AbortSignal));
+    
+    // Should display the run ID eventually
+    await screen.findByText("run-456");
+    expect(startRunMock).not.toHaveBeenCalled(); // Absense of POST request on restore
+  });
+
+  it("shows unavailable state for missing run", async () => {
+    mockSearchParams = new URLSearchParams("?runId=invalid-run");
+    const getRunMock = vi.spyOn(api, "getRun").mockRejectedValue(new Error("Not found"));
+    
+    render(<Dashboard />);
+    
+    // Should show error state
+    await screen.findByText("Run unavailable");
+    expect(screen.getByText("Not found")).toBeDefined();
+    
+    // Clicking dismiss clears URL
+    const dismissButton = screen.getByRole("button", { name: /Dismiss/i });
+    fireEvent.click(dismissButton);
+    
+    expect(mockReplace).toHaveBeenCalledWith("/dashboard", { scroll: false });
+  });
+});
