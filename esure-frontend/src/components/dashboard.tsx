@@ -333,3 +333,6 @@ function computeDuration(startIso: string, endIso: string): string {
   const remainingSeconds = seconds % 60;
   return `${minutes}m ${remainingSeconds}s`;
 }
+
+
+

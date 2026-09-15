@@ -54,17 +54,18 @@ export class RunService {
         stepTimeoutMs: this.options.stepTimeoutMs,
         onStep: (step) => {
           const current = this.store.get(id);
-          if (!current) return;
+          if (!current || current.status === "passed" || current.status === "failed") return;
           const steps = [...current.steps, step];
           this.store.update(id, { steps, summary: summarize(steps, current.assertions) });
         },
         onAssertion: (assertion) => {
           const current = this.store.get(id);
-          if (!current) return;
+          if (!current || current.status === "passed" || current.status === "failed") return;
           const assertions = [...current.assertions, assertion];
           this.store.update(id, { assertions, summary: summarize(current.steps, assertions) });
         },
       });
+      execution.catch(() => {});
       const result = await withTimeout(
         execution,
         this.options.runTimeoutMs,
