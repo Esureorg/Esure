@@ -190,7 +190,7 @@ test.describe("Primary User Journey", () => {
     await expect(page.locator(".empty-report")).toContainText("No run yet");
 
     // 5. Start the run
-    const runButton = page.locator(".run-button");
+    const runButton = page.locator(".launch-panel .run-button");
     await expect(runButton).toBeEnabled();
     await runButton.click();
 
@@ -298,7 +298,7 @@ test.describe("Loading States", () => {
     });
 
     await page.goto("/");
-    const runButton = page.locator(".run-button");
+    const runButton = page.locator(".launch-panel .run-button");
     await runButton.click();
 
     // Verify in-flight loading indicators
@@ -343,7 +343,7 @@ test.describe("Failed Run and Error States", () => {
     });
 
     await page.goto("/");
-    await page.locator(".run-button").click();
+    await page.locator(".launch-panel .run-button").click();
 
     // Verify failed badge
     await expect(page.locator(".status-badge")).toContainText("Failed", { timeout: 10_000 });
@@ -385,7 +385,7 @@ test.describe("Failed Run and Error States", () => {
     });
 
     await page.goto("/");
-    await page.locator(".run-button").click();
+    await page.locator(".launch-panel .run-button").click();
 
     // Verify top-level error alert
     const errorBanner = page.locator(".error-banner[role='alert']");
@@ -415,12 +415,12 @@ test.describe("Failed Run and Error States", () => {
     await page.goto("/");
 
     // Verify error banner
-    const errorBanner = page.locator(".error-banner[role='alert']");
+    const errorBanner = page.locator(".empty-scenarios[role='alert']");
     await expect(errorBanner).toBeVisible();
-    await expect(errorBanner).toContainText("Couldn't complete the request");
+    await expect(errorBanner).toContainText("Couldn't load scenarios");
     await expect(errorBanner).toContainText("Esure Backend is unavailable. Start it and try again. (BACKEND_UNAVAILABLE)");
 
     // Verify run button is disabled since no scenario could be selected
-    await expect(page.locator(".run-button")).toBeDisabled();
+    await expect(page.locator(".launch-panel .run-button")).toBeDisabled();
   });
 });
