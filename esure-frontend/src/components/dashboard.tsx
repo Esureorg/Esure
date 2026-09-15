@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { ApiError, getRun, listScenarios, startRun, type RunReport, type ScenarioSummary } from "@/lib/api";
+import { useRouter, usePathname, useSearchParams } from "next/navigation";
+import { ApiError, getRun, listScenarios, startRun, type RunReport, type ScenarioSummary } from "../lib/api";
 
 const terminalStatuses = new Set(["passed", "failed"]);
 
@@ -12,6 +13,50 @@ export function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const runIdParam = searchParams?.get("runId");
+
+  const [restoringRun, setRestoringRun] = useState(false);
+  const [restorationError, setRestorationError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!runIdParam || run) return;
+    
+    let active = true;
+    const controller = new AbortController();
+    setRestoringRun(true);
+    setRestorationError(null);
+
+    getRun(runIdParam, controller.signal)
+      .then((restored) => {
+        if (!active) return;
+        setRun(restored);
+        setSelectedId(restored.scenarioId);
+      })
+      .catch((reason: unknown) => {
+        if (!active) return;
+        if (reason instanceof DOMException && reason.name === "AbortError") return;
+        setRestorationError(readError(reason));
+      })
+      .finally(() => {
+        if (active) setRestoringRun(false);
+      });
+
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [runIdParam, run]);
+
+  function clearRestoration() {
+    setRestorationError(null);
+    const newParams = new URLSearchParams(searchParams?.toString() ?? "");
+    newParams.delete("runId");
+    router.replace(pathname + (newParams.toString() ? "?" + newParams.toString() : ""), { scroll: false });
+  }
 
   useEffect(() => {
     let active = true;
@@ -60,7 +105,11 @@ export function Dashboard() {
     setError(null);
     setRun(null);
     try {
-      setRun(await startRun(selectedId));
+      const newRun = await startRun(selectedId);
+      setRun(newRun);
+      const newParams = new URLSearchParams(searchParams?.toString() ?? "");
+      newParams.set("runId", newRun.id);
+      router.replace(pathname + "?" + newParams.toString(), { scroll: false });
     } catch (reason) {
       setError(readError(reason));
     } finally {
@@ -140,7 +189,27 @@ export function Dashboard() {
           <div><p className="eyebrow">02 / INSPECT THE RUN</p><h2>Execution report</h2></div>
           {run && <StatusBadge status={run.status} />}
         </div>
-        {!run ? <EmptyReport /> : <RunView run={run} />}
+        {!run ? (
+          restoringRun ? (
+            <div className="empty-report">
+              <div className="running-row" style={{ justifyContent: 'center' }}>
+                <span className="spinner" />
+                <div><strong>Restoring run...</strong></div>
+              </div>
+            </div>
+          ) : restorationError ? (
+            <div className="empty-report">
+              <div className="empty-glyph"><WarningIcon /></div>
+              <strong>Run unavailable</strong>
+              <p>{restorationError}</p>
+              <button type="button" className="run-button run-button--secondary" style={{ marginTop: '16px', minWidth: 'auto', padding: '10px 16px' }} onClick={clearRestoration}>Dismiss</button>
+            </div>
+          ) : (
+            <EmptyReport />
+          )
+        ) : (
+          <RunView run={run} />
+        )}
       </section>
 
       <footer className="shell"><span>ESURE / TEST WITH CONFIDENCE</span><span>BUILT FOR STELLAR</span></footer>
