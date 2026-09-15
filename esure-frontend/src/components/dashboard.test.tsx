@@ -143,3 +143,77 @@ describe("Dashboard component scenario filtering", () => {
   });
 });
 
+describe("Dashboard component catalogue loading and retry", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+  it("handles initial failure and repeated failure", async () => {
+    const listScenariosMock = vi.spyOn(api, "listScenarios").mockRejectedValue(new Error("Network Error"));
+
+    render(<Dashboard />);
+    
+    // Wait for the failure to render
+    await waitFor(() => {
+      expect(screen.getByText("Couldn't load scenarios")).toBeDefined();
+    });
+    expect(screen.getByText("Network Error")).toBeDefined();
+    
+    const retryButton = screen.getByRole("button", { name: "Retry" });
+    
+    // Repeated failure
+    listScenariosMock.mockRejectedValueOnce(new Error("Still Failed"));
+    fireEvent.click(retryButton);
+    
+    await waitFor(() => {
+      expect(screen.getByText("Still Failed")).toBeDefined();
+    });
+  });
+
+  it("handles successful retry after failure", async () => {
+    const listScenariosMock = vi.spyOn(api, "listScenarios").mockRejectedValueOnce(new Error("Network Error"));
+    
+    render(<Dashboard />);
+    
+    await waitFor(() => {
+      expect(screen.getByText("Couldn't load scenarios")).toBeDefined();
+    });
+    
+    // Setup for success
+    listScenariosMock.mockResolvedValueOnce(mockScenarios);
+    
+    const retryButton = screen.getByRole("button", { name: "Retry" });
+    fireEvent.click(retryButton);
+    
+    // Should clear error and show scenarios
+    await waitFor(() => {
+      expect(screen.queryByText("Couldn't load scenarios")).toBeNull();
+      expect(screen.getAllByText("XLM payment").length).toBeGreaterThan(0);
+    });
+  });
+
+  it("displays distinct empty success state", async () => {
+    vi.spyOn(api, "listScenarios").mockResolvedValue([]);
+    
+    render(<Dashboard />);
+    
+    await waitFor(() => {
+      expect(screen.getByText("No scenarios found")).toBeDefined();
+      expect(screen.getByText("No scenarios match the selected filter (\"All\").")).toBeDefined();
+      expect(screen.queryByText("Couldn't load scenarios")).toBeNull();
+    });
+  });
+
+  it("aborts requests on unmount", () => {
+    const abortSpy = vi.spyOn(AbortController.prototype, "abort");
+    const { unmount } = render(<Dashboard />);
+    unmount();
+    expect(abortSpy).toHaveBeenCalled();
+  });
+});
+
