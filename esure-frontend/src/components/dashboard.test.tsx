@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, cleanup, act } from "@testing-library/react";
 import { Dashboard, filterScenario } from "./dashboard";
 import * as api from "@/lib/api";
 import { type RunReport } from "@/lib/api";
@@ -311,5 +311,106 @@ describe("Dashboard URL Restoration", () => {
     fireEvent.click(dismissButton);
     
     expect(mockReplace).toHaveBeenCalledWith("/dashboard", { scroll: false });
+  });
+});
+
+describe("Dashboard Sequential Polling and Recovery", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    mockSearchParams = new URLSearchParams("?runId=run-123");
+    vi.spyOn(api, "listScenarios").mockResolvedValue([mockScenarios[0]]);
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.runOnlyPendingTimers();
+    vi.useRealTimers();
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+  it("polls sequentially with exponential backoff on transient failures", async () => {
+    const getRunMock = vi.spyOn(api, "getRun")
+      .mockResolvedValueOnce({ ...mockRun, status: "pending" })
+      .mockRejectedValueOnce(new Error("Network glitch 1"))
+      .mockRejectedValueOnce(new Error("Network glitch 2"))
+      .mockResolvedValueOnce({ ...mockRun, status: "passed" });
+
+    render(<Dashboard />);
+
+    await act(async () => { await Promise.resolve(); });
+    expect(getRunMock).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("run-123")).toBeDefined(); 
+
+    await act(async () => { vi.advanceTimersByTime(1000); await Promise.resolve(); });
+    expect(getRunMock).toHaveBeenCalledTimes(2); 
+
+    expect(screen.getByText("Monitoring paused")).toBeDefined();
+    expect(screen.getByText("Network glitch 1")).toBeDefined();
+
+    await act(async () => { vi.advanceTimersByTime(1000); await Promise.resolve(); });
+    expect(getRunMock).toHaveBeenCalledTimes(3); 
+
+    expect(screen.getByText("Network glitch 2")).toBeDefined();
+
+    await act(async () => { vi.advanceTimersByTime(2000); await Promise.resolve(); });
+    expect(getRunMock).toHaveBeenCalledTimes(4); 
+
+    expect(screen.queryByText("Monitoring paused")).toBeNull();
+  });
+
+  it("stops polling and clears run when RUN_NOT_FOUND occurs", async () => {
+    const notFoundError = new api.ApiError("Not Found", "RUN_NOT_FOUND");
+    const getRunMock = vi.spyOn(api, "getRun")
+      .mockResolvedValueOnce({ ...mockRun, status: "pending" })
+      .mockRejectedValueOnce(notFoundError);
+
+    render(<Dashboard />);
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.getByText("run-123")).toBeDefined();
+
+    await act(async () => { vi.advanceTimersByTime(1000); await Promise.resolve(); });
+
+    expect(screen.getByText("Couldn't complete the request")).toBeDefined();
+    expect(screen.getByText("The requested run could not be found. It may have expired.")).toBeDefined();
+
+    expect(mockReplace).toHaveBeenCalledWith("/dashboard", { scroll: false });
+
+    const callCount = getRunMock.mock.calls.length;
+    await act(async () => { vi.advanceTimersByTime(10000); await Promise.resolve(); });
+    expect(getRunMock).toHaveBeenCalledTimes(callCount);
+  });
+
+  it("exposes Resume Monitoring button when retries are exhausted", async () => {
+    const getRunMock = vi.spyOn(api, "getRun")
+      .mockResolvedValueOnce({ ...mockRun, status: "pending" });
+
+    for (let i = 0; i < 5; i++) {
+      getRunMock.mockRejectedValueOnce(new Error(`Fail ${i}`));
+    }
+
+    render(<Dashboard />);
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.getByText("run-123")).toBeDefined();
+
+    await act(async () => { vi.advanceTimersByTime(1000); await Promise.resolve(); });
+    await act(async () => { vi.advanceTimersByTime(1000); await Promise.resolve(); });
+    await act(async () => { vi.advanceTimersByTime(2000); await Promise.resolve(); });
+    await act(async () => { vi.advanceTimersByTime(4000); await Promise.resolve(); });
+    await act(async () => { vi.advanceTimersByTime(8000); await Promise.resolve(); });
+
+    const resumeBtn = screen.getByRole("button", { name: "Resume Monitoring" });
+    expect(resumeBtn).toBeDefined();
+    
+    const callCount = getRunMock.mock.calls.length;
+    expect(callCount).toBe(6); 
+    await act(async () => { vi.advanceTimersByTime(20000); await Promise.resolve(); });
+    expect(getRunMock).toHaveBeenCalledTimes(6); 
+
+    getRunMock.mockResolvedValueOnce({ ...mockRun, status: "pending" });
+    act(() => { fireEvent.click(resumeBtn); });
+
+    await act(async () => { vi.advanceTimersByTime(1000); await Promise.resolve(); });
+    expect(getRunMock).toHaveBeenCalledTimes(7);
   });
 });

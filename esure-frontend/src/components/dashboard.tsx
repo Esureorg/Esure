@@ -33,6 +33,8 @@ export function Dashboard() {
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [catalogueError, setCatalogueError] = useState<string | null>(null);
+  const [pollingError, setPollingError] = useState<string | null>(null);
+  const [consecutiveFailures, setConsecutiveFailures] = useState(0);
 
   const router = useRouter();
   const pathname = usePathname();
@@ -125,19 +127,45 @@ export function Dashboard() {
 
   useEffect(() => {
     if (!run || terminalStatuses.has(run.status)) return;
+    if (consecutiveFailures >= 5) return; // Exhausted retries
+
+    let active = true;
     const controller = new AbortController();
-    const timer = window.setInterval(() => {
-      getRun(run.id, controller.signal)
-        .then(setRun)
-        .catch((reason: unknown) => {
-          if (!(reason instanceof DOMException && reason.name === "AbortError")) setError(readError(reason));
-        });
-    }, 1_000);
+    let timerId: number | null = null;
+
+    async function poll() {
+      if (!active) return;
+      try {
+        const updatedRun = await getRun(run!.id, controller.signal);
+        if (!active) return;
+        setRun(updatedRun);
+        setConsecutiveFailures(0);
+        setPollingError(null);
+      } catch (reason: unknown) {
+        if (!active) return;
+        if (reason instanceof DOMException && reason.name === "AbortError") return;
+
+        if (reason instanceof ApiError && reason.code === "RUN_NOT_FOUND") {
+          setRun(null);
+          clearRestoration(); // Clear from URL as well
+          setError("The requested run could not be found. It may have expired.");
+          return;
+        }
+
+        setPollingError(readError(reason));
+        setConsecutiveFailures((prev) => prev + 1);
+      }
+    }
+
+    const delay = consecutiveFailures === 0 ? 1000 : Math.pow(2, consecutiveFailures - 1) * 1000;
+    timerId = window.setTimeout(poll, delay);
+
     return () => {
+      active = false;
       controller.abort();
-      window.clearInterval(timer);
+      if (timerId !== null) window.clearTimeout(timerId);
     };
-  }, [run?.id, run?.status]);
+  }, [run, consecutiveFailures]);
 
   const selected = useMemo(() => scenarios.find((scenario) => scenario.id === selectedId), [scenarios, selectedId]);
 
@@ -216,6 +244,20 @@ export function Dashboard() {
         </div>
 
         {error && <div className="error-banner" role="alert"><WarningIcon /><div><strong>Couldn&apos;t complete the request</strong><span>{error}</span></div></div>}
+        {pollingError && (
+          <div className="error-banner" role="alert">
+            <WarningIcon />
+            <div>
+              <strong>Monitoring paused</strong>
+              <span>{pollingError}</span>
+            </div>
+            {consecutiveFailures >= 5 && (
+              <button type="button" className="run-button run-button--secondary" style={{ marginLeft: "auto", minWidth: "auto", padding: "8px 12px" }} onClick={() => setConsecutiveFailures(0)}>
+                Resume Monitoring
+              </button>
+            )}
+          </div>
+        )}
 
         <div className="scenario-grid" id="scenario-grid" aria-busy={loading}>
           {loading ? (
