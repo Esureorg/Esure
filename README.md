@@ -27,11 +27,13 @@ failure explanations.
 The Render free service may sleep after inactivity, so its first response can
 take longer than subsequent requests.
 
+<!-- TODO: Add dashboard screenshot or demo GIF here -->
+
 ## Capabilities
 
 - **10 MVP Scenarios**: XLM payments, issued assets, trustlines, expected failures, multi-op transactions (Testnet only)
 - **Developer-Friendly Errors**: Plain-English explanations for 30+ Stellar error codes with causes and fix suggestions
-- **Command-Line Interface**: Run scenarios from terminal or CI pipelines with `npx esure`
+- **Command-Line Interface**: Run scenarios from terminal or CI pipelines (run from source; not yet published to npm)
 - **CI/CD Integration**: First-class GitHub Actions, GitLab CI, and CircleCI support
 - **Declarative Testing**: Bounded JSON/YAML scenario definitions with schema validation
 - **Isolated Execution**: Fresh Testnet accounts per run, no cross-run contamination
@@ -58,9 +60,13 @@ Esure is useful for:
 - contributors reproducing protocol-level failures safely on Testnet; and
 - CI workflows that need deterministic validation without storing secret keys.
 
+## How Esure differs
+
+Unlike Stellar Lab, which requires manual step-through and copy/paste workflow, Esure executes multi-step flows declaratively and generates structured reports. Unlike the Stellar Quickstart Docker image, Esure focuses on scenario-driven testing rather than node operation. Unlike hand-written SDK tests, Esure provides repeatable scenario definitions with expected-failure assertions and CI-friendly JSON output.
+
 ## Bundled scenarios
 
-ESURE includes 10 MVP scenarios for Testnet integration testing:
+Esure includes 10 MVP scenarios for Testnet integration testing:
 
 | Scenario | Purpose | Expected result |
 | --- | --- | --- |
@@ -206,30 +212,47 @@ curl http://127.0.0.1:3001/api/v1/runs/RUN_ID/report
 
 ## CLI usage
 
-ESURE includes a command-line interface for terminal and CI pipeline usage:
+> [!NOTE]
+> The CLI is not yet published to npm. Run it from source as shown below.
+
+Esure includes a command-line interface for terminal and CI pipeline usage:
 
 ```bash
+# Clone and build the CLI (one time)
+git clone https://github.com/Esureorg/Esure.git
+cd Esure/esure-cli
+npm ci
+npm run build
+
 # List bundled scenarios
-npx esure list
+node dist/cli.js list
 
 # Validate a scenario file
-npx esure validate ./my-scenario.yaml
+node dist/cli.js validate ./my-scenario.yaml
 
 # Run a bundled scenario
-npx esure run xlm-payment
+node dist/cli.js run xlm-payment
 
 # Run a custom scenario with JSON output
-npx esure run ./my-scenario.yaml --output json
+node dist/cli.js run ./my-scenario.yaml --output json
 ```
 
 ### CI integration
 
-Add ESURE to your CI pipeline:
+Add Esure to your CI pipeline:
 
 ```yaml
 # .github/workflows/stellar-tests.yml
+- name: Install Esure CLI
+  run: |
+    cd esure-cli
+    npm ci
+    npm run build
+    
 - name: Run Stellar tests
-  run: npx esure run ./tests/payment-flow.yaml --output json
+  run: |
+    cd esure-cli
+    node dist/cli.js run ./tests/payment-flow.yaml --output json
 ```
 
 See [CI_INTEGRATION.md](esure-docs/CI_INTEGRATION.md) for complete CI/CD integration
@@ -313,6 +336,10 @@ roles. See the [persistence guide](esure-docs/PERSISTENCE.md) before enabling it
 Set `ESURE_BACKEND_URL` in Vercel to the public Render backend origin. Keep
 secrets and migration credentials in the hosting provider environment settings;
 never commit them to the repository.
+
+### Keeping the backend awake
+
+The Render free tier sleeps after 15 minutes of inactivity. To keep the backend responsive, use a free uptime monitoring service (UptimeRobot, Cron-job.org, or similar) to ping `/health` every 10-14 minutes. This prevents cold starts for dashboard users. See the troubleshooting section for cold-start delay behavior.
 
 ## Current MVP status
 
