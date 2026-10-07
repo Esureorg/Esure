@@ -4,9 +4,9 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { validateScenarioDefinition } from "@esure/backend/src/scenario-schema.js";
+import { prepareScenario } from "@esure/backend/src/scenario-loader.js";
 import { createScenarioRegistry } from "@esure/backend/src/scenarios.js";
 import { StellarTestnetGateway } from "@esure/backend/src/stellar-gateway.js";
-import { prepareScenario } from "@esure/backend/src/published-scenarios.js";
 import { parse as parseYaml } from "yaml";
 import type { ValidatedScenario } from "@esure/backend/src/domain.js";
 
@@ -63,8 +63,8 @@ function parseCliArgs(): { command?: string; args: string[]; options: CliOptions
     args: positionals.slice(1),
     options: {
       output: values.output === "json" ? "json" : "human",
-      help: values.help,
-      version: values.version,
+      help: Boolean(values.help),
+      version: Boolean(values.version),
     },
   };
 }
@@ -135,12 +135,15 @@ async function validateCommand(filePath: string, options: CliOptions): Promise<n
     return 0;
   } catch (error) {
     if (options.output === "json") {
+      const errorObj: { message: string; issues?: string[] } = {
+        message: error instanceof Error ? error.message : String(error),
+      };
+      if (error && typeof error === "object" && "issues" in error && Array.isArray(error.issues)) {
+        errorObj.issues = error.issues as string[];
+      }
       console.error(JSON.stringify({
         valid: false,
-        error: {
-          message: error instanceof Error ? error.message : String(error),
-          ...(error && typeof error === "object" && "issues" in error && Array.isArray(error.issues) && { issues: error.issues }),
-        },
+        error: errorObj,
       }, null, 2));
     } else {
       console.error(`✗ Validation failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -227,12 +230,15 @@ async function runCommand(target: string, options: CliOptions): Promise<number> 
     return passed ? 0 : 1;
   } catch (error) {
     if (options.output === "json") {
+      const errorObj: { message: string; report?: unknown } = {
+        message: error instanceof Error ? error.message : String(error),
+      };
+      if (error && typeof error === "object" && "report" in error) {
+        errorObj.report = (error as { report: unknown }).report;
+      }
       console.error(JSON.stringify({
         status: "error",
-        error: {
-          message: error instanceof Error ? error.message : String(error),
-          ...(error && typeof error === "object" && "report" in error && { report: error.report }),
-        },
+        error: errorObj,
       }, null, 2));
     } else {
       console.error(`\n✗ Run failed: ${error instanceof Error ? error.message : String(error)}`);
