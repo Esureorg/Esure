@@ -27,15 +27,17 @@ failure explanations.
 The Render free service may sleep after inactivity, so its first response can
 take longer than subsequent requests.
 
-## MVP capabilities
+## Capabilities
 
-- Run predefined XLM payment, issued-asset payment, and expected-failure flows.
-- Create and fund isolated accounts on Stellar Testnet.
-- Establish trustlines and submit classic asset payments.
-- Track execution steps and verify transaction outcomes and balances.
-- Produce sanitized reports without exposing account secrets.
-- Validate bounded declarative JSON and YAML scenario definitions.
-- Optionally persist the published scenario catalogue in PostgreSQL.
+- **10 Production Scenarios**: XLM payments, issued assets, trustlines, expected failures, multi-op transactions, and error conditions
+- **Developer-Friendly Errors**: Plain-English explanations for 30+ Stellar error codes with causes and fix suggestions
+- **Command-Line Interface**: Run scenarios from terminal or CI pipelines with `npx esure`
+- **CI/CD Integration**: First-class GitHub Actions, GitLab CI, and CircleCI support
+- **Declarative Testing**: Bounded JSON/YAML scenario definitions with schema validation
+- **Isolated Execution**: Fresh Testnet accounts per run, no cross-run contamination
+- **Comprehensive Reports**: Steps, assertions, transaction hashes, balance changes, and readable failures
+- **Security by Design**: Testnet-only, rejects secrets/Mainnet, ephemeral keys, sanitized outputs
+- **Optional Persistence**: PostgreSQL-backed scenario catalogue and version history
 
 See the [MVP specification](esure-docs/MVP.md) for the complete product scope.
 
@@ -56,16 +58,26 @@ Esure is useful for:
 - contributors reproducing protocol-level failures safely on Testnet; and
 - CI workflows that need deterministic validation without storing secret keys.
 
-## Included scenarios
+## Bundled scenarios
+
+ESURE includes 10 production-ready scenarios covering common Stellar integration patterns:
 
 | Scenario | Purpose | Expected result |
 | --- | --- | --- |
-| `xlm-payment` | Fund two accounts, transfer 5 XLM, and verify the recipient balance change | Pass |
-| `issued-asset-payment` | Create a TESTUSD trustline, issue 100 TESTUSD, and verify the final balance | Pass |
-| `missing-trustline` | Attempt an issued-asset payment without a recipient trustline | Controlled `op_no_trust` failure |
+| `xlm-payment` | Fund two accounts, transfer 5 XLM, verify balance change | Pass |
+| `issued-asset-payment` | Create TESTUSD trustline, issue 100 TESTUSD, verify balance | Pass |
+| `missing-trustline` | Attempt issued-asset payment without recipient trustline | Controlled `op_no_trust` failure |
+| `insufficient-xlm-balance` | Attempt to send more XLM than available in account | Controlled `op_underfunded` failure |
+| `payment-with-memo` | Send XLM with memo for transaction tracking | Pass |
+| `multi-operation-transaction` | Execute trustline + payment atomically in single tx | Pass |
+| `trustline-limit-exceeded` | Attempt payment exceeding trustline limit | Controlled `op_line_full` failure |
+| `trustline-already-exists` | Multiple payments using existing trustline | Pass |
+| `account-merge-simple` | Transfer XLM between accounts demonstrating merge readiness | Pass |
+| `zero-amount-payment` | Valid non-zero payment (schema rejects zero amounts) | Pass |
 
 Each run generates fresh Testnet accounts, so repeated executions remain
-isolated from previous runs.
+isolated from previous runs. See [SCENARIOS.md](esure-docs/SCENARIOS.md) for
+complete scenario documentation.
 
 ## How a run works
 
@@ -100,7 +112,8 @@ Stellar Testnet      PostgreSQL (optional)
 | --- | --- |
 | [`esure-frontend`](esure-frontend) | Next.js dashboard and browser-facing API proxy |
 | [`esure-backend`](esure-backend) | Fastify API, validation, reporting, and Testnet execution |
-| [`esure-docs`](esure-docs) | Product, API, architecture, scenario, and persistence documentation |
+| [`esure-cli`](esure-cli) | Command-line interface for terminal and CI usage |
+| [`esure-docs`](esure-docs) | Product, API, architecture, scenario, CI, and persistence documentation |
 | [`esure-contracts`](esure-contracts) | Design space for post-MVP Soroban fixtures |
 | [`.github`](.github) | CI, issue templates, contribution guidance, and security policy |
 
@@ -190,6 +203,37 @@ report:
 curl http://127.0.0.1:3001/api/v1/runs/RUN_ID
 curl http://127.0.0.1:3001/api/v1/runs/RUN_ID/report
 ```
+
+## CLI usage
+
+ESURE includes a command-line interface for terminal and CI pipeline usage:
+
+```bash
+# List bundled scenarios
+npx esure list
+
+# Validate a scenario file
+npx esure validate ./my-scenario.yaml
+
+# Run a bundled scenario
+npx esure run xlm-payment
+
+# Run a custom scenario with JSON output
+npx esure run ./my-scenario.yaml --output json
+```
+
+### CI integration
+
+Add ESURE to your CI pipeline:
+
+```yaml
+# .github/workflows/stellar-tests.yml
+- name: Run Stellar tests
+  run: npx esure run ./tests/payment-flow.yaml --output json
+```
+
+See [CI_INTEGRATION.md](esure-docs/CI_INTEGRATION.md) for complete CI/CD integration
+guide with GitHub Actions, GitLab CI, and CircleCI examples.
 
 ## API overview
 
