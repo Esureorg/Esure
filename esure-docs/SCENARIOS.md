@@ -4,6 +4,27 @@ Scenario Schema v1 is a bounded, declarative JSON/YAML format for classic
 Stellar payment tests. Document order is execution order. Definitions contain
 no executable code or credentials and are validated before Testnet access.
 
+## Bundled Scenarios
+
+ESURE includes 10 production-ready scenarios covering common Stellar integration patterns:
+
+| Scenario ID | Purpose | Expected Result |
+| --- | --- | --- |
+| `xlm-payment` | Fund two accounts, transfer 5 XLM, verify balance change | Pass |
+| `issued-asset-payment` | Create TESTUSD trustline, issue 100 TESTUSD, verify balance | Pass |
+| `missing-trustline` | Attempt issued-asset payment without recipient trustline | Controlled `op_no_trust` failure |
+| `insufficient-xlm-balance` | Attempt to send more XLM than available in account | Controlled `op_underfunded` failure |
+| `payment-with-memo` | Send XLM with memo for transaction tracking | Pass |
+| `multi-operation-transaction` | Execute trustline + payment atomically in single tx | Pass |
+| `trustline-limit-exceeded` | Attempt payment exceeding trustline limit | Controlled `op_line_full` failure |
+| `trustline-already-exists` | Multiple payments using existing trustline | Pass |
+| `account-merge-simple` | Transfer XLM between accounts demonstrating merge readiness | Pass |
+| `zero-amount-payment` | Valid non-zero payment (schema rejects zero amounts) | Pass |
+
+These scenarios demonstrate XLM transfers, issued assets, trustline management,
+expected failure handling, and multi-step transaction flows that Stellar developers
+commonly need to test.
+
 ```yaml
 schemaVersion: 1
 id: coffee-token-payment

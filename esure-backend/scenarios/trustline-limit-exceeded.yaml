@@ -1,0 +1,40 @@
+schemaVersion: 1
+id: trustline-limit-exceeded
+version: 1
+name: Trustline limit exceeded
+description: Verify that an asset payment fails when it would exceed the recipient trustline limit.
+network: testnet
+accounts:
+  - id: issuer
+    generate: true
+    fund: true
+  - id: recipient
+    generate: true
+    fund: true
+assets:
+  - id: xlm
+    type: native
+  - id: limited-asset
+    type: issued
+    code: LIMITED
+    issuer: issuer
+steps:
+  - id: create-limited-trustline
+    type: changeTrust
+    account: recipient
+    asset: limited-asset
+    limit: "100"
+  - id: send-excessive-amount
+    type: payment
+    from: issuer
+    to: recipient
+    asset: limited-asset
+    amount: "150"
+assertions:
+  - type: stepSucceeded
+    step: create-limited-trustline
+  - type: stepFailedWith
+    step: send-excessive-amount
+    transactionCode: tx_failed
+    operationCodes:
+      - op_line_full

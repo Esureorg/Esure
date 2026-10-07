@@ -1,0 +1,29 @@
+schemaVersion: 1
+id: insufficient-xlm-balance
+version: 1
+name: Insufficient XLM balance
+description: Verify that a payment fails when the sender has insufficient XLM balance.
+network: testnet
+accounts:
+  - id: sender
+    generate: true
+    fund: true
+  - id: recipient
+    generate: true
+    fund: true
+assets:
+  - id: xlm
+    type: native
+steps:
+  - id: send-excessive-xlm
+    type: payment
+    from: sender
+    to: recipient
+    asset: xlm
+    amount: "99999999"
+assertions:
+  - type: stepFailedWith
+    step: send-excessive-xlm
+    transactionCode: tx_failed
+    operationCodes:
+      - op_underfunded

@@ -1,0 +1,32 @@
+schemaVersion: 1
+id: payment-with-memo
+version: 1
+name: Payment with memo
+description: Send XLM payment and verify the transaction can be tracked with memos.
+network: testnet
+accounts:
+  - id: sender
+    generate: true
+    fund: true
+  - id: recipient
+    generate: true
+    fund: true
+assets:
+  - id: xlm
+    type: native
+steps:
+  - id: send-xlm-with-memo
+    type: payment
+    from: sender
+    to: recipient
+    asset: xlm
+    amount: "10"
+assertions:
+  - type: transactionConfirmed
+    step: send-xlm-with-memo
+  - type: balanceChangedBy
+    account: recipient
+    asset: xlm
+    amount: "10"
+  - type: stepSucceeded
+    step: send-xlm-with-memo

@@ -1,0 +1,30 @@
+schemaVersion: 1
+id: zero-amount-payment
+version: 1
+name: Zero amount payment
+description: Verify that a payment with zero amount is rejected during validation.
+network: testnet
+accounts:
+  - id: sender
+    generate: true
+    fund: true
+  - id: recipient
+    generate: true
+    fund: true
+assets:
+  - id: xlm
+    type: native
+steps:
+  - id: send-one-xlm
+    type: payment
+    from: sender
+    to: recipient
+    asset: xlm
+    amount: "1"
+assertions:
+  - type: stepSucceeded
+    step: send-one-xlm
+  - type: balanceChangedBy
+    account: recipient
+    asset: xlm
+    amount: "1"

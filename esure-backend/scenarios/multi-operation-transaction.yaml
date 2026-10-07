@@ -1,0 +1,43 @@
+schemaVersion: 1
+id: multi-operation-transaction
+version: 1
+name: Multi-operation transaction
+description: Execute trustline creation and asset payment in a single atomic transaction.
+network: testnet
+accounts:
+  - id: issuer
+    generate: true
+    fund: true
+  - id: recipient
+    generate: true
+    fund: true
+assets:
+  - id: xlm
+    type: native
+  - id: multi-token
+    type: issued
+    code: MULTI
+    issuer: issuer
+steps:
+  - id: create-trustline
+    type: changeTrust
+    account: recipient
+    asset: multi-token
+  - id: send-multi-token
+    type: payment
+    from: issuer
+    to: recipient
+    asset: multi-token
+    amount: "250"
+assertions:
+  - type: trustlineExists
+    account: recipient
+    asset: multi-token
+  - type: balanceEquals
+    account: recipient
+    asset: multi-token
+    amount: "250"
+  - type: stepSucceeded
+    step: create-trustline
+  - type: stepSucceeded
+    step: send-multi-token

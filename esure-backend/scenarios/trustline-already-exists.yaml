@@ -1,0 +1,51 @@
+schemaVersion: 1
+id: trustline-already-exists
+version: 1
+name: Trustline already exists
+description: Create a trustline, then verify payments work when the trustline is already established.
+network: testnet
+accounts:
+  - id: issuer
+    generate: true
+    fund: true
+  - id: holder
+    generate: true
+    fund: true
+assets:
+  - id: xlm
+    type: native
+  - id: stable-token
+    type: issued
+    code: STABLE
+    issuer: issuer
+steps:
+  - id: create-initial-trustline
+    type: changeTrust
+    account: holder
+    asset: stable-token
+  - id: first-payment
+    type: payment
+    from: issuer
+    to: holder
+    asset: stable-token
+    amount: "50"
+  - id: second-payment
+    type: payment
+    from: issuer
+    to: holder
+    asset: stable-token
+    amount: "30"
+assertions:
+  - type: trustlineExists
+    account: holder
+    asset: stable-token
+  - type: balanceEquals
+    account: holder
+    asset: stable-token
+    amount: "80"
+  - type: stepSucceeded
+    step: create-initial-trustline
+  - type: stepSucceeded
+    step: first-payment
+  - type: stepSucceeded
+    step: second-payment

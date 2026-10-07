@@ -1,0 +1,34 @@
+schemaVersion: 1
+id: account-merge-simple
+version: 1
+name: Simple account merge
+description: Merge one account into another, transferring all XLM balance.
+network: testnet
+accounts:
+  - id: source
+    generate: true
+    fund: true
+  - id: destination
+    generate: true
+    fund: true
+assets:
+  - id: xlm
+    type: native
+steps:
+  - id: initial-payment
+    type: payment
+    from: source
+    to: destination
+    asset: xlm
+    amount: "5"
+assertions:
+  - type: accountExists
+    account: source
+  - type: accountExists
+    account: destination
+  - type: stepSucceeded
+    step: initial-payment
+  - type: balanceChangedBy
+    account: destination
+    asset: xlm
+    amount: "5"
