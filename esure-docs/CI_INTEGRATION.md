@@ -1,6 +1,9 @@
-# ESURE CI Integration Guide
+# Esure CI Integration Guide
 
-ESURE CLI can be integrated into continuous integration pipelines to automatically
+> [!NOTE]
+> The CLI is not yet published to npm. These examples run it from source.
+
+The Esure CLI can be integrated into continuous integration pipelines to automatically
 test Stellar payment flows, trustline behavior, and transaction handling on Testnet.
 
 ## Quick Start
@@ -28,12 +31,12 @@ jobs:
       
       - name: Run Stellar scenario tests
         run: |
-          npx esure run ./scenarios/payment-flow.yaml --output json
+          cd esure-cli && node dist/cli.js run ./scenarios/payment-flow.yaml --output json
 ```
 
 ## Exit Codes
 
-ESURE CLI returns proper exit codes for CI integration:
+Esure CLI returns proper exit codes for CI integration:
 
 - **0**: Success - All steps and assertions passed
 - **1**: Failure - One or more steps/assertions failed, validation error, or execution error
@@ -45,7 +48,7 @@ CI pipelines automatically fail when exit code is non-zero.
 Use `--output json` to get machine-readable results:
 
 ```bash
-npx esure run xlm-payment --output json
+cd esure-cli && node dist/cli.js run xlm-payment --output json
 ```
 
 ### Success Output
@@ -126,14 +129,14 @@ jobs:
         with:
           node-version: 20
       
-      - name: Install ESURE CLI
+      - name: Install Esure CLI
         working-directory: ./esure-cli
         run: |
           npm ci
           npm run build
       
       - name: Run payment scenario
-        run: npx esure run ./tests/payment-integration.yaml
+        run: cd esure-cli && node dist/cli.js run ./tests/payment-integration.yaml
 ```
 
 ### Multiple Scenario Matrix
@@ -161,14 +164,14 @@ jobs:
         with:
           node-version: 20
       
-      - name: Install ESURE CLI
+      - name: Install Esure CLI
         working-directory: ./esure-cli
         run: |
           npm ci
           npm run build
       
       - name: Run ${{ matrix.scenario }}
-        run: npx esure run ${{ matrix.scenario }} --output json
+        run: cd esure-cli && node dist/cli.js run ${{ matrix.scenario }} --output json
 ```
 
 ### Custom Scenarios Directory
@@ -188,7 +191,7 @@ jobs:
         with:
           node-version: 20
       
-      - name: Install ESURE CLI
+      - name: Install Esure CLI
         working-directory: ./esure-cli
         run: |
           npm ci
@@ -198,7 +201,7 @@ jobs:
         run: |
           for scenario in tests/stellar/*.yaml; do
             echo "Testing $scenario..."
-            npx esure run "$scenario" --output json || exit 1
+            (cd esure-cli && node dist/cli.js run "../$scenario" --output json) || exit 1
           done
 ```
 
@@ -219,16 +222,17 @@ jobs:
         with:
           node-version: 20
       
-      - name: Install ESURE CLI
+      - name: Install Esure CLI
         working-directory: ./esure-cli
         run: |
           npm ci
           npm run build
       
       - name: Run scenarios and capture results
+        working-directory: ./esure-cli
         run: |
-          npx esure run xlm-payment --output json > payment-result.json
-          npx esure run missing-trustline --output json > trustline-result.json
+          node dist/cli.js run xlm-payment --output json > ../payment-result.json
+          node dist/cli.js run missing-trustline --output json > ../trustline-result.json
       
       - name: Upload test results
         if: always()
@@ -250,7 +254,7 @@ test-stellar:
     - cd esure-cli
     - npm ci
     - npm run build
-    - npx esure run ./scenarios/payment-test.yaml --output json
+    - cd esure-cli && node dist/cli.js run ./scenarios/payment-test.yaml --output json
   artifacts:
     when: always
     reports:
@@ -270,14 +274,14 @@ jobs:
     steps:
       - checkout
       - run:
-          name: Install ESURE CLI
+          name: Install Esure CLI
           command: |
             cd esure-cli
             npm ci
             npm run build
       - run:
           name: Run Stellar tests
-          command: npx esure run ./tests/stellar-integration.yaml --output json
+          command: cd esure-cli && node dist/cli.js run ./tests/stellar-integration.yaml --output json
 
 workflows:
   test:
@@ -291,10 +295,10 @@ workflows:
 
 ```bash
 # Validate scenario first
-npx esure validate ./scenario.yaml || exit 1
+(cd esure-cli && node dist/cli.js validate ./scenario.yaml) || exit 1
 
 # Then run
-npx esure run ./scenario.yaml
+(cd esure-cli && node dist/cli.js run ./scenario.yaml)
 ```
 
 ### 2. Use Specific Scenario Files
@@ -335,24 +339,24 @@ Space out runs or use retry logic for Testnet service unavailability:
   with:
     timeout_minutes: 2
     max_attempts: 3
-    command: npx esure run ./scenario.yaml
+    command: cd esure-cli && node dist/cli.js run ./scenario.yaml
 ```
 
 ### 5. Fail Fast vs Continue
 
 **Fail Fast** (default):
 ```bash
-npx esure run scenario1.yaml && \
-npx esure run scenario2.yaml && \
-npx esure run scenario3.yaml
+(cd esure-cli && node dist/cli.js run scenario1.yaml) && \
+(cd esure-cli && node dist/cli.js run scenario2.yaml) && \
+(cd esure-cli && node dist/cli.js run scenario3.yaml)
 ```
 
 **Continue on Failure**:
 ```bash
 EXIT_CODE=0
-npx esure run scenario1.yaml || EXIT_CODE=1
-npx esure run scenario2.yaml || EXIT_CODE=1
-npx esure run scenario3.yaml || EXIT_CODE=1
+(cd esure-cli && node dist/cli.js run scenario1.yaml) || EXIT_CODE=1
+(cd esure-cli && node dist/cli.js run scenario2.yaml) || EXIT_CODE=1
+(cd esure-cli && node dist/cli.js run scenario3.yaml) || EXIT_CODE=1
 exit $EXIT_CODE
 ```
 
@@ -363,7 +367,7 @@ exit $EXIT_CODE
 ```bash
 #!/bin/bash
 
-RESULT=$(npx esure run xlm-payment --output json)
+RESULT=$(cd esure-cli && node dist/cli.js run xlm-payment --output json)
 STATUS=$(echo "$RESULT" | jq -r '.status')
 
 if [ "$STATUS" = "passed" ]; then
@@ -383,7 +387,9 @@ import { spawn } from 'child_process';
 
 async function runScenario(scenarioId) {
   return new Promise((resolve, reject) => {
-    const child = spawn('npx', ['esure', 'run', scenarioId, '--output', 'json']);
+    const child = spawn('node', ['esure-cli/dist/cli.js', 'run', scenarioId, '--output', 'json'], {
+      cwd: process.cwd() // Assumes repo root
+    });
     let output = '';
     
     child.stdout.on('data', (data) => {
@@ -440,14 +446,14 @@ try {
 **Symptom**: Exit code 1 before execution starts
 
 **Solution**:
-- Run `npx esure validate <file>` locally first
+- Run `cd esure-cli && node dist/cli.js validate <file>` locally first
 - Check scenario schema compliance
 - Ensure no Mainnet config, secrets, or URLs in scenarios
 
 ## Security Considerations
 
 - Never commit secret seeds to scenario files
-- ESURE CLI rejects scenarios with secrets or Mainnet config
+- Esure CLI rejects scenarios with secrets or Mainnet config
 - Generated Testnet keys are ephemeral and not persisted
 - Scenario validation runs before any network access
 
