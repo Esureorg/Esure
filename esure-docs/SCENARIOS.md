@@ -6,7 +6,7 @@ no executable code or credentials and are validated before Testnet access.
 
 ## Bundled Scenarios
 
-ESURE includes 10 production-ready scenarios covering common Stellar integration patterns:
+ESURE includes 10 MVP scenarios for Testnet integration testing:
 
 | Scenario ID | Purpose | Expected Result |
 | --- | --- | --- |
@@ -18,8 +18,8 @@ ESURE includes 10 production-ready scenarios covering common Stellar integration
 | `multi-operation-transaction` | Execute trustline + payment atomically in single tx | Pass |
 | `trustline-limit-exceeded` | Attempt payment exceeding trustline limit | Controlled `op_line_full` failure |
 | `trustline-already-exists` | Multiple payments using existing trustline | Pass |
-| `account-merge-simple` | Transfer XLM between accounts demonstrating merge readiness | Pass |
-| `zero-amount-payment` | Valid non-zero payment (schema rejects zero amounts) | Pass |
+| `basic-payment-with-checks` | Send XLM and verify both accounts exist | Pass |
+| `minimum-xlm-payment` | Send minimum viable XLM (1 stroop) | Pass |
 
 These scenarios demonstrate XLM transfers, issued assets, trustline management,
 expected failure handling, and multi-step transaction flows that Stellar developers

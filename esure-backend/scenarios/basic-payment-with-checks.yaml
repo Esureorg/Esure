@@ -1,8 +1,8 @@
 schemaVersion: 1
-id: account-merge-simple
+id: basic-payment-with-checks
 version: 1
-name: Simple account merge
-description: Merge one account into another, transferring all XLM balance.
+name: Basic payment with account checks
+description: Send XLM between two accounts and verify both accounts exist after the transaction.
 network: testnet
 accounts:
   - id: source

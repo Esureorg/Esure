@@ -1,8 +1,8 @@
 schemaVersion: 1
-id: zero-amount-payment
+id: minimum-xlm-payment
 version: 1
-name: Zero amount payment
-description: Verify that a payment with zero amount is rejected during validation.
+name: Minimum XLM payment
+description: Send minimum viable XLM amount (1 stroop = 0.0000001 XLM) to verify small payment handling.
 network: testnet
 accounts:
   - id: sender
@@ -15,16 +15,16 @@ assets:
   - id: xlm
     type: native
 steps:
-  - id: send-one-xlm
+  - id: send-minimum-xlm
     type: payment
     from: sender
     to: recipient
     asset: xlm
-    amount: "1"
+    amount: "0.0000001"
 assertions:
   - type: stepSucceeded
-    step: send-one-xlm
+    step: send-minimum-xlm
   - type: balanceChangedBy
     account: recipient
     asset: xlm
-    amount: "1"
+    amount: "0.0000001"

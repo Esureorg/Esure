@@ -29,7 +29,7 @@ take longer than subsequent requests.
 
 ## Capabilities
 
-- **10 Production Scenarios**: XLM payments, issued assets, trustlines, expected failures, multi-op transactions, and error conditions
+- **10 MVP Scenarios**: XLM payments, issued assets, trustlines, expected failures, multi-op transactions (Testnet only)
 - **Developer-Friendly Errors**: Plain-English explanations for 30+ Stellar error codes with causes and fix suggestions
 - **Command-Line Interface**: Run scenarios from terminal or CI pipelines with `npx esure`
 - **CI/CD Integration**: First-class GitHub Actions, GitLab CI, and CircleCI support
@@ -60,7 +60,7 @@ Esure is useful for:
 
 ## Bundled scenarios
 
-ESURE includes 10 production-ready scenarios covering common Stellar integration patterns:
+ESURE includes 10 MVP scenarios for Testnet integration testing:
 
 | Scenario | Purpose | Expected result |
 | --- | --- | --- |
@@ -72,8 +72,8 @@ ESURE includes 10 production-ready scenarios covering common Stellar integration
 | `multi-operation-transaction` | Execute trustline + payment atomically in single tx | Pass |
 | `trustline-limit-exceeded` | Attempt payment exceeding trustline limit | Controlled `op_line_full` failure |
 | `trustline-already-exists` | Multiple payments using existing trustline | Pass |
-| `account-merge-simple` | Transfer XLM between accounts demonstrating merge readiness | Pass |
-| `zero-amount-payment` | Valid non-zero payment (schema rejects zero amounts) | Pass |
+| `basic-payment-with-checks` | Send XLM and verify both accounts exist after transaction | Pass |
+| `minimum-xlm-payment` | Send minimum viable XLM amount (1 stroop = 0.0000001 XLM) | Pass |
 
 Each run generates fresh Testnet accounts, so repeated executions remain
 isolated from previous runs. See [SCENARIOS.md](esure-docs/SCENARIOS.md) for
