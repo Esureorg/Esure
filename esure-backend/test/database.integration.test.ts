@@ -55,7 +55,8 @@ const postgresAvailable = process.platform !== "win32" || existsSync("C:/Windows
     const repository = new PublishedScenarioRepository(database);
     await repository.reconcile(registry);
     await repository.reconcile(registry);
-    expect(await repository.list()).toHaveLength(3);
+    const scenarios = await repository.list();
+    expect(scenarios.length).toBeGreaterThanOrEqual(10);
     expect((await repository.history("xlm-payment", 20)).items).toHaveLength(1);
 
     const original = registry.find("xlm-payment")!;
@@ -133,7 +134,8 @@ const postgresAvailable = process.platform !== "win32" || existsSync("C:/Windows
     const app = buildApp({ config: databaseConfig(`postgresql://postgres:test-password@127.0.0.1:${port}/postgres`) });
     try {
       await app.ready();
-      expect((await app.inject({ method: "GET", url: "/api/v1/scenarios" })).json().items).toHaveLength(3);
+      const items = (await app.inject({ method: "GET", url: "/api/v1/scenarios" })).json().items;
+      expect(items.length).toBeGreaterThanOrEqual(10);
       expect((await app.inject({ method: "GET", url: "/api/v1/scenarios/xlm-payment/versions?limit=1" })).json().items).toHaveLength(1);
       expect((await app.inject({ method: "GET", url: "/api/v1/scenarios/xlm-payment/versions/1" })).json()).toMatchObject({ id: "xlm-payment", version: 1 });
       const exported = await app.inject({ method: "GET", url: "/api/v1/scenarios/xlm-payment/versions/1/export?format=yaml" });

@@ -67,10 +67,10 @@ describe("Esure API", () => {
     expect(response.json().error.code).toBe("PERSISTENCE_REQUIRED");
   });
 
-  it("lists the three bundled scenarios", async () => {
+  it("lists the bundled scenarios", async () => {
     const response = await createApp().inject({ method: "GET", url: "/api/v1/scenarios" });
     expect(response.statusCode).toBe(200);
-    expect(response.json().items).toHaveLength(3);
+    expect(response.json().items.length).toBeGreaterThanOrEqual(10);
     expect(response.json().items[0].contentHash).toMatch(/^sha256:[a-f0-9]{64}$/);
   });
 

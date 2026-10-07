@@ -20,6 +20,7 @@ import type {
   ValidatedScenario,
 } from "./domain.js";
 import { SafeRunError, StepTimeoutError, withTimeout } from "./errors.js";
+import { interpretOperationCode, interpretTransactionCode, isStellarErrorRetryable } from "./stellar-error-interpreter.js";
 
 export type { FriendbotRetryConfig };
 
@@ -377,7 +378,14 @@ export function isExpectedMissingTrustlineError(error: unknown): boolean { retur
 export function normalizeStellarError(error: unknown, failedStepId: string): SafeRunError {
   if (error instanceof SafeRunError) { if (!error.report.failedStepId) error.report.failedStepId = failedStepId; return error; }
   const codes = extractStellarResultCodes(error);
-  if (codes) return new SafeRunError({ code: "STELLAR_TRANSACTION_FAILED", message: `Stellar rejected step ${failedStepId} with ${failureCode(codes.transactionCode, codes.operationCodes)}.`, category: "stellar", retryable: false, failedStepId, stellarTransactionCode: codes.transactionCode, stellarOperationCodes: codes.operationCodes });
+  if (codes) {
+    const txInterpretation = interpretTransactionCode(codes.transactionCode);
+    const retryable = isStellarErrorRetryable(codes.transactionCode, codes.operationCodes);
+    const firstOpCode = codes.operationCodes[0];
+    const opSummary = firstOpCode ? ` ${interpretOperationCode(firstOpCode).summary}.` : "";
+    const message = `Stellar rejected step ${failedStepId}: ${txInterpretation.summary}.${opSummary}`;
+    return new SafeRunError({ code: "STELLAR_TRANSACTION_FAILED", message, category: "stellar", retryable, failedStepId, stellarTransactionCode: codes.transactionCode, stellarOperationCodes: codes.operationCodes });
+  }
   return new SafeRunError({ code: "NETWORK_UNAVAILABLE", message: `Stellar network execution failed during step ${failedStepId}. Internal details were removed.`, category: "network", retryable: true, failedStepId });
 }
 
