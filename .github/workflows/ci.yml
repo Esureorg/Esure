@@ -46,3 +46,25 @@ jobs:
       - run: npx playwright install --with-deps chromium
       - run: npm run test:e2e
 
+  cli:
+    name: CLI checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install backend dependencies
+        working-directory: esure-backend
+        run: npm ci
+      - name: Install CLI dependencies
+        working-directory: esure-cli
+        run: npm ci
+      - name: Typecheck CLI
+        working-directory: esure-cli
+        run: npm run typecheck
+      - name: Build CLI
+        working-directory: esure-cli
+        run: npm run build
+
