@@ -205,9 +205,10 @@ describe("CLI commands", () => {
       status: "passed",
       summary: { stepsPassed: 1, stepsFailed: 0, assertionsPassed: 1, assertionsFailed: 0 },
     });
-    expect(mocks.execute).toHaveBeenCalledWith(expect.objectContaining({ id: scenario.id }), {
-      stepTimeoutMs: 30000,
-    });
+    expect(mocks.execute).toHaveBeenCalledWith(
+      expect.objectContaining({ id: scenario.id }),
+      expect.objectContaining({ stepTimeoutMs: 30000 }),
+    );
   });
 
   it("runs a scenario file and prints a human-readable passing report", async () => {
@@ -575,3 +576,283 @@ describe("#68 ASCII status markers", () => {
     expect(stdout.join("\n")).toContain("--ascii");
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #54 — Structured JSON argument errors
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("#54 CLI argument errors conform to JSON mode", () => {
+  beforeEach(() => {
+    stdout = [];
+    stderr = [];
+    originalArgv = process.argv;
+    originalExitCode = process.exitCode;
+    process.exitCode = undefined;
+    vi.spyOn(console, "log").mockImplementation((...values: unknown[]) => {
+      stdout.push(values.join(" "));
+    });
+    vi.spyOn(console, "error").mockImplementation((...values: unknown[]) => {
+      stderr.push(values.join(" "));
+    });
+    mocks.list.mockReturnValue(catalog);
+    mocks.find.mockImplementation((id: string) => id === scenario.id ? structuredClone(scenario) : undefined);
+    mocks.createRegistry.mockReturnValue({ list: mocks.list, find: mocks.find });
+    mocks.execute.mockResolvedValue(passedExecution);
+  });
+
+  afterEach(() => {
+    process.argv = originalArgv;
+    process.exitCode = originalExitCode;
+    vi.restoreAllMocks();
+  });
+
+  it("returns JSON error envelope for unknown command with --output json", async () => {
+    expect(await invokeCli("unknown-cmd", "--output", "json")).toBe(1);
+    expect(stdout).toEqual([]);
+    const err = JSON.parse(stderr.join("\n"));
+    expect(err).toEqual({
+      error: {
+        code: "INVALID_ARGUMENT",
+        message: 'Unknown command "unknown-cmd"',
+      },
+    });
+  });
+
+  it("returns JSON error envelope for missing validate file target with -o json", async () => {
+    expect(await invokeCli("validate", "-o", "json")).toBe(1);
+    expect(stdout).toEqual([]);
+    const err = JSON.parse(stderr.join("\n"));
+    expect(err).toEqual({
+      error: {
+        code: "INVALID_ARGUMENT",
+        message: "Missing file path argument",
+      },
+    });
+  });
+
+  it("returns JSON error envelope for missing run scenario target with --output json", async () => {
+    expect(await invokeCli("run", "--output", "json")).toBe(1);
+    expect(stdout).toEqual([]);
+    const err = JSON.parse(stderr.join("\n"));
+    expect(err).toEqual({
+      error: {
+        code: "INVALID_ARGUMENT",
+        message: "Missing scenario ID or file path",
+      },
+    });
+  });
+
+  it("returns JSON error envelope for missing run-suite target with --output json", async () => {
+    expect(await invokeCli("run-suite", "--output", "json")).toBe(1);
+    expect(stdout).toEqual([]);
+    const err = JSON.parse(stderr.join("\n"));
+    expect(err).toEqual({
+      error: {
+        code: "INVALID_ARGUMENT",
+        message: "Missing scenario IDs",
+      },
+    });
+  });
+
+  it("returns JSON error envelope for invalid output format with --output=unknown", async () => {
+    expect(await invokeCli("list", "--output", "xml")).toBe(1);
+    expect(stdout).toEqual([]);
+    expect(stderr.join("\n")).toContain("Invalid output format");
+  });
+
+  it("returns JSON error envelope for unknown option when --output json is specified", async () => {
+    expect(await invokeCli("list", "--bogus-flag", "--output", "json")).toBe(1);
+    expect(stdout).toEqual([]);
+    const err = JSON.parse(stderr.join("\n"));
+    expect(err.error.code).toBe("INVALID_ARGUMENT");
+    expect(err.error.message).toContain("Unknown option");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #55 — Bounded overall run timeout
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("#55 bounded overall run timeout", () => {
+  beforeEach(() => {
+    stdout = [];
+    stderr = [];
+    originalArgv = process.argv;
+    originalExitCode = process.exitCode;
+    process.exitCode = undefined;
+    vi.spyOn(console, "log").mockImplementation((...values: unknown[]) => {
+      stdout.push(values.join(" "));
+    });
+    vi.spyOn(console, "error").mockImplementation((...values: unknown[]) => {
+      stderr.push(values.join(" "));
+    });
+    mocks.list.mockReturnValue(catalog);
+    mocks.find.mockImplementation((id: string) => id === scenario.id ? structuredClone(scenario) : undefined);
+    mocks.createRegistry.mockReturnValue({ list: mocks.list, find: mocks.find });
+  });
+
+  afterEach(() => {
+    process.argv = originalArgv;
+    process.exitCode = originalExitCode;
+    vi.restoreAllMocks();
+  });
+
+  it("rejects non-integer or out-of-range timeout values in JSON mode", async () => {
+    expect(await invokeCli("run", scenario.id, "--timeout-ms", "0", "--output", "json")).toBe(1);
+    const err = JSON.parse(stderr.join("\n"));
+    expect(err.error.code).toBe("INVALID_ARGUMENT");
+    expect(err.error.message).toContain("--timeout-ms must be an integer between 1 and 600000");
+
+    stderr = [];
+    expect(await invokeCli("run", scenario.id, "--timeout-ms", "abc", "--output", "json")).toBe(1);
+    const err2 = JSON.parse(stderr.join("\n"));
+    expect(err2.error.code).toBe("INVALID_ARGUMENT");
+    expect(err2.error.message).toContain("--timeout-ms must be an integer between 1 and 600000");
+  });
+
+  it("aborts execution and returns stable timeout error in JSON mode", async () => {
+    mocks.execute.mockImplementation((_sc: unknown, opts: { signal?: AbortSignal }) => {
+      return new Promise((_resolve, reject) => {
+        opts.signal?.addEventListener("abort", () => {
+          reject(new Error("aborted"));
+        });
+      });
+    });
+
+    const exitCode = await invokeCli("run", scenario.id, "--timeout-ms", "10", "--output", "json");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(process.exitCode).toBe(1);
+    const err = JSON.parse(stderr.join("\n"));
+    expect(err.status).toBe("error");
+    expect(err.error.code).toBe("RUN_TIMEOUT");
+    expect(err.error.message).toContain("10ms");
+  });
+
+  it("aborts execution and reports timeout in human mode", async () => {
+    mocks.execute.mockImplementation((_sc: unknown, opts: { signal?: AbortSignal }) => {
+      return new Promise((_resolve, reject) => {
+        opts.signal?.addEventListener("abort", () => {
+          reject(new Error("aborted"));
+        });
+      });
+    });
+
+    await invokeCli("run", scenario.id, "--timeout-ms", "10");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(process.exitCode).toBe(1);
+    expect(stderr.join("\n")).toContain("Run timed out: The run exceeded its 10ms execution limit.");
+  });
+
+  it("clears timeout handle when execution completes before deadline", async () => {
+    mocks.execute.mockResolvedValueOnce(passedExecution);
+    expect(await invokeCli("run", scenario.id, "--timeout-ms", "10000", "--output", "json")).toBe(0);
+    const out = JSON.parse(stdout.join("\n"));
+    expect(out.status).toBe("passed");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #56 — SIGINT and SIGTERM graceful cancellation
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("#56 graceful SIGINT and SIGTERM cancellation", () => {
+  beforeEach(() => {
+    stdout = [];
+    stderr = [];
+    originalArgv = process.argv;
+    originalExitCode = process.exitCode;
+    process.exitCode = undefined;
+    vi.spyOn(console, "log").mockImplementation((...values: unknown[]) => {
+      stdout.push(values.join(" "));
+    });
+    vi.spyOn(console, "error").mockImplementation((...values: unknown[]) => {
+      stderr.push(values.join(" "));
+    });
+    mocks.list.mockReturnValue(catalog);
+    mocks.find.mockImplementation((id: string) => id === scenario.id ? structuredClone(scenario) : undefined);
+    mocks.createRegistry.mockReturnValue({ list: mocks.list, find: mocks.find });
+  });
+
+  afterEach(() => {
+    process.argv = originalArgv;
+    process.exitCode = originalExitCode;
+    vi.restoreAllMocks();
+  });
+
+  it("handles SIGINT with exit code 130 and concise JSON output", async () => {
+    const initialSigintListeners = process.listenerCount("SIGINT");
+    const initialSigtermListeners = process.listenerCount("SIGTERM");
+
+    mocks.execute.mockImplementation((_sc: unknown, opts: { signal?: AbortSignal }) => {
+      return new Promise((_resolve, reject) => {
+        opts.signal?.addEventListener("abort", () => {
+          reject(new Error("operation aborted"));
+        });
+        setImmediate(() => {
+          process.emit("SIGINT");
+        });
+      });
+    });
+
+    const exitCode = await invokeCli("run", scenario.id, "--output", "json");
+    expect(exitCode).toBe(130);
+    const err = JSON.parse(stderr.join("\n"));
+    expect(err).toEqual({
+      status: "cancelled",
+      error: {
+        code: "SIGINT",
+        message: "Execution interrupted by SIGINT.",
+      },
+    });
+
+    // Verify listeners are cleaned up
+    expect(process.listenerCount("SIGINT")).toBe(initialSigintListeners);
+    expect(process.listenerCount("SIGTERM")).toBe(initialSigtermListeners);
+  });
+
+  it("handles SIGTERM with exit code 143 and concise human output", async () => {
+    mocks.execute.mockImplementation((_sc: unknown, opts: { signal?: AbortSignal }) => {
+      return new Promise((_resolve, reject) => {
+        opts.signal?.addEventListener("abort", () => {
+          reject(new Error("operation aborted"));
+        });
+        setImmediate(() => {
+          process.emit("SIGTERM");
+        });
+      });
+    });
+
+    const exitCode = await invokeCli("run", scenario.id);
+    expect(exitCode).toBe(143);
+    expect(stderr.join("\n")).toContain("Execution terminated by SIGTERM.");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #57 — Dynamic version from package metadata
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("#57 derive --version from package metadata", () => {
+  beforeEach(() => {
+    stdout = [];
+    stderr = [];
+    originalArgv = process.argv;
+    originalExitCode = process.exitCode;
+    process.exitCode = undefined;
+    vi.spyOn(console, "log").mockImplementation((...values: unknown[]) => {
+      stdout.push(values.join(" "));
+    });
+  });
+
+  afterEach(() => {
+    process.argv = originalArgv;
+    process.exitCode = originalExitCode;
+    vi.restoreAllMocks();
+  });
+
+  it("displays version matching package.json", async () => {
+    expect(await invokeCli("--version")).toBe(0);
+    expect(stdout.join("\n")).toBe("esure v0.1.0");
+  });
+});
+
