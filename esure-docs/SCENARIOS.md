@@ -12,7 +12,9 @@ ESURE includes 14 bundled scenarios for Testnet integration testing:
 | --- | --- | --- |
 | `xml-payment` | Fund two accounts, transfer 5 XLM, verify balance change | Pass |
 | `issued-asset-payment` | Create TESTUSJ trustline, issue 100 TESTUSD, verify balance | Pass |
+| `issued-asset-holder-transfer` | Issue 100 TESTUSD to a sender, who transfers 40 to a second holder | Pass |
 | `missing-trustline` | Attempt issued-asset payment without recipient trustline | Controlled `op_no_trust` failure |
+| `sender-missing-trustline` | Attempt issued-asset payment from a funded, non-issuer sender without a trustline | Controlled `op_src_no_trust` failure |
 | `wrong-issuer-trustline` | Pay a same-code asset whose issuer the recipient does not trust | Controlled `op_no_trust` failure for the actual issuer |
 | `insufficient-xlm-balance` | Attempt to send more XLM than available in account | Controlled `op_underfunded` failure |
 | `unfunded-destination` | Fund only the sender and pay a generated destination absent from the ledger | Controlled `tx_failed/op_no_destination` failure |
@@ -62,6 +64,14 @@ Verify live behavior only through the existing opt-in smoke path: set
 RUN_STELLAR_SMOKE=1, then run
 `npm test -- test/testnet-smoke.test.ts -t unfunded-destination` from
 `esure-backend`. Normal unit/API tests use mocked funding and Horizon responses.
+
+`missing-trustline` and `sender-missing-trustline` fail on opposite sides of
+the same payment. In `missing-trustline` the recipient cannot hold the asset, so
+Stellar reports `op_no_trust`. In `sender-missing-trustline` the recipient has a
+trustline and an issued balance of 50 TESTUSD, while the XLM-funded sender has
+never trusted the asset, so Stellar reports `op_src_no_trust` and the
+recipient's balance stays at exactly 50. The sender is deliberately not the
+issuer: an issuer can always send its own asset without a trustline.
 
 `path-payment` provisions its own Testnet liquidity. It creates generated sender,
 market-maker, recipient, and issuer accounts, then submits trustlines, issues
