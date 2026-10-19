@@ -25,6 +25,7 @@ describe("exact trustline limit fixture", () => {
       { type: "stepSucceeded", step: "create-limited-trustline" },
       { type: "stepSucceeded", step: "fill-trustline" },
       { type: "transactionConfirmed", step: "fill-trustline" },
+      { type: "trustlineLimitEquals", account: "recipient", asset: "limited-asset", limit: "100.1234567" },
       { type: "balanceEquals", account: "recipient", asset: "limited-asset", amount: "100.1234567" },
     ]);
   });
@@ -40,7 +41,7 @@ describe("exact trustline limit fixture", () => {
     let paid = false;
     const funding = vi.fn<typeof fetch>().mockImplementation(async () => new Response("{}", { status: 200 }));
     vi.spyOn(Horizon.Server.prototype, "loadAccount").mockImplementation(async (key) => {
-      const balances = paid && key === recipient ? [{ asset_type: "credit_alphanum12", asset_code: "LIMITED", asset_issuer: issuer, balance: finalBalance }] : [];
+      const balances = paid && key === recipient ? [{ asset_type: "credit_alphanum12", asset_code: "LIMITED", asset_issuer: issuer, balance: finalBalance, limit: "100.1234567" }] : [];
       return Object.assign(new Account(key, "1"), { balances }) as unknown as Awaited<ReturnType<Horizon.Server["loadAccount"]>>;
     });
     vi.spyOn(Horizon.Server.prototype, "fetchTimebounds").mockResolvedValue({ minTime: 0, maxTime: 2_000_000_000 });
@@ -82,6 +83,7 @@ describe("exact trustline limit fixture", () => {
     expect(new Set(funding.mock.calls.map(([url]) => new URL(String(url)).searchParams.get("addr")))).toEqual(new Set([trust.source, payment.source]));
     expect(report.assertions).toContainEqual(expect.objectContaining({ type: "stepSucceeded", status: "passed", actual: true }));
     expect(report.assertions).toContainEqual(expect.objectContaining({ type: "transactionConfirmed", status: ledger ? "passed" : "failed", actual: Boolean(ledger) }));
+    expect(report.assertions).toContainEqual(expect.objectContaining({ type: "trustlineLimitEquals", status: "passed", expected: "100.1234567" }));
     expect(report.assertions).toContainEqual(expect.objectContaining({ type: "balanceEquals", status: finalBalance === "100.1234567" ? "passed" : "failed", expected: "100.1234567", actual: finalBalance }));
     expect(JSON.stringify(report)).not.toContain(trust.source);
     expect(JSON.stringify(report)).not.toContain(payment.source);
