@@ -1,23 +1,27 @@
 {
   "schemaVersion": 1,
   "id": "issued-asset-payment",
-  "version": 1,
+  "version": 2,
   "name": "Issued asset payment",
-  "description": "Issue TESTUSD and send it to a recipient through a trustline.",
+  "description": "Two issued assets share the code TESTUSD but have distinct issuer references. The recipient holds a trustline only to the first issuer, so a payment of the second issuer's TESTUSD must be rejected: a matching asset code is not enough because the issuer identity is part of the asset. The payment must fail with the precise missing-trustline error for the actual second issuer, and the recipient's existing trustline to the first issuer must remain present with its balance unchanged.",
   "network": "testnet",
   "accounts": [
-    { "id": "issuer", "generate": true, "fund": true },
+    { "id": "issuer-one", "generate": true, "fund": true },
+    { "id": "issuer-two", "generate": true, "fund": true },
     { "id": "recipient", "generate": true, "fund": true }
   ],
   "assets": [
     { "id": "xlm", "type": "native" },
-    { "id": "test-usd", "type": "issued", "code": "TESTUSD", "issuer": "issuer" }
+    { "id": "test-usd-one", "type": "issued", "code": "TESTUSD", "issuer": "issuer-one" },
+    { "id": "test-usd-two", "type": "issued", "code": "TESTUSD", "issuer": "issuer-two" }
   ],
   "steps": [
-    { "id": "create-trustline", "type": "changeTrust", "account": "recipient", "asset": "test-usd" },
-    { "id": "send-testusd", "type": "payment", "from": "issuer", "to": "recipient", "asset": "test-usd", "amount": "100" }
+    { "id": "create-trustline", "type": "changeTrust", "account": "recipient", "asset": "test-usd-one" },
+    { "id": "send-testusd", "type": "payment", "from": "issuer-two", "to": "recipient", "asset": "test-usd-two", "amount": "100", "expectedError": { "code": "MISSING_TRUSTLINE", "account": "recipient", "asset": "test-usd-two", "issuer": "issuer-two" } }
   ],
   "assertions": [
-    { "type": "balanceEquals", "account": "recipient", "asset": "test-usd", "amount": "100" }
+    { "type": "trustlineExists", "account": "recipient", "asset": "test-usd-one" },
+    { "type": "balanceEquals", "account": "recipient", "asset": "test-usd-one", "amount": "0" },
+    { "type": "trustlineMissing", "account": "recipient", "asset": "test-usd-two" }
   ]
 }

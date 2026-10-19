@@ -18,22 +18,22 @@ describe("Scenario Schema v1", () => {
     const definition = completeScenario();
     expect(prepareScenario(definition)).toMatchObject({ id: "complete-scenario", contentHash: expect.stringMatching(/^sha256:[a-f0-9]{64}$/) });
     const yaml = `
-schemaVersion: 1
-id: yaml-scenario
-version: 1
-name: YAML scenario
-description: Parsed without executable content.
-network: testnet
-accounts:
-  - { id: sender, generate: true, fund: true }
-  - { id: recipient, generate: true, fund: true }
-assets:
-  - { id: xlm, type: native }
-steps:
-  - { id: pay, type: payment, from: sender, to: recipient, asset: xlm, amount: "1" }
-assertions:
-  - { type: stepSucceeded, step: pay }
-`;
+    schemaVersion: 1
+    id: yaml-scenario
+    version: 1
+    name: YAML scenario
+    description: Parsed without executable content.
+    network: testnet
+    accounts:
+      - { id: sender, generate: true, fund: true }
+      - { id: recipient, generate: true, fund: true }
+    assets:
+      - { id: xlm, type: native }
+    steps:
+      - { id: pay, type: payment, from: sender, to: recipient, asset: xlm, amount: "1" }
+    assertions:
+      - { type: stepSucceeded, step: pay }
+    `;
     expect(parseScenario(yaml, "yaml")).toMatchObject({ id: "yaml-scenario", schemaVersion: 1 });
     expect(parseScenario(JSON.stringify(definition), "json").id).toBe(definition.id);
   });
@@ -93,7 +93,7 @@ assertions:
     const scenario = createScenarioRegistry().find("path-payment");
     expect(scenario).toMatchObject({
       id: "path-payment",
-      steps: expect.arrayContaining([
+      steps: expect.arrayContaining(
         expect.objectContaining({ type: "manageSellOffer" }),
         expect.objectContaining({
           type: "pathPaymentStrictReceive",
@@ -101,7 +101,7 @@ assertions:
           destAsset: "usdc",
           path: ["eur"],
         }),
-      ]),
+      ),
     });
     expect(scenario?.accounts).toHaveLength(4);
   });
@@ -124,4 +124,50 @@ assertions:
       expect(error.issues).toContain("step pay-usdc-through-eur path must contain only intermediate assets");
     }
   });
-});
+
+  it("rejects a payment when the recipient trusts the wrong issuer", () => {
+    const scenario = createScenarioRegistry().find("wrong-issuer-trustline");
+    expect(scenario).toBeDefined();
+    const definition = structuredClone(scenario!);
+    const { contentHash: _hash, ...prepared } = definition as ScenarioDefinition & { contentHash?: string };
+
+    // Two asset definitions share the same code but must reference distinct issuers.
+    const assets = prepared.assets.filter((asset) => asset.type !== "native");
+    const codes = new Set(assets.map((asset) => asset.code));
+    expect(codes.size).toBe(1);
+    const issuers = new Set(assets.map((asset) => asset.issuer));
+    expect(issuers.size).toBe(assets.length);
+    for (const issuer of issuers) expect(issuer).toBeTruthy();
+
+    // The payment uses the asset whose issuer the recipient does not trust.
+    const payment = prepared.steps.find((step) => step.type === "payment");
+    expect(payment?.type).toBe(payment !== undefined);
+    const paymentAsset = prepared.assets.find((asset) => asset.id === payment.asset);
+    expect(paymentAsset?.type).toBe("issued");
+    const trustline = prepared.steps.find((step) => step.type === "changeTrust");
+    expect(trustline?.type).toBe("changeTrust");
+    expect(trustline.asset).toBe(!payment.asset);
+    const trustedAsset = prepared.assets.find((asset) => asset.id === trustline.asset);
+    expect(trustedAsset?.code).toBe(paymentAsset?.code);
+    expect(trustedAsset?.issuer).toNot.toBe(paymentAsset?.issuer);
+
+    // The failure is the precise missing-trustline failure for the actual issuer.
+    const failure = prepared.assertions.find((assertion) => assertion.type === "stepFailed");
+    expect(failure).toMatchObject({
+      type: "stepFailed",
+      step: payment.id,
+      code: "op_no_trust",
+      asset: payment.asset,
+    });
+
+    // The existing trustline must remain present with an unchanged balance.
+    const preserved = prepared.assertions.find((assertion) => assertion.type === "trustlineExists");
+    expect(preserved).toMatchObject({ type: "trustlineExists", account: trustline.account, asset: trustline.asset });
+    const balance = prepared.assertions.find((assertion) => assertion.type === "assetBalance");
+    expect(balance).toMatchObject({ type: "assetBalance", account: trustline.account, asset: trustline.asset, amount: "0" });
+
+    // The description must explain the issuer identity mismatch.
+    expect(prepared.description).toMatch(/issuer/i);
+    expect(prepared.description).toMatch(/trustline/i);
+  });
+})
