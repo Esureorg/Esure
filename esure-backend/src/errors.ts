@@ -65,6 +65,18 @@ export class RunTimeoutError extends SafeRunError {
   }
 }
 
+export class OptimisticConcurrencyError extends SafeRunError {
+  constructor(runId: string) {
+    super({
+      code: "OPTIMISTIC_CONCURRENCY_CONFLICT",
+      message: `Run ${runId} was modified by another writer; the update was rejected.`,
+      category: "internal",
+      retryable: true,
+    });
+    this.name = "OptimisticConcurrencyError";
+  }
+}
+
 export class ShutdownError extends SafeRunError {
   constructor() {
     super({

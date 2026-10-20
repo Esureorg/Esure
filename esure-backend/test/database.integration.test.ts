@@ -40,7 +40,7 @@ const postgresAvailable = process.platform !== "win32" || existsSync("C:/Windows
     await runMigrations(database, undefined, "esure_migrations");
     await runMigrations(database, undefined, "esure_migrations");
     const result = await database.query<{ count: string }>("SELECT count(*)::text AS count FROM schema_migrations");
-    expect(result.rows[0]?.count).toBe("3");
+    expect(result.rows[0]?.count).toBe("4");
   });
 
   it("detects a modified migration checksum", async () => {

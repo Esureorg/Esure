@@ -17,6 +17,38 @@ secret seeds and account keys before writing JSON, and expire from reads using
 and deletes report-only rows; use it only when intentionally discarding that
 history.
 
+Migration 004 adds a `version` column to `runs` for optimistic concurrency.
+`PostgresRunStore.update` rejects any write whose stored version does not match
+the version observed when the report was last read, throwing an
+`OptimisticConcurrencyError`, and increments the version on each successful
+update so concurrent writers cannot silently overwrite each other's evidence.
+
+Expired terminal reports are hidden from reads but retained until physically
+removed. `PostgresRunStore.pruneExpired(batchSize, { dryRun })` — exposed to
+operators as `npm run prune:runs` — deletes expired terminal runs in bounded
+batches so large backlogs cannot accumulate in a single transaction. Nothing
+invokes it automatically; it runs only on explicit operator request.
+
+Deletion follows the audited cleanup contract enforced by the
+`guard_run_cleanup` trigger from migration 001: every batch runs in its own
+transaction as the `esure_maintenance` role with transaction-local
+`esure.cleanup_mode=on` and a fresh `esure.cleanup_id`, and writes one
+`cleanup_audit` row per deleted run (`action='delete_run'`) before the DELETE.
+The trigger also enforces a hard 30-day floor, so a run is deleted only when it
+is terminal (`passed`/`failed`), past the configured `RUN_RETENTION_MS`
+cutoff, and older than 30 days; runs between the retention cutoff and the
+floor stay hidden from reads until they age past the floor and a later prune
+removes them. Child rows (`run_steps`, `assertion_results`) are removed by
+`ON DELETE CASCADE`.
+
+`dryRun: true` (or `--dry-run` on the operator script) reports the eligible
+count without deleting anything. Batches commit atomically and the loop stops
+at the first failing batch: already-committed batches stay deleted with their
+audit entries, and rerunning the prune is idempotent because it simply
+reselects whatever remains eligible. The operator script prints the deleted
+(or eligible) count and exits nonzero with a redacted error if the database
+is unreachable or the login lacks `esure_maintenance` membership.
+
 ## Identity and immutability
 
 `scenarios.id` is a server UUID. Bundled/operator scenarios alone have a unique

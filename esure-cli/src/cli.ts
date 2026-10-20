@@ -64,6 +64,8 @@ Usage:
   esure run <scenario-id>                 Run a bundled scenario
   esure run <file>                        Run a scenario from file
   esure run-suite <id> [<id>...]          Run multiple bundled scenarios sequentially
+  esure completions <shell>               Generate shell completions (bash|zsh)
+  esure doctor                            Diagnose the local installation
 
 Options:
   --output <format>        Output format: human (default) or json
@@ -899,6 +901,163 @@ async function runSuiteCommand(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// #158 — shell command completions (bash, zsh)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const COMPLETION_COMMANDS = [
+  "list",
+  "validate",
+  "init",
+  "run",
+  "run-suite",
+  "completions",
+  "doctor",
+];
+
+const COMPLETION_OPTIONS = [
+  "--help",
+  "--version",
+  "--output",
+  "--ascii",
+  "--report-file",
+  "--junit",
+  "--overwrite",
+  "--fail-fast",
+];
+
+function generateCompletions(shell: "bash" | "zsh"): string {
+  const quotedCommands = COMPLETION_COMMANDS.map((c) => `"${c}"`).join(" ");
+  const quotedOptions = COMPLETION_OPTIONS.map((o) => `"${o}"`).join(" ");
+  const cmdList = COMPLETION_COMMANDS.join(" ");
+  const optList = COMPLETION_OPTIONS.join(" ");
+
+  if (shell === "zsh") {
+    return `#compdef esure
+# Esure CLI shell completion for zsh.
+# Source this file or add it to your fpath to enable completions.
+
+_esure() {
+  local -a commands=(${quotedCommands})
+  local -a options=(${quotedOptions})
+
+  if [[ \${words[1]} == "esure" ]]; then
+    if (( CURRENT == 2 )); then
+      _describe 'command' commands
+    elif (( CURRENT > 2 )); then
+      _describe 'option' options
+    fi
+  fi
+}
+
+_esure "$@"
+`;
+  }
+
+  return `_esure_complete() {
+  local cur prev opts cmds
+  COMPREPLY=()
+  cur="\${COMP_WORDS[COMP_CWORD]}"
+  prev="\${COMP_WORDS[COMP_CWORD-1]}"
+  cmds="${cmdList}"
+  opts="${optList}"
+
+  if [[ \${cur} == -* ]] ; then
+    COMPREPLY=( $(compgen -W "\${opts}" -- \${cur}) 2>/dev/null )
+    return 0
+  fi
+
+  case "\${prev}" in
+    esure)
+      COMPREPLY=( $(compgen -W "\${cmds}" -- \${cur}) 2>/dev/null )
+      ;;
+    run|validate|init)
+      COMPREPLY=( $(compgen -f \${cur}) 2>/dev/null )
+      ;;
+    *)
+      COMPREPLY=( $(compgen -W "\${opts}" -- \${cur}) 2>/dev/null )
+      ;;
+  esac
+}
+
+complete -F _esure_complete esure
+complete -F _esure_complete ./esure 2>/dev/null || true
+`;
+}
+
+async function completionsCommand(shell: string): Promise<number> {
+  const normalized = shell.toLowerCase();
+  if (normalized !== "bash" && normalized !== "zsh") {
+    console.error(`Error: Unsupported shell "${shell}". Use "bash" or "zsh".`);
+    console.error('Usage: esure completions <bash|zsh>');
+    return 1;
+  }
+  console.log(generateCompletions(normalized));
+  return 0;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #159 — local installation doctor
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function doctorCommand(options: CliOptions): Promise<number> {
+  const m = markers(options.ascii ?? false);
+  const pass = m.pass;
+  const fail = m.fail;
+
+  const checks: { name: string; ok: boolean; detail: string }[] = [];
+
+  // CLI build artifact
+  const cliDist = resolve("dist/cli.js");
+  let cliDistOk = false;
+  try {
+    await access(cliDist);
+    cliDistOk = true;
+  } catch {}
+  checks.push({
+    name: "CLI build artifact (dist/cli.js)",
+    ok: cliDistOk,
+    detail: cliDistOk
+      ? "present"
+      : "missing — run `npm run build` in esure-cli",
+  });
+
+  // Backend package
+  const backendPkg = resolve("../esure-backend/package.json");
+  let backendPkgOk = false;
+  try {
+    await access(backendPkg);
+    backendPkgOk = true;
+  } catch {}
+  checks.push({
+    name: "Backend package (@esure/backend)",
+    ok: backendPkgOk,
+    detail: backendPkgOk ? "present" : "missing — esure-backend not found",
+  });
+
+  // Node version
+  const nodeVersion = process.version;
+  const nodeOk = /^v(20|24)\./.test(nodeVersion);
+  checks.push({
+    name: "Node.js version",
+    ok: nodeOk,
+    detail: `${nodeVersion} (>=20 required)`,
+  });
+
+  let failed = 0;
+  console.log("esure installation doctor\n");
+  for (const check of checks) {
+    const mark = check.ok ? pass : fail;
+    console.log(`${mark} ${check.name}: ${check.detail}`);
+    if (!check.ok) failed += 1;
+  }
+
+  console.log(
+    `\n${failed === 0 ? "All checks passed." : `${failed} check(s) failed — installation may be incomplete.`}`,
+  );
+  return failed === 0 ? 0 : 1;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Entry point
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -946,6 +1105,15 @@ async function main(): Promise<number> {
         return 1;
       }
       return runSuiteCommand(args, options, failFast);
+    case "completions":
+      if (args.length === 0) {
+        console.error('Error: Missing shell argument');
+        console.error('Usage: esure completions <bash|zsh>');
+        return 1;
+      }
+      return completionsCommand(args[0]);
+    case "doctor":
+      return doctorCommand(options);
     default:
       console.error(`Error: Unknown command "${command}"`);
       console.error('Run "esure --help" for usage information');

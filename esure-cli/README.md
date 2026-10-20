@@ -127,6 +127,53 @@ Executes a scenario on Stellar Testnet.
 - `0`: All steps and assertions passed
 - `1`: One or more steps or assertions failed, or execution error
 
+### `esure run-suite <id> [<id>...]`
+
+Runs multiple bundled scenarios sequentially.
+
+**Arguments:**
+- `<id>...`: Bundled scenario IDs to run
+
+**Options:**
+- `--fail-fast`: Stop after first failure
+- `--output json`: Output in JSON format
+
+---
+
+### `esure completions <shell>`
+
+Generate shell command completions for Bash or Zsh.
+
+**Arguments:**
+- `<shell>`: `bash` or `zsh`
+
+**Examples:**
+
+```bash
+# Bash completion
+esure completions bash > /etc/bash_completion.d/esure
+# or source in your shell:
+source <(esure completions bash)
+
+# Zsh completion
+esure completions zsh > /usr/local/share/zsh/site-functions/_esure
+# or source in your shell:
+source <(esure completions zsh)
+```
+
+---
+
+### `esure doctor`
+
+Diagnose the local installation. Checks for the compiled CLI build artifact,
+the backend package, and a supported Node.js version.
+
+```bash
+esure doctor
+```
+
+Exit code is `0` when all checks pass, `1` otherwise.
+
 ## Examples
 
 ```bash
