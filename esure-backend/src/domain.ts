@@ -84,6 +84,14 @@ export interface AssertionResult {
   expected: AssertionValue;
   actual: AssertionValue;
   message: string;
+  /**
+   * Issue #84: bounded optional subject references copied from the validated
+   * assertion definition. Clients can use these to identify which account,
+   * asset, or step an assertion targets without re-parsing the scenario.
+   */
+  account?: string;
+  asset?: string;
+  step?: string;
 }
 
 export type RunErrorCategory = "stellar" | "network" | "timeout" | "capacity" | "validation" | "internal";

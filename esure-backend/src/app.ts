@@ -65,6 +65,11 @@ export function buildApp(options: BuildAppOptions): AppInstance {
 
   app.addHook("onRequest", async (request, reply) => {
     const path = request.url.split("?")[0];
+    // Issue #85: /health is a cheap liveness probe that must stay reachable
+    // even when a client address has exhausted its application quota. Skip
+    // rate-limiting for this route entirely; all other routes, including the
+    // explicit readiness probe at /ready, continue to be covered.
+    if (path === "/health") return;
     const isRunCreation = request.method === "POST" && (path === "/api/v1/runs" || path === "/api/v1/runs/definitions");
     const limit = isRunCreation ? options.config.runRateLimitMax : options.config.rateLimitMax;
     const result = limiter.consume(`${isRunCreation ? "run" : "global"}:${request.ip}`, limit);
