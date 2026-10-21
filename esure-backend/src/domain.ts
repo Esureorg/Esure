@@ -21,17 +21,20 @@ export type ScenarioAsset =
 
 export type ScenarioStep =
   | { id: string; type: "changeTrust"; account: string; asset: string; limit?: string }
-  | { id: string; type: "payment"; from: string; to: string; asset: string; amount: string }
+  | { id: string; type: "payment"; from: string; to: string; asset: string; amount: string; memo?: string }
   | { id: string; type: "manageSellOffer"; account: string; sellingAsset: string; buyingAsset: string; amount: string; price: string }
   | { id: string; type: "pathPaymentStrictReceive"; from: string; to: string; sendAsset: string; sendMax: string; destAsset: string; destAmount: string; path: string[] }
   | { id: string; type: "pathPaymentStrictSend"; from: string; to: string; sendAsset: string; sendAmount: string; destAsset: string; destMin: string; path: string[] };
 
 export type ScenarioAssertion =
+  | { type: "transactionMemoEquals"; step: string; memo: string }
   | { type: "balanceEquals" | "balanceChangedBy"; account: string; asset: string; amount: string }
   | { type: "stepSucceeded" | "transactionConfirmed"; step: string }
   | { type: "stepFailedWith"; step: string; transactionCode: string; operationCodes: string[] }
   | { type: "trustlineExists" | "trustlineMissing"; account: string; asset: string }
-  | { type: "accountExists"; account: string };
+  | { type: "trustlineLimitEquals"; account: string; asset: string; limit: string }
+  | { type: "accountExists" | "accountMissing"; account: string }
+  | { type: "feeAwareNativeBalanceDelta"; account: string; asset: string; amount: string; step: string };
 
 export interface ScenarioDefinition {
   schemaVersion: 1;
@@ -59,9 +62,22 @@ export interface StepResult {
   status: StepStatus;
   transactionHash?: string;
   ledger?: number;
+  /** Actual fee charged for this transaction in stroops (integer string). Present only when fee evidence is available from the confirmed transaction. */
+  feeCharged?: string;
   stellarTransactionCode?: string;
   stellarOperationCodes?: string[];
   message: string;
+  /**
+   * Issue #83: step timing evidence. These fields are additive — older
+   * reports without them remain valid, and consumers must treat them as
+   * optional. `startedAt`/`completedAt` are ISO-8601 timestamps suitable for
+   * display; `durationMs` is derived from a monotonic clock
+   * (`performance.now()`) and is therefore safe to use for measuring
+   * elapsed time even if the system clock changes mid-run.
+   */
+  startedAt?: string;
+  completedAt?: string;
+  durationMs?: number;
 }
 
 export type AssertionValue = string | boolean | number | null | Record<string, unknown> | unknown[];
@@ -103,6 +119,7 @@ export interface RunReport {
   status: RunStatus;
   createdAt: string;
   completedAt?: string;
+  expiresAt?: string;
   steps: StepResult[];
   assertions: AssertionResult[];
   summary: RunSummary;

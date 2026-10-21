@@ -1,5 +1,6 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, fireEvent, waitFor, cleanup, act } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, cleanup, act, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { Dashboard, filterScenario } from "./dashboard";
 import * as api from "@/lib/api";
 import { type RunReport } from "@/lib/api";
@@ -54,12 +55,55 @@ const mockRun: RunReport = {
   summary: { stepsPassed: 0, stepsFailed: 0, assertionsPassed: 0, assertionsFailed: 0 },
 };
 
+const mixedOutcomeRun: RunReport = {
+  ...mockRun,
+  status: "failed",
+  steps: [
+    { id: "create-account", type: "create_account", status: "passed", message: "PASSING STEP MESSAGE" },
+    { id: "send-payment", type: "payment", status: "failed", message: "FAILING STEP MESSAGE" },
+  ],
+  assertions: [
+    { type: "balance", status: "passed", expected: "100", actual: "100", message: "PASSING ASSERTION MESSAGE" },
+    { type: "payment", status: "failed", expected: "50", actual: "0", message: "FAILING ASSERTION MESSAGE" },
+  ],
+  summary: { stepsPassed: 1, stepsFailed: 1, assertionsPassed: 1, assertionsFailed: 1 },
+};
+
+const allPassRun: RunReport = {
+  ...mockRun,
+  steps: [{ id: "create-account", type: "create_account", status: "passed", message: "ALL PASS STEP MESSAGE" }],
+  assertions: [{ type: "balance", status: "passed", expected: "100", actual: "100", message: "ALL PASS ASSERTION MESSAGE" }],
+  summary: { stepsPassed: 1, stepsFailed: 0, assertionsPassed: 1, assertionsFailed: 0 },
+};
+
+const timedOutRun: RunReport = {
+  ...allPassRun,
+  status: "failed",
+  error: {
+    code: "RUN_TIMEOUT",
+    message: "The run exceeded its time limit.",
+    category: "timeout",
+    retryable: false,
+  },
+};
+
+function changeDocumentVisibility(state: "visible" | "hidden") {
+  Object.defineProperty(document, "visibilityState", { configurable: true, value: state });
+  document.dispatchEvent(new Event("visibilitychange"));
+}
+
+function changeConnectionState(online: boolean) {
+  Object.defineProperty(navigator, "onLine", { configurable: true, value: online });
+  window.dispatchEvent(new Event(online ? "online" : "offline"));
+}
+
 describe("filterScenario helper", () => {
   it("includes all scenarios when filter is 'all'", () => {
     mockScenarios.forEach((scenario) => {
       expect(filterScenario(scenario, "all")).toBe(true);
     });
   });
+
 
   it("filters XLM scenarios correctly", () => {
     expect(filterScenario(mockScenarios[0], "xlm")).toBe(true);
@@ -99,10 +143,85 @@ describe("Dashboard component scenario filtering", () => {
 
     const allTab = screen.getByRole("tab", { name: "All" });
     expect(allTab.getAttribute("aria-selected")).toBe("true");
+    expect(allTab.getAttribute("tabindex")).toBe("0");
+    expect(screen.getByRole("tab", { name: "XLM" }).getAttribute("tabindex")).toBe("-1");
+
+    const panel = screen.getByRole("tabpanel");
+    expect(panel.id).toBe(allTab.getAttribute("aria-controls"));
+    expect(panel.getAttribute("aria-labelledby")).toBe(allTab.id);
 
     expect(screen.getAllByText("XLM payment").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Issued asset payment").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Missing trustline").length).toBeGreaterThan(0);
+  });
+
+  it("moves focus between filters with arrows without activating until Enter", async () => {
+    const user = userEvent.setup();
+    render(<Dashboard />);
+    await waitFor(() => {
+      expect(screen.getByText("03 AVAILABLE")).toBeDefined();
+    });
+
+    const allTab = screen.getByRole("tab", { name: "All" });
+    const xlmTab = screen.getByRole("tab", { name: "XLM" });
+    const failureTab = screen.getByRole("tab", { name: "Expected Failure" });
+
+    allTab.focus();
+    await user.keyboard("{ArrowLeft}");
+    expect(document.activeElement).toBe(failureTab);
+    expect(allTab.getAttribute("aria-selected")).toBe("true");
+
+    await user.keyboard("{ArrowRight}");
+    expect(document.activeElement).toBe(allTab);
+    await user.keyboard("{ArrowRight}");
+    expect(document.activeElement).toBe(xlmTab);
+    expect(allTab.getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByText("03 AVAILABLE")).toBeDefined();
+
+    await user.keyboard("{Enter}");
+    expect(xlmTab.getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByText("01 AVAILABLE")).toBeDefined();
+  });
+
+  it("moves focus to the first and last filter with Home and End, then activates with Space", async () => {
+    const user = userEvent.setup();
+    render(<Dashboard />);
+    await waitFor(() => {
+      expect(screen.getByText("03 AVAILABLE")).toBeDefined();
+    });
+
+    const allTab = screen.getByRole("tab", { name: "All" });
+    const failureTab = screen.getByRole("tab", { name: "Expected Failure" });
+
+    allTab.focus();
+    await user.keyboard("{End}");
+    expect(document.activeElement).toBe(failureTab);
+    expect(allTab.getAttribute("aria-selected")).toBe("true");
+
+    await user.keyboard("{Home}");
+    expect(document.activeElement).toBe(allTab);
+    await user.keyboard("{End}");
+    await user.keyboard("{Space}");
+
+    expect(failureTab.getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByText("01 AVAILABLE")).toBeDefined();
+    expect(screen.getAllByText("Missing trustline").length).toBeGreaterThan(0);
+  });
+
+  it("enters the tab list on its active filter when tabbing backward from search", async () => {
+    const user = userEvent.setup();
+    render(<Dashboard />);
+    await waitFor(() => {
+      expect(screen.getByText("03 AVAILABLE")).toBeDefined();
+    });
+
+    const xlmTab = screen.getByRole("tab", { name: "XLM" });
+    await user.click(xlmTab);
+    screen.getByRole("searchbox", { name: "Search scenarios by name, ID, or description" }).focus();
+    await user.tab({ shift: true });
+
+    expect(document.activeElement).toBe(xlmTab);
+    expect(xlmTab.getAttribute("tabindex")).toBe("0");
   });
 
   it("filters scenarios when clicking 'XLM'", async () => {
@@ -166,7 +285,82 @@ describe("Dashboard component scenario filtering", () => {
 
     expect(screen.getByText("00 AVAILABLE")).toBeDefined();
     expect(screen.getByText("No scenarios found")).toBeDefined();
-    expect(screen.getByRole("status")).toBeDefined();
+    expect(screen.getAllByRole("status").length).toBeGreaterThan(0);
+  });
+});
+
+describe("Dashboard report filtering", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    mockSearchParams = new URLSearchParams("?runId=run-123");
+    vi.spyOn(api, "listScenarios").mockResolvedValue(mockScenarios);
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+    mockSearchParams = new URLSearchParams();
+  });
+
+  it("filters mixed step and assertion outcomes without changing run totals", async () => {
+    vi.spyOn(api, "getRun").mockResolvedValue(mixedOutcomeRun);
+
+    render(<Dashboard />);
+    await screen.findByText("PASSING STEP MESSAGE");
+    const reportFilters = within(screen.getByRole("group", { name: "Report filter" }));
+
+    fireEvent.click(reportFilters.getByRole("button", { name: "Failed" }));
+
+    expect(reportFilters.getByRole("button", { name: "Failed" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByText("PASSING STEP MESSAGE").closest(".report-row")).toHaveAttribute("hidden");
+    expect(screen.getByText("PASSING ASSERTION MESSAGE").closest(".report-row")).toHaveAttribute("hidden");
+    expect(screen.getByText("FAILING STEP MESSAGE")).toBeDefined();
+    expect(screen.getByText("FAILING ASSERTION MESSAGE")).toBeDefined();
+    expect(screen.getByText("Steps passed").parentElement?.querySelector("dd")?.textContent).toBe("1");
+    expect(screen.getByText("Steps failed").parentElement?.querySelector("dd")?.textContent).toBe("1");
+    expect(screen.getByText("Assertions passed").parentElement?.querySelector("dd")?.textContent).toBe("1");
+    expect(screen.getByText("Assertions failed").parentElement?.querySelector("dd")?.textContent).toBe("1");
+  });
+
+  it("shows a distinct empty state when an all-pass report has no failed checks", async () => {
+    vi.spyOn(api, "getRun").mockResolvedValue(allPassRun);
+
+    render(<Dashboard />);
+    await screen.findByText("ALL PASS STEP MESSAGE");
+    const reportFilters = within(screen.getByRole("group", { name: "Report filter" }));
+    fireEvent.click(reportFilters.getByRole("button", { name: "Failed" }));
+
+    expect(screen.getByText("No failed checks")).toBeDefined();
+    expect(screen.getByText("No steps or assertions are currently marked as failed.")).toBeDefined();
+    expect(screen.getByText("ALL PASS STEP MESSAGE").closest(".report-row")).toHaveAttribute("hidden");
+    expect(screen.getByText("ALL PASS ASSERTION MESSAGE").closest(".report-row")).toHaveAttribute("hidden");
+  });
+
+  it("keeps run-level timeout errors visible with no failed rows", async () => {
+    vi.spyOn(api, "getRun").mockResolvedValue(timedOutRun);
+
+    render(<Dashboard />);
+    await screen.findByText("RUN_TIMEOUT");
+    expect(screen.getByText("ALL PASS STEP MESSAGE")).toBeDefined();
+    const reportFilters = within(screen.getByRole("group", { name: "Report filter" }));
+    fireEvent.click(reportFilters.getByRole("button", { name: "Failed" }));
+
+    expect(screen.getByText("No failed checks")).toBeDefined();
+    expect(screen.getByText("The run timed out before any step or assertion was marked as failed.")).toBeDefined();
+    expect(screen.getByText("RUN_TIMEOUT")).toBeDefined();
+    expect(screen.getByText("The run exceeded its time limit.")).toBeDefined();
+    expect(screen.getByText("ALL PASS STEP MESSAGE").closest(".report-row")).toHaveAttribute("hidden");
+  });
+
+  it("opens the browser print flow for a terminal report", async () => {
+    const printMock = vi.spyOn(window, "print").mockImplementation(() => undefined);
+    vi.spyOn(api, "getRun").mockResolvedValue(mixedOutcomeRun);
+
+    render(<Dashboard />);
+    await screen.findByText("FAILING STEP MESSAGE");
+    fireEvent.click(screen.getByRole("button", { name: "Print report" }));
+
+    expect(printMock).toHaveBeenCalledOnce();
   });
 });
 
@@ -326,6 +520,8 @@ describe("Dashboard Sequential Polling and Recovery", () => {
     vi.runOnlyPendingTimers();
     vi.useRealTimers();
     cleanup();
+    Reflect.deleteProperty(document, "visibilityState");
+    Reflect.deleteProperty(navigator, "onLine");
     vi.restoreAllMocks();
   });
 
@@ -357,6 +553,176 @@ describe("Dashboard Sequential Polling and Recovery", () => {
     expect(getRunMock).toHaveBeenCalledTimes(4); 
 
     expect(screen.queryByText("Monitoring paused")).toBeNull();
+  });
+
+  it("retains the failed report filter when polling updates the run", async () => {
+    const initialRun = { ...mixedOutcomeRun, status: "running" as const };
+    const updatedRun = {
+      ...initialRun,
+      steps: [...initialRun.steps, { id: "verify-ledger", type: "ledger", status: "passed" as const, message: "POLLING UPDATE PASS MESSAGE" }],
+    };
+    const getRunMock = vi.spyOn(api, "getRun")
+      .mockResolvedValueOnce(initialRun)
+      .mockResolvedValueOnce(updatedRun);
+
+    render(<Dashboard />);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(screen.getByText("PASSING STEP MESSAGE")).toBeDefined();
+
+    const reportFilters = within(screen.getByRole("group", { name: "Report filter" }));
+    fireEvent.click(reportFilters.getByRole("button", { name: "Failed" }));
+    expect(screen.getByText("FAILING STEP MESSAGE")).toBeDefined();
+    expect(screen.getByText("PASSING STEP MESSAGE").closest(".report-row")).toHaveAttribute("hidden");
+
+    await act(async () => { vi.advanceTimersByTime(1000); await Promise.resolve(); });
+
+    expect(getRunMock).toHaveBeenCalledTimes(2);
+    expect(reportFilters.getByRole("button", { name: "Failed" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByText("FAILING STEP MESSAGE")).toBeDefined();
+    expect(screen.getByText("POLLING UPDATE PASS MESSAGE").closest(".report-row")).toHaveAttribute("hidden");
+  });
+
+  it("stops scheduling while hidden and refreshes immediately when visible", async () => {
+    const getRunMock = vi.spyOn(api, "getRun")
+      .mockResolvedValueOnce({ ...mockRun, status: "pending" })
+      .mockResolvedValueOnce({ ...mockRun, status: "pending", createdAt: "2026-01-01T00:00:00.000Z" })
+      .mockResolvedValueOnce({ ...mockRun, status: "pending", createdAt: "2026-01-02T00:00:00.000Z" });
+
+    render(<Dashboard />);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(getRunMock).toHaveBeenCalledTimes(1);
+
+    act(() => { changeDocumentVisibility("hidden"); });
+    await act(async () => { vi.advanceTimersByTime(5000); await Promise.resolve(); });
+    expect(getRunMock).toHaveBeenCalledTimes(1);
+
+    await act(async () => { changeDocumentVisibility("visible"); await Promise.resolve(); });
+    expect(getRunMock).toHaveBeenCalledTimes(2);
+
+    await act(async () => { vi.advanceTimersByTime(999); await Promise.resolve(); });
+    expect(getRunMock).toHaveBeenCalledTimes(2);
+    await act(async () => { vi.advanceTimersByTime(1); await Promise.resolve(); });
+    expect(getRunMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("pauses polling offline and performs one immediate refresh when reconnected", async () => {
+    const getRunMock = vi.spyOn(api, "getRun")
+      .mockResolvedValueOnce({ ...mockRun, status: "pending" })
+      .mockResolvedValueOnce({ ...mockRun, status: "pending", createdAt: "2026-01-01T00:00:00.000Z" })
+      .mockResolvedValueOnce({ ...mockRun, status: "pending", createdAt: "2026-01-02T00:00:00.000Z" });
+
+    render(<Dashboard />);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(getRunMock).toHaveBeenCalledTimes(1);
+
+    act(() => { changeConnectionState(false); });
+    const offlineMessage = screen.getByText(/You are offline/);
+    expect(offlineMessage.getAttribute("role")).toBe("status");
+
+    await act(async () => { vi.advanceTimersByTime(5000); await Promise.resolve(); });
+    expect(getRunMock).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("run-123")).toBeDefined();
+
+    await act(async () => { changeConnectionState(true); await Promise.resolve(); });
+    expect(getRunMock).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText(/You are offline/)).toBeNull();
+
+    await act(async () => { vi.advanceTimersByTime(999); await Promise.resolve(); });
+    expect(getRunMock).toHaveBeenCalledTimes(2);
+    await act(async () => { vi.advanceTimersByTime(1); await Promise.resolve(); });
+    expect(getRunMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("aborts an in-flight poll when offline and does not apply its stale result", async () => {
+    let resolveInFlight!: (value: RunReport) => void;
+    let inFlightSignal: AbortSignal | undefined;
+    const getRunMock = vi.spyOn(api, "getRun")
+      .mockResolvedValueOnce({ ...mockRun, status: "pending" })
+      .mockImplementationOnce((_runId, signal) => {
+        inFlightSignal = signal;
+        return new Promise((resolve) => { resolveInFlight = resolve; });
+      })
+      .mockResolvedValueOnce({ ...mockRun, status: "passed" });
+
+    render(<Dashboard />);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    await act(async () => { vi.advanceTimersByTime(1000); await Promise.resolve(); });
+    expect(getRunMock).toHaveBeenCalledTimes(2);
+
+    act(() => { changeConnectionState(false); });
+    expect(inFlightSignal?.aborted).toBe(true);
+
+    await act(async () => {
+      resolveInFlight({ ...mockRun, id: "stale-run", status: "failed" });
+      await Promise.resolve();
+    });
+    expect(screen.queryByText("stale-run")).toBeNull();
+    expect(screen.getByText("run-123")).toBeDefined();
+
+    await act(async () => { changeConnectionState(true); await Promise.resolve(); });
+    expect(getRunMock).toHaveBeenCalledTimes(3);
+    expect(screen.getAllByText("Passed").length).toBeGreaterThan(0);
+  });
+
+  it("aborts an in-flight refresh on hide and ignores its stale result", async () => {
+    let resolveInFlight!: (value: RunReport) => void;
+    let inFlightSignal: AbortSignal | undefined;
+    const getRunMock = vi.spyOn(api, "getRun")
+      .mockResolvedValueOnce({ ...mockRun, status: "pending" })
+      .mockImplementationOnce((_runId, signal) => {
+        inFlightSignal = signal;
+        return new Promise((resolve) => { resolveInFlight = resolve; });
+      })
+      .mockResolvedValueOnce({ ...mockRun, status: "passed" });
+
+    render(<Dashboard />);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    await act(async () => { vi.advanceTimersByTime(1000); await Promise.resolve(); });
+    expect(getRunMock).toHaveBeenCalledTimes(2);
+
+    act(() => { changeDocumentVisibility("hidden"); });
+    expect(inFlightSignal?.aborted).toBe(true);
+
+    await act(async () => {
+      resolveInFlight({ ...mockRun, id: "stale-run", status: "failed" });
+      await Promise.resolve();
+    });
+    expect(screen.getAllByText("Pending").length).toBeGreaterThan(0);
+    expect(screen.queryByText("stale-run")).toBeNull();
+
+    await act(async () => { changeDocumentVisibility("visible"); await Promise.resolve(); });
+    expect(getRunMock).toHaveBeenCalledTimes(3);
+    expect(screen.getAllByText("Passed").length).toBeGreaterThan(0);
+
+    act(() => { changeDocumentVisibility("hidden"); });
+    act(() => { changeDocumentVisibility("visible"); });
+    await act(async () => { vi.advanceTimersByTime(5000); await Promise.resolve(); });
+    expect(getRunMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("removes the visibility listener and scheduled timer on unmount", async () => {
+    const addListener = vi.spyOn(document, "addEventListener");
+    const removeListener = vi.spyOn(document, "removeEventListener");
+    const addWindowListener = vi.spyOn(window, "addEventListener");
+    const removeWindowListener = vi.spyOn(window, "removeEventListener");
+    const getRunMock = vi.spyOn(api, "getRun").mockResolvedValue({ ...mockRun, status: "pending" });
+    const { unmount } = render(<Dashboard />);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+    const visibilityListener = addListener.mock.calls.find(([type]) => type === "visibilitychange")?.[1];
+    expect(visibilityListener).toBeDefined();
+    const offlineListener = addWindowListener.mock.calls.find(([type]) => type === "offline")?.[1];
+    const onlineListener = addWindowListener.mock.calls.find(([type]) => type === "online")?.[1];
+    expect(offlineListener).toBeDefined();
+    expect(onlineListener).toBeDefined();
+    const callsBeforeUnmount = getRunMock.mock.calls.length;
+
+    unmount();
+    expect(removeListener).toHaveBeenCalledWith("visibilitychange", visibilityListener);
+    expect(removeWindowListener).toHaveBeenCalledWith("offline", offlineListener);
+    expect(removeWindowListener).toHaveBeenCalledWith("online", onlineListener);
+    await act(async () => { vi.advanceTimersByTime(5000); await Promise.resolve(); });
+    expect(getRunMock).toHaveBeenCalledTimes(callsBeforeUnmount);
   });
 
   it("stops polling and clears run when RUN_NOT_FOUND occurs", async () => {
@@ -412,5 +778,335 @@ describe("Dashboard Sequential Polling and Recovery", () => {
 
     await act(async () => { vi.advanceTimersByTime(1000); await Promise.resolve(); });
     expect(getRunMock).toHaveBeenCalledTimes(7);
+  });
+
+});
+describe("Scenario definition preview, rate limiting, and ARIA announcements (#32, #39, #42)", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    mockSearchParams = new URLSearchParams();
+    vi.spyOn(api, "listScenarios").mockResolvedValue(mockScenarios);
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+  it("renders polite ARIA live region for screen readers (#42)", async () => {
+    render(<Dashboard />);
+    await act(async () => { await Promise.resolve(); });
+
+    const liveRegion = document.getElementById("run-live-region");
+    expect(liveRegion).not.toBeNull();
+    expect(liveRegion?.getAttribute("role")).toBe("status");
+    expect(liveRegion?.getAttribute("aria-live")).toBe("polite");
+  });
+
+  it("opens scenario preview panel and fetches detail when Details button is clicked (#32)", async () => {
+    const mockDetail: api.ScenarioDetail = {
+      id: "xlm-payment",
+      version: 1,
+      name: "XLM payment",
+      description: "Detailed description of XLM payment.",
+      contentHash: "hash-full-123456789",
+      network: "testnet",
+      schemaVersion: 1,
+      accounts: [{ id: "acc1", label: "Sender" }],
+      assets: [{ code: "XLM", issuer: "native" }],
+      steps: [{ id: "step1", description: "Send payment" }],
+      assertions: [{ id: "ast1", description: "Balance check" }],
+    };
+    vi.spyOn(api, "getScenario").mockResolvedValueOnce(mockDetail);
+
+    render(<Dashboard />);
+    await act(async () => { await Promise.resolve(); });
+
+    const detailsBtn = screen.getByLabelText("Preview definition for XLM payment");
+    expect(detailsBtn).toBeDefined();
+
+    await act(async () => {
+      fireEvent.click(detailsBtn);
+    });
+
+    expect(screen.getByRole("dialog", { name: "Scenario definition preview" })).toBeDefined();
+    await waitFor(() => {
+      expect(screen.getByText("Detailed description of XLM payment.")).toBeDefined();
+      expect(screen.getByText("hash-full-123456789")).toBeDefined();
+    });
+  });
+
+  it("handles 429 RateLimitError with retry countdown (#39)", async () => {
+    vi.spyOn(api, "startRun").mockRejectedValueOnce(
+      new api.RateLimitError("Rate limit reached", 429, 15)
+    );
+
+    render(<Dashboard />);
+    await act(async () => { await Promise.resolve(); });
+
+    // Click the scenario card by ID
+    const card = document.getElementById("scenario-card-xlm-payment");
+    expect(card).not.toBeNull();
+    await act(async () => {
+      fireEvent.click(card!);
+    });
+
+    const runBtn = screen.getByRole("button", { name: /Run on Testnet/i });
+    await act(async () => {
+      fireEvent.click(runBtn);
+    });
+
+    expect(screen.getByText(/Rate limited. Retry in 15s./i)).toBeDefined();
+    expect(screen.getByRole("button", { name: /Retry in 15s/i })).toBeDefined();
+  });
+});
+
+describe("Dashboard Live Elapsed Timer (#41)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.spyOn(api, "listScenarios").mockResolvedValue(mockScenarios);
+    mockSearchParams = new URLSearchParams({ runId: "run-active" });
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    mockSearchParams = new URLSearchParams();
+  });
+
+  it("displays live ticking elapsed timer for active run and freezes when terminal", async () => {
+    const baseTime = new Date("2026-10-16T12:00:00.000Z").getTime();
+    vi.setSystemTime(baseTime);
+
+    const activeRun: RunReport = {
+      ...mockRun,
+      id: "run-active",
+      status: "running",
+      createdAt: new Date(baseTime).toISOString(),
+      completedAt: undefined,
+    };
+
+    const terminalRun: RunReport = {
+      ...mockRun,
+      id: "run-active",
+      status: "passed",
+      createdAt: new Date(baseTime).toISOString(),
+      completedAt: new Date(baseTime + 5000).toISOString(),
+    };
+
+    let currentRun: RunReport = activeRun;
+    vi.spyOn(api, "getRun").mockImplementation(async () => ({ ...currentRun }));
+
+    render(<Dashboard />);
+    await act(async () => { await Promise.resolve(); });
+
+    const timer = screen.getByTestId("run-duration");
+    expect(timer.textContent).toBe("0s");
+
+    // Advance 3 seconds
+    await act(async () => {
+      vi.advanceTimersByTime(3000);
+      await Promise.resolve();
+    });
+    expect(timer.textContent).toBe("3s");
+
+    // Transition to terminal run
+    currentRun = terminalRun;
+    await act(async () => {
+      vi.advanceTimersByTime(1000);
+      await Promise.resolve();
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(1000);
+      await Promise.resolve();
+    });
+
+    // Terminal run duration should freeze at 5s
+    expect(screen.getByTestId("run-duration").textContent).toBe("5s");
+
+    // Advancing more time should keep it frozen at 5s
+    await act(async () => {
+      vi.advanceTimersByTime(10000);
+      await Promise.resolve();
+    });
+    expect(screen.getByTestId("run-duration").textContent).toBe("5s");
+  });
+
+  it("safely clamps invalid or future timestamps to 0s", async () => {
+    const baseTime = new Date("2026-10-16T12:00:00.000Z").getTime();
+    vi.setSystemTime(baseTime);
+
+    const futureRun: RunReport = {
+      ...mockRun,
+      id: "run-future",
+      status: "running",
+      createdAt: new Date(baseTime + 60000).toISOString(),
+      completedAt: undefined,
+    };
+
+    vi.spyOn(api, "getRun").mockResolvedValue(futureRun);
+
+    render(<Dashboard />);
+    await act(async () => { await Promise.resolve(); });
+
+    expect(screen.getByTestId("run-duration").textContent).toBe("0s");
+  });
+
+  it("does not show an expiry hint when metadata is absent", async () => {
+    vi.setSystemTime(new Date("2026-10-16T12:00:00.000Z"));
+    vi.spyOn(api, "getRun").mockResolvedValue(mockRun);
+
+    render(<Dashboard />);
+    await screen.findByText("run-123");
+
+    expect(screen.queryByText(/Best-effort report retention deadline/)).toBeNull();
+    expect(screen.getByRole("heading", { name: "Execution report" })).toBeDefined();
+  });
+
+  it("shows a localized best-effort expiry hint for a future deadline", async () => {
+    vi.setSystemTime(new Date("2026-10-16T12:00:00.000Z"));
+    const expiresAt = "2026-10-16T13:00:00.000Z";
+    vi.spyOn(api, "getRun").mockResolvedValue({ ...mockRun, expiresAt });
+
+    render(<Dashboard />);
+    await screen.findByText("run-123");
+
+    const hint = screen.getByText(/Best-effort report retention deadline/);
+    expect(hint.textContent).toContain(
+      new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(expiresAt)),
+    );
+    expect(hint.querySelector("time")?.getAttribute("dateTime")).toBe(expiresAt);
+    expect(hint.textContent).toContain("local time");
+    expect(hint.textContent).toContain("Retention is not guaranteed");
+  });
+
+  it("keeps the loaded report visible and shows the hint after its deadline", async () => {
+    vi.setSystemTime(new Date("2026-10-16T12:00:00.000Z"));
+    const expiresAt = "2026-10-16T11:00:00.000Z";
+    vi.spyOn(api, "getRun").mockResolvedValue({ ...mockRun, expiresAt });
+
+    render(<Dashboard />);
+    await screen.findByText("run-123");
+
+    expect(screen.getByText(/Best-effort report retention deadline/)).toBeDefined();
+    expect(screen.getByRole("heading", { name: "Execution report" })).toBeDefined();
+  });
+
+  it("ignores malformed expiry metadata without hiding the report", async () => {
+    vi.setSystemTime(new Date("2026-10-16T12:00:00.000Z"));
+    vi.spyOn(api, "getRun").mockResolvedValue({ ...mockRun, expiresAt: "not-a-date" });
+
+    render(<Dashboard />);
+    await screen.findByText("run-123");
+
+    expect(screen.queryByText(/Best-effort report retention deadline/)).toBeNull();
+    expect(screen.getByRole("heading", { name: "Execution report" })).toBeDefined();
+  });
+});
+
+describe("Dashboard Skip Link (#44)", () => {
+  beforeEach(() => {
+    vi.spyOn(api, "listScenarios").mockResolvedValue(mockScenarios);
+    mockSearchParams = new URLSearchParams();
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+  it("renders a skip link pointing to #main-content and moves focus on activation", async () => {
+    render(<Dashboard />);
+    await act(async () => { await Promise.resolve(); });
+
+    const skipLink = screen.getByRole("link", { name: "Skip to main content" });
+    expect(skipLink).toBeDefined();
+    expect(skipLink.getAttribute("href")).toBe("#main-content");
+
+    const mainContent = document.getElementById("main-content");
+    expect(mainContent).toBeDefined();
+    expect(mainContent?.getAttribute("tabindex")).toBe("-1");
+
+    const focusSpy = vi.spyOn(mainContent!, "focus");
+    fireEvent.click(skipLink);
+    expect(focusSpy).toHaveBeenCalled();
+  });
+});
+
+describe("Dashboard Report Download Feedback (#45)", () => {
+  beforeEach(() => {
+    vi.spyOn(api, "listScenarios").mockResolvedValue(mockScenarios);
+    mockSearchParams = new URLSearchParams({ runId: "run-123" });
+    if (!window.URL.createObjectURL) {
+      window.URL.createObjectURL = vi.fn();
+    }
+    if (!window.URL.revokeObjectURL) {
+      window.URL.revokeObjectURL = vi.fn();
+    }
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+  it("handles successful download and releases object URL", async () => {
+    vi.spyOn(api, "getRun").mockResolvedValue(mockRun);
+    const downloadMock = vi.spyOn(api, "downloadReport").mockResolvedValue(mockRun);
+
+    const createUrlSpy = vi.spyOn(window.URL, "createObjectURL").mockReturnValue("blob:mock-url");
+    const revokeUrlSpy = vi.spyOn(window.URL, "revokeObjectURL").mockImplementation(() => {});
+
+    render(<Dashboard />);
+    await screen.findByText("run-123");
+
+    const downloadButton = screen.getByRole("button", { name: /download json report/i });
+    expect(downloadButton).toBeDefined();
+
+    await act(async () => {
+      fireEvent.click(downloadButton);
+      await Promise.resolve();
+    });
+
+    expect(downloadMock).toHaveBeenCalledWith("run-123");
+    expect(createUrlSpy).toHaveBeenCalled();
+    expect(revokeUrlSpy).toHaveBeenCalledWith("blob:mock-url");
+  });
+
+  it("handles 404, 409, and 503 download errors with distinct feedback", async () => {
+    vi.spyOn(api, "getRun").mockResolvedValue(mockRun);
+    const downloadMock = vi.spyOn(api, "downloadReport");
+
+    // 404 error
+    downloadMock.mockRejectedValueOnce(new api.ApiError("Not found", "RUN_NOT_FOUND", 404));
+
+    render(<Dashboard />);
+    await screen.findByText("run-123");
+
+    const downloadButton = screen.getByRole("button", { name: /download json report/i });
+
+    await act(async () => {
+      fireEvent.click(downloadButton);
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText("Report expired or not found. Please run the scenario again.")).toBeDefined();
+
+    // 409 error
+    downloadMock.mockRejectedValueOnce(new api.ApiError("Incomplete", "RUN_NOT_COMPLETE", 409));
+    await act(async () => {
+      fireEvent.click(downloadButton);
+      await Promise.resolve();
+    });
+    expect(screen.getByText("Report is not complete yet. Please wait for the run to finish.")).toBeDefined();
+
+    // 503 error
+    downloadMock.mockRejectedValueOnce(new api.ApiError("Service unavailable", "DATABASE_UNAVAILABLE", 503));
+    await act(async () => {
+      fireEvent.click(downloadButton);
+      await Promise.resolve();
+    });
+    expect(screen.getByText("Backend service is temporarily unavailable. Please try again shortly.")).toBeDefined();
   });
 });

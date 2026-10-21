@@ -6,6 +6,13 @@ describe("loadConfig", () => {
     const config = loadConfig({});
     expect(config.horizonUrl).toContain("testnet");
     expect(config.friendbotUrl).toBe("https://friendbot.stellar.org");
+    expect(config.metricsEnabled).toBe(false);
+  });
+
+  it("enables metrics only for an explicit boolean setting", () => {
+    expect(loadConfig({ METRICS_ENABLED: "true" }).metricsEnabled).toBe(true);
+    expect(loadConfig({ METRICS_ENABLED: "false" }).metricsEnabled).toBe(false);
+    expect(() => loadConfig({ METRICS_ENABLED: "yes" })).toThrow(/METRICS_ENABLED/);
   });
 
   it("rejects Mainnet configuration", () => {
