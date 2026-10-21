@@ -1,16 +1,14 @@
 #!/usr/bin/env node
 
-import { access, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
-import { basename, dirname, extname, resolve } from "node:path";
+import { readFile, stat } from "node:fs/promises";
+import { extname, resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { validateScenarioDefinition } from "@esure/backend/scenario-schema.js";
-import { RunReportValidationError, validateRunReport } from "@esure/backend/report-schema.js";
-import { prepareScenario } from "@esure/backend/scenario-loader.js";
-import { createScenarioRegistry } from "@esure/backend/scenarios.js";
-import { StellarTestnetGateway } from "@esure/backend/stellar-gateway.js";
-import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
-import type { ValidatedScenario } from "@esure/backend/domain.js";
-import type { LedgerExecution, LedgerExecutionOptions } from "@esure/backend/domain.js";
+import { SCENARIO_LIMITS, ScenarioValidationError } from "@esure/backend/src/scenario-schema.js";
+import { parseScenario } from "@esure/backend/src/scenario-loader.js";
+import { createScenarioRegistry } from "@esure/backend/src/scenarios.js";
+import { StellarTestnetGateway } from "@esure/backend/src/stellar-gateway.js";
+import type { ValidatedScenario } from "@esure/backend/src/domain.js";
+import type { LedgerExecution, LedgerExecutionOptions } from "@esure/backend/src/domain.js";
 
 const VERSION = "0.1.0";
 const BUNDLED_SCENARIO_DIR_TIMEOUT_MS = 30_000;
@@ -26,14 +24,8 @@ interface CliOptions {
   version?: boolean;
   /** #68 — use ASCII status markers (PASS/FAIL) instead of Unicode glyphs */
   ascii?: boolean;
-  /** #59 — write JSON run report to a file */
-  reportFile?: string;
-  /** #60 — write JUnit XML test report to a file */
-  junit?: string;
-  /** #157 — write CSV assertion results to a file */
-  csv?: string;
-  /** #59, #60, #62, #157 — overwrite existing destination file */
-  overwrite?: boolean;
+  /** #53 — explicit local file path for run command */
+  file?: string;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -68,18 +60,16 @@ Usage:
   esure init <file>                       Scaffold a new scenario file (.json, .yaml, .yml)
   esure run <scenario-id>                 Run a bundled scenario
   esure run <file>                        Run a scenario from file
+  esure run --file <file>                 Run a scenario from file explicitly
   esure run-suite <id> [<id>...]          Run multiple bundled scenarios sequentially
 
 Options:
-  --output <format>        Output format: human (default) or json
-  --ascii                  Use ASCII status markers (PASS/FAIL) instead of Unicode glyphs
-  --report-file <path>     Write run report JSON to a file
-  --junit <path>           Write JUnit XML test results to a file
-  --csv <path>             Write assertion results as CSV to a file
-  --overwrite              Overwrite existing output files (--report-file, --junit, --csv, init)
-  --fail-fast              (run-suite) Stop after first failure
-  --help                   Show this help message
-  --version                Show version information
+  --file <path>       (run) Explicitly specify a local scenario file path
+  --output <format>   Output format: human (default) or json
+  --ascii             Use ASCII status markers (PASS/FAIL) instead of Unicode glyphs
+  --fail-fast         (run-suite) Stop after first failure
+  --help              Show this help message
+  --version           Show version information
 
 Examples:
   esure list
@@ -87,10 +77,9 @@ Examples:
   esure validate ./my-scenario.yaml
   esure report validate ./report.json --output json
   esure run xlm-payment
-  esure run ./my-scenario.yaml --output json --report-file report.json
-  esure run ./my-scenario.yaml --junit junit.xml
-  esure run ./my-scenario.yaml --csv assertions.csv
-  esure run-suite xlm-payment path-payment --fail-fast --report-file suite.json --junit suite.xml
+  esure run ./my-scenario.yaml --output json
+  esure run --file ./my-scenario.yaml
+  esure run-suite xlm-payment path-payment --fail-fast
 
 Documentation: https://github.com/Esureorg/Esure
 `);
@@ -159,6 +148,7 @@ function parseCliArgs(): {
       help: { type: "boolean", short: "h" },
       version: { type: "boolean", short: "v" },
       ascii: { type: "boolean" },
+      file: { type: "string" },
       "fail-fast": { type: "boolean" },
       "report-file": { type: "string" },
       junit: { type: "string" },
@@ -186,10 +176,7 @@ function parseCliArgs(): {
       help: Boolean(values.help),
       version: Boolean(values.version),
       ascii: Boolean(values.ascii),
-      reportFile: typeof values["report-file"] === "string" ? values["report-file"] : undefined,
-      junit: rawJunit,
-      csv: typeof values.csv === "string" ? values.csv : undefined,
-      overwrite: Boolean(values.overwrite || values.force),
+      file: typeof values.file === "string" ? values.file : undefined,
     },
     failFast: Boolean(values["fail-fast"]),
   };
@@ -200,20 +187,33 @@ function parseCliArgs(): {
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function loadScenarioFile(filePath: string): Promise<ValidatedScenario> {
-  const absolutePath = resolve(filePath);
-  const content = await readFile(absolutePath, "utf-8");
-
-  let parsed: unknown;
-  if (filePath.endsWith(".json")) {
-    parsed = JSON.parse(content);
-  } else if (filePath.endsWith(".yaml") || filePath.endsWith(".yml")) {
-    parsed = parseYaml(content);
+  const ext = extname(filePath).toLowerCase();
+  let format: "json" | "yaml";
+  if (ext === ".json") {
+    format = "json";
+  } else if (ext === ".yaml" || ext === ".yml") {
+    format = "yaml";
   } else {
     throw new Error("Scenario file must be .json, .yaml, or .yml");
   }
 
-  const validated = validateScenarioDefinition(parsed);
-  return prepareScenario(validated);
+  const absolutePath = resolve(filePath);
+  let fileStat;
+  try {
+    fileStat = await stat(absolutePath);
+  } catch (err: unknown) {
+    if (err && typeof err === "object" && "code" in err && (err as { code: string }).code === "ENOENT") {
+      throw new Error(`Scenario file not found: "${filePath}"`);
+    }
+    throw err;
+  }
+
+  if (fileStat.size > SCENARIO_LIMITS.definitionBytes) {
+    throw new ScenarioValidationError([`definition exceeds ${SCENARIO_LIMITS.definitionBytes} bytes`]);
+  }
+
+  const content = await readFile(absolutePath, "utf-8");
+  return parseScenario(content, format);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -615,8 +615,7 @@ async function validateCommand(filePath: string, options: CliOptions): Promise<n
   }
 }
 
-async function readBoundedReportFile(filePath: string): Promise<string> {
-  const handle = await open(resolve(filePath), "r");
+async function runCommand(target: string, options: CliOptions, isExplicitFile = false): Promise<number> {
   try {
     const { size } = await handle.stat();
     if (size > MAX_REPORT_FILE_BYTES) {
@@ -700,7 +699,7 @@ async function runCommand(target: string, options: CliOptions): Promise<number> 
 
   try {
     // Determine if target is a bundled scenario ID or file path
-    if (target.includes("/") || target.includes("\\") || target.includes(".")) {
+    if (isExplicitFile || target.includes("/") || target.includes("\\") || target.includes(".")) {
       scenario = await loadScenarioFile(target);
     } else {
       const registry = createScenarioRegistry();
@@ -759,11 +758,14 @@ async function runCommand(target: string, options: CliOptions): Promise<number> 
     }
 
     if (options.output === "json") {
-      const errorObj: { message: string; report?: unknown } = {
-        message: executionError.message,
+      const errorObj: { message: string; report?: unknown; issues?: string[] } = {
+        message: error instanceof Error ? error.message : String(error),
       };
       if (error && typeof error === "object" && "report" in error) {
         errorObj.report = (error as { report: unknown }).report;
+      }
+      if (error && typeof error === "object" && "issues" in error && Array.isArray(error.issues)) {
+        errorObj.issues = error.issues as string[];
       }
       console.error(JSON.stringify({ status: "error", error: errorObj }, null, 2));
     } else {
@@ -771,6 +773,11 @@ async function runCommand(target: string, options: CliOptions): Promise<number> 
       console.error(
         `\n${m.fail} Run failed: ${executionError.message}`,
       );
+      if (error && typeof error === "object" && "issues" in error && Array.isArray(error.issues)) {
+        for (const issue of error.issues) {
+          console.error(`  - ${issue}`);
+        }
+      }
     }
   }
 
@@ -1106,10 +1113,20 @@ async function main(): Promise<number> {
 
   switch (command) {
     case "list":
+      if (args.length > 0) {
+        console.error("Error: Unexpected argument(s) for list command");
+        console.error("Usage: esure list");
+        return 1;
+      }
       return listCommand(options);
     case "validate":
       if (args.length === 0) {
         console.error("Error: Missing file path argument");
+        console.error("Usage: esure validate <file>");
+        return 1;
+      }
+      if (args.length > 1) {
+        console.error("Error: Unexpected argument(s) for validate command");
         console.error("Usage: esure validate <file>");
         return 1;
       }
@@ -1128,12 +1145,30 @@ async function main(): Promise<number> {
       }
       return initCommand(args[0], options);
     case "run":
+      if (options.file !== undefined && args.length > 0) {
+        console.error("Error: Cannot specify both --file and a positional target");
+        console.error("Usage: esure run <scenario-id> | esure run <file> | esure run --file <file>");
+        return 1;
+      }
+      if (options.file !== undefined) {
+        if (!options.file.trim()) {
+          console.error("Error: Missing file path for --file");
+          console.error("Usage: esure run --file <file>");
+          return 1;
+        }
+        return runCommand(options.file, options, true);
+      }
       if (args.length === 0) {
         console.error("Error: Missing scenario ID or file path");
         console.error("Usage: esure run <scenario-id> or esure run <file>");
         return 1;
       }
-      return runCommand(args[0], options);
+      if (args.length > 1) {
+        console.error("Error: Unexpected argument(s) for run command");
+        console.error("Usage: esure run <scenario-id> or esure run <file>");
+        return 1;
+      }
+      return runCommand(args[0], options, false);
     case "run-suite":
       if (args.length === 0) {
         console.error("Error: Missing scenario IDs");
