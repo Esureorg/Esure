@@ -37,6 +37,55 @@ test.describe("Accessibility - Dashboard States", () => {
 });
 
 test.describe("Accessibility - Keyboard Navigation", () => {
+  test("category filter tabs support roving focus, manual activation, and a labelled panel", async ({
+    page,
+  }) => {
+    await page.route("**/api/backend/api/v1/scenarios", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          items: [
+            {
+              id: "xlm-payment",
+              version: 1,
+              name: "XLM payment",
+              description: "Send XLM between Testnet accounts.",
+              contentHash: "hash1",
+            },
+            {
+              id: "issued-asset-payment",
+              version: 1,
+              name: "Issued asset payment",
+              description: "Send TESTUSD through a Testnet trustline.",
+              contentHash: "hash2",
+            },
+          ],
+        }),
+      });
+    });
+    await page.goto("/");
+
+    const allTab = page.getByRole("tab", { name: "All" });
+    const xlmTab = page.getByRole("tab", { name: "XLM" });
+    const tabPanel = page.getByRole("tabpanel");
+    await expect(page.getByText("02 AVAILABLE")).toBeVisible();
+    await expect(allTab).toHaveAttribute("tabindex", "0");
+    await expect(xlmTab).toHaveAttribute("tabindex", "-1");
+    await expect(tabPanel).toHaveAttribute("aria-labelledby", await allTab.getAttribute("id"));
+
+    await allTab.focus();
+    await page.keyboard.press("ArrowRight");
+    await expect(xlmTab).toBeFocused();
+    await expect(allTab).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByText("02 AVAILABLE")).toBeVisible();
+
+    await page.keyboard.press("Enter");
+    await expect(xlmTab).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByText("01 AVAILABLE")).toBeVisible();
+    await expect(tabPanel).toHaveAttribute("aria-labelledby", await xlmTab.getAttribute("id"));
+  });
+
   test("Dashboard should be navigable with keyboard only", async ({ page }) => {
     await page.goto("/");
     await page.waitForLoadState("networkidle");

@@ -302,6 +302,7 @@ starts; restart it after changing them.
 | `RUN_TIMEOUT_MS` | `120000` | Milliseconds; integer, `1000`-`600000` | Maximum total duration of one run. All modes. |
 | `STEP_TIMEOUT_MS` | `30000` | Milliseconds; integer, `500`-`120000` | Maximum duration of one scenario step. All modes. |
 | `MAX_CONCURRENT_RUNS` | `2` | Active runs; integer, `1`-`20` | Maximum simultaneous executions; excess starts are rejected, not queued. All modes. |
+| `METRICS_ENABLED` | `false` | Literal `true` or `false` | Enables the process-local aggregate `GET /metrics` endpoint. Disabled by default; when enabled, restrict access to trusted monitoring systems on a private network or behind an authenticated/allowlisted reverse proxy. Metrics reset on restart and are per process. |
 | `MAX_STORED_RUNS` | `500` | Runs; integer, `10`-`10000` | In-memory run-store capacity only; ignored by the PostgreSQL run store. |
 | `RUN_RETENTION_MS` | `3600000` | Milliseconds; integer, `60000`-`86400000` | Retention for completed run reports in either run store. PostgreSQL reports past this age are hidden from reads but not deleted by this setting. |
 | `RATE_LIMIT_MAX` | `120` | Requests per window; integer, `1`-`10000` | Per-IP fixed-window limit for requests other than run creation. All modes. |

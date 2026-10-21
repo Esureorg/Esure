@@ -1,5 +1,6 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, cleanup, act, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { Dashboard, filterScenario } from "./dashboard";
 import * as api from "@/lib/api";
 import { type RunReport } from "@/lib/api";
@@ -142,10 +143,85 @@ describe("Dashboard component scenario filtering", () => {
 
     const allTab = screen.getByRole("tab", { name: "All" });
     expect(allTab.getAttribute("aria-selected")).toBe("true");
+    expect(allTab.getAttribute("tabindex")).toBe("0");
+    expect(screen.getByRole("tab", { name: "XLM" }).getAttribute("tabindex")).toBe("-1");
+
+    const panel = screen.getByRole("tabpanel");
+    expect(panel.id).toBe(allTab.getAttribute("aria-controls"));
+    expect(panel.getAttribute("aria-labelledby")).toBe(allTab.id);
 
     expect(screen.getAllByText("XLM payment").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Issued asset payment").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Missing trustline").length).toBeGreaterThan(0);
+  });
+
+  it("moves focus between filters with arrows without activating until Enter", async () => {
+    const user = userEvent.setup();
+    render(<Dashboard />);
+    await waitFor(() => {
+      expect(screen.getByText("03 AVAILABLE")).toBeDefined();
+    });
+
+    const allTab = screen.getByRole("tab", { name: "All" });
+    const xlmTab = screen.getByRole("tab", { name: "XLM" });
+    const failureTab = screen.getByRole("tab", { name: "Expected Failure" });
+
+    allTab.focus();
+    await user.keyboard("{ArrowLeft}");
+    expect(document.activeElement).toBe(failureTab);
+    expect(allTab.getAttribute("aria-selected")).toBe("true");
+
+    await user.keyboard("{ArrowRight}");
+    expect(document.activeElement).toBe(allTab);
+    await user.keyboard("{ArrowRight}");
+    expect(document.activeElement).toBe(xlmTab);
+    expect(allTab.getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByText("03 AVAILABLE")).toBeDefined();
+
+    await user.keyboard("{Enter}");
+    expect(xlmTab.getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByText("01 AVAILABLE")).toBeDefined();
+  });
+
+  it("moves focus to the first and last filter with Home and End, then activates with Space", async () => {
+    const user = userEvent.setup();
+    render(<Dashboard />);
+    await waitFor(() => {
+      expect(screen.getByText("03 AVAILABLE")).toBeDefined();
+    });
+
+    const allTab = screen.getByRole("tab", { name: "All" });
+    const failureTab = screen.getByRole("tab", { name: "Expected Failure" });
+
+    allTab.focus();
+    await user.keyboard("{End}");
+    expect(document.activeElement).toBe(failureTab);
+    expect(allTab.getAttribute("aria-selected")).toBe("true");
+
+    await user.keyboard("{Home}");
+    expect(document.activeElement).toBe(allTab);
+    await user.keyboard("{End}");
+    await user.keyboard("{Space}");
+
+    expect(failureTab.getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByText("01 AVAILABLE")).toBeDefined();
+    expect(screen.getAllByText("Missing trustline").length).toBeGreaterThan(0);
+  });
+
+  it("enters the tab list on its active filter when tabbing backward from search", async () => {
+    const user = userEvent.setup();
+    render(<Dashboard />);
+    await waitFor(() => {
+      expect(screen.getByText("03 AVAILABLE")).toBeDefined();
+    });
+
+    const xlmTab = screen.getByRole("tab", { name: "XLM" });
+    await user.click(xlmTab);
+    screen.getByRole("searchbox", { name: "Search scenarios by name, ID, or description" }).focus();
+    await user.tab({ shift: true });
+
+    expect(document.activeElement).toBe(xlmTab);
+    expect(xlmTab.getAttribute("tabindex")).toBe("0");
   });
 
   it("filters scenarios when clicking 'XLM'", async () => {

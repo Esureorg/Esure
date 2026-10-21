@@ -22,7 +22,7 @@ import { RunCapacityError } from "./errors.js";
 import { DatabaseUnavailableError } from "./database.js";
 import { openApiDocument } from "./openapi.js";
 import { FixedWindowRateLimiter } from "./rate-limiter.js";
-import { RunService } from "./run-service.js";
+import { RunService, type RunLifecycleLogger } from "./run-service.js";
 import { InMemoryRunStore } from "./run-store.js";
 import { parseScenario, prepareScenario, canonicalJson } from "./scenario-loader.js";
 import { scenarioSchemaV1, ScenarioValidationError } from "./scenario-schema.js";
@@ -32,7 +32,7 @@ import { PersistenceCoordinator } from "./persistence.js";
 import { ScenarioIntegrityError } from "./published-scenarios.js";
 import { IdempotencyStore } from "./idempotency-store.js";
 
-interface BuildAppOptions { config: AppConfig; ledger?: LedgerGateway; logger?: boolean; clock?: () => number; }
+interface BuildAppOptions { config: AppConfig; ledger?: LedgerGateway; logger?: boolean; runLogger?: RunLifecycleLogger; clock?: () => number; }
 
 const runBodySchema = {
   type: "object", additionalProperties: false, required: ["scenarioId"],
@@ -47,7 +47,7 @@ const scenarioIdParamsSchema = {
   type: "object",
   additionalProperties: false,
   required: ["scenarioId"],
-  properties: { scenarioId: { type: "string", pattern: "^[a-z0-9-]{1,64}$" } },
+  properties: { scenarioId: { type: "string", minLength: 1, maxLength: 64, pattern: "^[a-z0-9-]+$" } },
 } as const;
 
 const versionParamsSchema = {
@@ -55,8 +55,8 @@ const versionParamsSchema = {
   additionalProperties: false,
   required: ["scenarioId", "version"],
   properties: {
-    scenarioId: { type: "string", pattern: "^[a-z0-9-]{1,64}$" },
-    version: { type: "string", pattern: "^[1-9][0-9]{0,9}$" },
+    scenarioId: { type: "string", minLength: 1, maxLength: 64, pattern: "^[a-z0-9-]+$" },
+    version: { type: "string", minLength: 1, maxLength: 10, pattern: "^[1-9][0-9]*$" },
   },
 } as const;
 
@@ -64,8 +64,8 @@ const historyQuerySchema = {
   type: "object",
   additionalProperties: false,
   properties: {
-    limit: { type: "string", pattern: "^[1-9][0-9]{0,2}$" },
-    cursor: { type: "string", pattern: "^[1-9][0-9]{0,9}$" },
+    limit: { type: "string", minLength: 1, maxLength: 3, pattern: "^[0-9]+$" },
+    cursor: { type: "string", minLength: 1, maxLength: 10, pattern: "^[0-9]+$" },
   },
 } as const;
 
@@ -122,11 +122,41 @@ export function buildApp(options: BuildAppOptions): AppInstance {
   const ledger = options.ledger ?? new StellarTestnetGateway(options.config.horizonUrl, options.config.friendbotUrl, {
     fundingConcurrency: options.config.maxConcurrentFriendbotRequests,
   });
+  const clock = options.clock ?? Date.now;
   const runs = new RunService(persistence.runStore ?? new InMemoryRunStore(options.config.maxStoredRuns, options.config.runRetentionMs, clock), ledger, {
     maxConcurrentRuns: options.config.maxConcurrentRuns, runTimeoutMs: options.config.runTimeoutMs, stepTimeoutMs: options.config.stepTimeoutMs,
-  }, clock);
+  }, clock, options.runLogger ?? app.log);
 
   app.get("/health", async () => ({ status: "ok", network: "testnet" }));
+  if (options.config.metricsEnabled) {
+    app.get("/metrics", async (_request, reply) => {
+      const metrics = runs.getMetrics();
+      const body = [
+        "# HELP esure_active_runs Number of currently admitted active runs.",
+        "# TYPE esure_active_runs gauge",
+        `esure_active_runs ${metrics.activeRuns}`,
+        "# HELP esure_terminal_runs_total Completed runs by fixed outcome.",
+        "# TYPE esure_terminal_runs_total counter",
+        `esure_terminal_runs_total{outcome="passed"} ${metrics.terminalRuns.passed}`,
+        `esure_terminal_runs_total{outcome="failed"} ${metrics.terminalRuns.failed}`,
+        "# HELP esure_rejected_run_starts_total Rejected starts by fixed reason.",
+        "# TYPE esure_rejected_run_starts_total counter",
+        `esure_rejected_run_starts_total{reason="capacity"} ${metrics.rejectedStarts.capacity}`,
+        `esure_rejected_run_starts_total{reason="draining"} ${metrics.rejectedStarts.draining}`,
+        "# HELP esure_run_duration_seconds Duration of terminal runs in seconds.",
+        "# TYPE esure_run_duration_seconds summary",
+        `esure_run_duration_seconds_sum ${metrics.runDuration.totalMilliseconds / 1_000}`,
+        "# HELP esure_run_duration_seconds_count Number of terminal runs included in duration.",
+        "# TYPE esure_run_duration_seconds_count counter",
+        `esure_run_duration_seconds_count ${metrics.runDuration.count}`,
+        "",
+      ].join("\n");
+      return reply
+        .header("Cache-Control", "no-store")
+        .type("text/plain; version=0.0.4; charset=utf-8")
+        .send(body);
+    });
+  }
   app.get("/ready", async (_request, reply) => {
     const ready = await persistence.check();
     if (!ready) return reply.code(503).send({ status: "unavailable", network: "testnet", database: "unavailable" });
@@ -228,7 +258,7 @@ export function buildApp(options: BuildAppOptions): AppInstance {
     const idempotencyKey = extractIdempotencyKey(request.headers["idempotency-key"]);
     if (idempotencyKey) {
       const fingerprint = requestFingerprint({ scenarioId, scenarioVersion });
-      const outcome = idempotency.insert(idempotencyKey, fingerprint, () => runs.start(scenario));
+      const outcome = idempotency.insert(idempotencyKey, fingerprint, () => runs.start(scenario, request.id));
       if (outcome.status === "conflict") {
         return reply.code(409).send(apiError("IDEMPOTENCY_CONFLICT", "The Idempotency-Key was already used with a different request body.", request.id));
       }
@@ -240,7 +270,7 @@ export function buildApp(options: BuildAppOptions): AppInstance {
       return reply.code(202).send(await outcome.entry.result);
     }
 
-    return reply.code(202).send(await runs.start(scenario));
+    return reply.code(202).send(await runs.start(scenario, request.id));
   });
 
   app.post("/api/v1/runs/definitions", async (request, reply) => {
@@ -252,7 +282,7 @@ export function buildApp(options: BuildAppOptions): AppInstance {
       // The canonical fingerprint covers the entire definition so any field
       // change produces a different fingerprint.
       const fingerprint = requestFingerprint(scenario);
-      const outcome = idempotency.insert(idempotencyKey, fingerprint, () => runs.start(scenario));
+      const outcome = idempotency.insert(idempotencyKey, fingerprint, () => runs.start(scenario, request.id));
       if (outcome.status === "conflict") {
         return reply.code(409).send(apiError("IDEMPOTENCY_CONFLICT", "The Idempotency-Key was already used with a different request body.", request.id));
       }
@@ -262,7 +292,7 @@ export function buildApp(options: BuildAppOptions): AppInstance {
       return reply.code(202).send(await outcome.entry.result);
     }
 
-    return reply.code(202).send(await runs.start(scenario));
+    return reply.code(202).send(await runs.start(scenario, request.id));
   });
 
   app.get<{ Params: { runId: string } }>("/api/v1/runs/:runId", async (request, reply) => {
