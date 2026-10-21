@@ -698,5 +698,31 @@ describe("#68 ASCII status markers", () => {
     expect(await invokeCli("--help")).toBe(1);
     expect(stdout.join("\n")).toContain("--ascii");
   });
+
+  it("completions bash emits a bash completion script", async () => {
+    expect(await invokeCli("completions", "bash")).toBe(0);
+    const out = stdout.join("\n");
+    expect(out).toContain("_esure_complete()");
+    expect(out).toContain("complete -F _esure_complete esure");
+    expect(out).toContain("list");
+    expect(out).toContain("doctor");
+  });
+
+  it("completions zsh emits a zsh completion script", async () => {
+    expect(await invokeCli("completions", "zsh")).toBe(0);
+    const out = stdout.join("\n");
+    expect(out).toContain("#compdef esure");
+    expect(out).toContain("_esure()");
+    expect(out).toContain("list");
+    expect(out).toContain("doctor");
+  });
+
+  it("completions rejects an unsupported shell", async () => {
+    expect(await invokeCli("completions", "fish")).toBe(1);
+    const err = stderr.join("\n");
+    expect(err).toContain("Unsupported shell");
+    expect(err).toContain("bash");
+    expect(err).toContain("zsh");
+  });
 });
 

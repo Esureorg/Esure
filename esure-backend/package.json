@@ -86,6 +86,7 @@
     "generate:api-types": "node scripts/generate-api-types.mjs",
     "db:migrate": "tsx scripts/migrate.ts",
     "migrate:status": "tsx scripts/migrate-status.ts",
+    "prune:runs": "tsx scripts/prune-expired-runs.ts",
     "db:reconcile": "tsx scripts/reconcile-fixtures.ts",
     "db:reconcile:dry-run": "tsx scripts/reconcile-fixtures.ts --dry-run",
     "build": "npm run generate:api-types && tsc -p tsconfig.build.json",

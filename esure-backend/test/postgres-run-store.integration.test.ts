@@ -143,6 +143,85 @@ const postgresAvailable = process.platform !== "win32" || existsSync("C:/Windows
       WHERE table_schema = 'public' AND table_name = 'runs' AND column_name = 'run_id'`);
     expect(restored.rowCount).toBe(1);
   });
+  it("rejects updates whose version no longer matches (optimistic concurrency)", async () => {
+    const run = report();
+    await store.create(run);
+    await store.get(run.id); // observe version 0
+    // A concurrent writer bumps the stored version out from under this store.
+    await database.query(`UPDATE runs SET version = version + 1 WHERE run_id = $1`, [run.id]);
+    await expect(store.update(run.id, { status: "passed" })).rejects.toThrow(
+      /was modified by another writer/,
+    );
+    // The rejected update must not have changed the report.
+    expect((await store.get(run.id))?.status).toBe("running");
+  });
+
+  it("pruneExpired deletes expired terminal runs through the audited cleanup path", async () => {
+    const expired = report({ status: "passed", completedAt: new Date(0).toISOString() });
+    const active = report({ status: "running" });
+    await store.create(expired);
+    await store.create(active);
+    await database.query(
+      `INSERT INTO run_steps(run_id, step_index, step_id, step_type, status) VALUES ($1, 0, 'pay', 'payment', 'passed')`,
+      [expired.id],
+    );
+
+    const deleted = await store.pruneExpired(10);
+    expect(deleted).toBe(1);
+    expect(await store.get(expired.id)).toBeUndefined();
+    expect(await store.get(active.id)).toEqual(active);
+
+    // One cleanup_audit entry was written for the deleted run.
+    const audit = await database.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM cleanup_audit WHERE action = 'delete_run' AND target_table = 'runs' AND target_id = $1`,
+      [expired.id],
+    );
+    expect(audit.rows[0]!.count).toBe("1");
+
+    // Dependent records were removed with the run (ON DELETE CASCADE).
+    const steps = await database.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM run_steps WHERE run_id = $1`,
+      [expired.id],
+    );
+    expect(steps.rows[0]!.count).toBe("0");
+  });
+
+  it("pruneExpired keeps terminal runs inside the 30-day cleanup floor even past retention", async () => {
+    const recent = report({ status: "passed", completedAt: new Date(Date.now() - 120_000).toISOString() });
+    await store.create(recent);
+
+    expect(await store.pruneExpired(10)).toBe(0);
+    // Reads still hide it via the retention filter, but the row survives.
+    expect(await store.get(recent.id)).toBeUndefined();
+    const rows = await database.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM runs WHERE run_id = $1`,
+      [recent.id],
+    );
+    expect(rows.rows[0]!.count).toBe("1");
+  });
+
+  it("pruneExpired dry-run reports the eligible count without deleting", async () => {
+    const expired = report({ status: "failed", completedAt: new Date(0).toISOString() });
+    await store.create(expired);
+
+    expect(await store.pruneExpired(10, { dryRun: true })).toBe(1);
+    const rows = await database.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM runs WHERE run_id = $1`,
+      [expired.id],
+    );
+    expect(rows.rows[0]!.count).toBe("1");
+
+    // A real prune afterwards removes it, and repeating the prune is a no-op.
+    expect(await store.pruneExpired(10)).toBe(1);
+    expect(await store.pruneExpired(10)).toBe(0);
+  });
+
+  it("pruneExpired deletes nothing when no runs are expired", async () => {
+    const active = report({ status: "running" });
+    await store.create(active);
+    expect(await store.pruneExpired(10)).toBe(0);
+    expect(await store.get(active.id)).toEqual(active);
+  });
 });
 
 function report(overrides: Partial<RunReport> = {}): RunReport {
