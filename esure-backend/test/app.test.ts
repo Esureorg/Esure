@@ -5,6 +5,7 @@ import type { LedgerExecution, LedgerGateway, Scenario } from "../src/domain.js"
 import type { AppConfig } from "../src/config.js";
 import { SafeRunError } from "../src/errors.js";
 import { DatabaseUnavailableError } from "../src/database.js";
+import type { RunLifecycleLog } from "../src/run-service.js";
 import { completeScenario } from "./fixtures.js";
 
 const config: AppConfig = {
@@ -16,6 +17,7 @@ const config: AppConfig = {
   runTimeoutMs: 5_000,
   stepTimeoutMs: 1_000,
   maxConcurrentRuns: 2,
+  metricsEnabled: false,
   maxConcurrentFriendbotRequests: 5,
   maxStoredRuns: 100,
   runRetentionMs: 60_000,
@@ -40,8 +42,18 @@ const ledger: LedgerGateway = {
 
 const apps: AppInstance[] = [];
 
-function createApp(options: { config?: AppConfig; ledger?: LedgerGateway; clock?: () => number } = {}) {
-  const app = buildApp({ config: options.config ?? config, ledger: options.ledger ?? ledger, ...(options.clock ? { clock: options.clock } : {}) });
+function createApp(options: {
+  config?: AppConfig;
+  ledger?: LedgerGateway;
+  clock?: () => number;
+  runLogger?: { info(fields: RunLifecycleLog): void };
+} = {}) {
+  const app = buildApp({
+    config: options.config ?? config,
+    ledger: options.ledger ?? ledger,
+    ...(options.clock ? { clock: options.clock } : {}),
+    ...(options.runLogger ? { runLogger: options.runLogger } : {}),
+  });
   apps.push(app);
   return app;
 }
@@ -56,6 +68,68 @@ describe("Esure API", () => {
     const response = await createApp().inject({ method: "GET", url: "/health" });
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual({ status: "ok", network: "testnet" });
+  });
+
+  it("disables process metrics unless explicitly enabled", async () => {
+    const response = await createApp().inject({ method: "GET", url: "/metrics" });
+    expect(response.statusCode).toBe(404);
+  });
+
+  it("exposes only bounded aggregate metrics when enabled", async () => {
+    const app = createApp({ config: { ...config, metricsEnabled: true } });
+    const response = await app.inject({ method: "GET", url: "/metrics" });
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["content-type"]).toContain("text/plain");
+    expect(response.body).toContain('esure_terminal_runs_total{outcome="passed"} 0');
+    expect(response.body).toContain('esure_rejected_run_starts_total{reason="capacity"} 0');
+    expect(response.body).toContain("esure_run_duration_seconds_count 0");
+    expect([...response.body.matchAll(/\{([^}]+)\}/g)].map((match) => match[1])).toEqual([
+      'outcome="passed"',
+      'outcome="failed"',
+      'reason="capacity"',
+      'reason="draining"',
+    ]);
+    expect(response.body).not.toContain("test-scenario");
+    expect(response.body).not.toContain("account");
+    expect(response.body).not.toContain("scenario=");
+  });
+
+  it("correlates structured run lifecycle logs with the request without logging its body", async () => {
+    const events: RunLifecycleLog[] = [];
+    const app = createApp({ runLogger: { info: (event) => events.push(event) } });
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/v1/runs",
+      headers: { "request-id": "request-correlation-1" },
+      payload: { scenarioId: "xlm-payment", inputs: {} },
+    });
+    const runId = response.json().id as string;
+    await vi.waitFor(() => expect(events).toHaveLength(2));
+
+    expect(events[0]).toMatchObject({
+      event: "run.started",
+      runId,
+      scenarioId: "xlm-payment",
+      scenarioVersion: 1,
+      requestId: expect.any(String),
+      status: "requested",
+    });
+    expect(events[1]).toMatchObject({
+      event: "run.completed",
+      runId,
+      requestId: events[0]!.requestId,
+      status: "passed",
+    });
+    expect(JSON.stringify(events)).not.toContain("inputs");
+    expect(Object.keys(events[0]!).sort()).toEqual([
+      "durationMs",
+      "event",
+      "requestId",
+      "runId",
+      "scenarioId",
+      "scenarioVersion",
+      "status",
+    ]);
   });
 
   it("reports explicitly disabled persistence readiness on the unchanged P1 path", async () => {

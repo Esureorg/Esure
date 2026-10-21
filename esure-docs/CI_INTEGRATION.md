@@ -5,6 +5,9 @@
 
 The Esure CLI can be integrated into continuous integration pipelines to automatically
 test Stellar payment flows, trustline behavior, and transaction handling on Testnet.
+For copy-ready shell workflows—including suites, JSON parsing, report files, and
+pre-commit validation—see the CLI README's
+[Common Workflows](../esure-cli/README.md#common-workflows) section.
 
 ## Quick Start
 
@@ -31,7 +34,7 @@ jobs:
       
       - name: Run Stellar scenario tests
         run: |
-          cd esure-cli && node dist/cli.js run ./scenarios/payment-flow.yaml --output json
+          cd esure-cli && node dist/cli.js run xlm-payment --output json
 ```
 
 ## Exit Codes
@@ -136,7 +139,7 @@ jobs:
           npm run build
       
       - name: Run payment scenario
-        run: cd esure-cli && node dist/cli.js run ./tests/payment-integration.yaml
+        run: cd esure-cli && node dist/cli.js run xlm-payment
 ```
 
 ### Multiple Scenario Matrix
@@ -254,7 +257,7 @@ test-stellar:
     - cd esure-cli
     - npm ci
     - npm run build
-    - cd esure-cli && node dist/cli.js run ./scenarios/payment-test.yaml --output json
+    - node dist/cli.js run xlm-payment --output json
   artifacts:
     when: always
     reports:
@@ -281,7 +284,7 @@ jobs:
             npm run build
       - run:
           name: Run Stellar tests
-          command: cd esure-cli && node dist/cli.js run ./tests/stellar-integration.yaml --output json
+          command: cd esure-cli && node dist/cli.js run xlm-payment --output json
 
 workflows:
   test:

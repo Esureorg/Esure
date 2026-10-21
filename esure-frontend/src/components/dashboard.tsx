@@ -146,6 +146,7 @@ export function Dashboard() {
   const [filter, setFilter] = useState<ScenarioFilter>(() =>
     parseCategory(searchParams?.get("category") ?? null),
   );
+  const categoryTabRefs = useRef<Partial<Record<ScenarioFilter, HTMLButtonElement>>>({});
 
   // Sync filter, search, and sort with URL (#31, #153)
   const prevStateRef = useRef<{ filter: ScenarioFilter; search: string; sort: SortOrder }>({
@@ -553,21 +554,55 @@ export function Dashboard() {
         </div>
 
         {/* Filters row */}
-        <div className="scenario-filters" role="tablist" aria-label="Scenario filter options">
+        <div
+          className="scenario-filters"
+          role="tablist"
+          aria-label="Scenario filter options"
+          aria-describedby="scenario-filter-instructions"
+        >
           {FILTER_OPTIONS.map((option) => (
             <button
               key={option.key}
+              id={`scenario-tab-${option.key}`}
+              ref={(element) => {
+                categoryTabRefs.current[option.key] = element ?? undefined;
+              }}
               type="button"
               role="tab"
               aria-selected={filter === option.key}
+              tabIndex={filter === option.key ? 0 : -1}
               aria-controls="scenario-grid"
               className={`filter-pill ${filter === option.key ? "active" : ""}`}
               onClick={() => setFilter(option.key)}
+              onKeyDown={(event) => {
+                const currentIndex = FILTER_OPTIONS.findIndex((item) => item.key === option.key);
+                let nextIndex: number | null = null;
+                if (event.key === "ArrowRight") {
+                  nextIndex = (currentIndex + 1) % FILTER_OPTIONS.length;
+                } else if (event.key === "ArrowLeft") {
+                  nextIndex = (currentIndex - 1 + FILTER_OPTIONS.length) % FILTER_OPTIONS.length;
+                } else if (event.key === "Home") {
+                  nextIndex = 0;
+                } else if (event.key === "End") {
+                  nextIndex = FILTER_OPTIONS.length - 1;
+                }
+
+                if (nextIndex !== null) {
+                  event.preventDefault();
+                  categoryTabRefs.current[FILTER_OPTIONS[nextIndex].key]?.focus();
+                } else if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  setFilter(option.key);
+                }
+              }}
             >
               {option.label}
             </button>
           ))}
         </div>
+        <p id="scenario-filter-instructions" className="sr-only">
+          Use the Left and Right Arrow keys or Home and End to move between filters. Press Enter or Space to apply the focused filter.
+        </p>
 
         {/* Search + Sort toolbar (#29 #30) */}
         <div className="catalogue-toolbar">
@@ -632,7 +667,14 @@ export function Dashboard() {
           </div>
         )}
 
-        <div className="scenario-grid" id="scenario-grid" aria-busy={loading}>
+        <div
+          className="scenario-grid"
+          id="scenario-grid"
+          role="tabpanel"
+          aria-labelledby={`scenario-tab-${filter}`}
+          tabIndex={0}
+          aria-busy={loading}
+        >
           {loading ? (
             [1, 2, 3].map((item) => <div className="scenario-card skeleton" key={item} />)
           ) : catalogueError ? (

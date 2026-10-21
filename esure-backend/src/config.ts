@@ -7,6 +7,7 @@ export interface AppConfig {
   runTimeoutMs: number;
   stepTimeoutMs: number;
   maxConcurrentRuns: number;
+  metricsEnabled: boolean;
   /**
    * Issue #82: upper bound on how many Friendbot funding requests may be
    * in flight at once for a single run's "fund-accounts" step. Without
@@ -69,6 +70,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     runTimeoutMs: integerEnv(env, "RUN_TIMEOUT_MS", 120_000, 1_000, 600_000),
     stepTimeoutMs: integerEnv(env, "STEP_TIMEOUT_MS", 30_000, 500, 120_000),
     maxConcurrentRuns: integerEnv(env, "MAX_CONCURRENT_RUNS", 2, 1, 20),
+    metricsEnabled: booleanEnv(env, "METRICS_ENABLED", false),
     maxConcurrentFriendbotRequests: integerEnv(env, "MAX_CONCURRENT_FRIENDBOT_REQUESTS", 5, 1, 50),
     maxStoredRuns: integerEnv(env, "MAX_STORED_RUNS", 500, 10, 10_000),
     runRetentionMs: integerEnv(env, "RUN_RETENTION_MS", 3_600_000, 60_000, 86_400_000),
@@ -85,6 +87,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     ...(env.DATABASE_URL && { databaseUrl: env.DATABASE_URL }),
     ...(env.SCENARIO_DIRECTORY && { scenarioDirectory: env.SCENARIO_DIRECTORY }),
   };
+}
+
+function booleanEnv(env: NodeJS.ProcessEnv, name: string, fallback: boolean): boolean {
+  const value = env[name];
+  if (value === undefined) return fallback;
+  if (value === "true") return true;
+  if (value === "false") return false;
+  throw new Error(`${name} must be true or false`);
 }
 
 function integerEnv(
