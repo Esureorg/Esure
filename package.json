@@ -1,0 +1,14 @@
+{
+  "name": "esure-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Esure: Test with confidence. Build on Stellar.",
+  "scripts": {
+    "check": "npm run check --workspace=esure-backend && npm run check --workspace=esure-frontend && npm run check --workspace=esure-cli"
+  },
+  "workspaces": [
+    "esure-backend",
+    "esure-frontend",
+    "esure-cli"
+  ]
+}

@@ -1,0 +1,36 @@
+schemaVersion: 1
+id: text-memo-28-byte-boundary
+version: 1
+name: Text memo at 28-byte UTF-8 boundary
+description: Send XLM with a text memo at the maximum 28-byte UTF-8 boundary and verify it on the confirmed Testnet transaction.
+network: testnet
+accounts:
+  - id: sender
+    generate: true
+    fund: true
+  - id: recipient
+    generate: true
+    fund: true
+assets:
+  - id: xlm
+    type: native
+steps:
+  - id: send-xlm-with-boundary-memo
+    type: payment
+    from: sender
+    to: recipient
+    asset: xlm
+    amount: "5"
+    memo: "28-byte UTF-8 boundary test!"
+assertions:
+  - type: transactionMemoEquals
+    step: send-xlm-with-boundary-memo
+    memo: "28-byte UTF-8 boundary test!"
+  - type: transactionConfirmed
+    step: send-xlm-with-boundary-memo
+  - type: balanceChangedBy
+    account: recipient
+    asset: xlm
+    amount: "5"
+  - type: stepSucceeded
+    step: send-xlm-with-boundary-memo
