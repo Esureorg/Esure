@@ -20,6 +20,14 @@
       "types": "./dist/scenario-schema.d.ts",
       "default": "./dist/scenario-schema.js"
     },
+    "./report-schema": {
+      "types": "./dist/report-schema.d.ts",
+      "default": "./dist/report-schema.js"
+    },
+    "./report-schema.js": {
+      "types": "./dist/report-schema.d.ts",
+      "default": "./dist/report-schema.js"
+    },
     "./scenario-loader": {
       "types": "./dist/scenario-loader.d.ts",
       "default": "./dist/scenario-loader.js"

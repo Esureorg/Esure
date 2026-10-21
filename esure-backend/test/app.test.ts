@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApp } from "../src/app.js";
 import { closeAfterDrain, type AppInstance } from "../src/app.js";
-import type { LedgerExecution, LedgerGateway, Scenario } from "../src/domain.js";
+import type { LedgerExecution, LedgerExecutionOptions, LedgerGateway, Scenario } from "../src/domain.js";
 import type { AppConfig } from "../src/config.js";
 import { SafeRunError } from "../src/errors.js";
 import { DatabaseUnavailableError } from "../src/database.js";
@@ -370,11 +370,102 @@ describe("Esure API", () => {
       const first = await app.inject({ method: "POST", url: "/api/v1/runs", payload: { scenarioId: "xlm-payment" } });
       const firstId = first.json().id as string;
       await vi.waitFor(async () => expect((await app.inject({ method: "GET", url: `/api/v1/runs/${firstId}` })).json().status).toBe("passed"));
+      const firstRead = await app.inject({ method: "GET", url: `/api/v1/runs/${firstId}` });
       // Starting a second run evicts the first terminal run once the store is at capacity.
       await app.inject({ method: "POST", url: "/api/v1/runs", payload: { scenarioId: "xlm-payment" } });
-      const evicted = await app.inject({ method: "GET", url: `/api/v1/runs/${firstId}` });
+      const evicted = await app.inject({
+        method: "GET",
+        url: `/api/v1/runs/${firstId}`,
+        headers: { "if-none-match": firstRead.headers.etag as string },
+      });
       expect(evicted.statusCode).toBe(404);
       expect(evicted.json().error.code).toBe("RUN_NOT_FOUND");
+    });
+  });
+
+  describe("conditional run report reads (#163)", () => {
+    it("returns a revalidation ETag and an empty 304 for an unchanged existing report", async () => {
+      const app = createApp();
+      const started = await app.inject({ method: "POST", url: "/api/v1/runs", payload: { scenarioId: "xlm-payment" } });
+      const id = started.json().id as string;
+      await vi.waitFor(async () => {
+        const response = await app.inject({ method: "GET", url: `/api/v1/runs/${id}` });
+        expect(response.json().status).toBe("passed");
+      });
+
+      const first = await app.inject({ method: "GET", url: `/api/v1/runs/${id}` });
+      const etag = first.headers.etag as string;
+      expect(etag).toMatch(/^"[a-f0-9]{64}"$/);
+      expect(first.headers["cache-control"]).toBe("no-cache");
+      expect(first.statusCode).toBe(200);
+
+      const unchanged = await app.inject({
+        method: "GET",
+        url: `/api/v1/runs/${id}`,
+        headers: { "if-none-match": `"stale", W/${etag}` },
+      });
+      expect(unchanged.statusCode).toBe(304);
+      expect(unchanged.body).toBe("");
+
+      const downloaded = await app.inject({ method: "GET", url: `/api/v1/runs/${id}/report` });
+      const downloadEtag = downloaded.headers.etag as string;
+      expect(downloaded.statusCode).toBe(200);
+      const unchangedDownload = await app.inject({
+        method: "GET",
+        url: `/api/v1/runs/${id}/report`,
+        headers: { "if-none-match": downloadEtag },
+      });
+      expect(unchangedDownload.statusCode).toBe(304);
+      expect(unchangedDownload.body).toBe("");
+    });
+
+    it("changes the ETag when evidence or terminal status changes", async () => {
+      let resolveExecution!: (execution: LedgerExecution) => void;
+      let executionOptions: LedgerExecutionOptions | undefined;
+      const activeLedger: LedgerGateway = {
+        execute: vi.fn((_scenario, options) => {
+          executionOptions = options;
+          return new Promise<LedgerExecution>((resolve) => { resolveExecution = resolve; });
+        }),
+      };
+      const app = createApp({ ledger: activeLedger });
+      const started = await app.inject({ method: "POST", url: "/api/v1/runs", payload: { scenarioId: "xlm-payment" } });
+      const id = started.json().id as string;
+      await vi.waitFor(() => expect(activeLedger.execute).toHaveBeenCalled());
+
+      const initial = await app.inject({ method: "GET", url: `/api/v1/runs/${id}` });
+      const initialTag = initial.headers.etag as string;
+      expect(initial.json().steps).toEqual([]);
+
+      const step = { id: "send-xlm", type: "payment", status: "passed" as const, message: "Confirmed." };
+      executionOptions?.onStep?.(step);
+      let evidenceRead = initial;
+      await vi.waitFor(async () => {
+        evidenceRead = await app.inject({ method: "GET", url: `/api/v1/runs/${id}` });
+        expect(evidenceRead.json().steps).toEqual([step]);
+      });
+      const evidenceTag = evidenceRead.headers.etag as string;
+      expect(evidenceTag).not.toBe(initialTag);
+      expect((await app.inject({
+        method: "GET",
+        url: `/api/v1/runs/${id}`,
+        headers: { "if-none-match": initialTag },
+      })).statusCode).toBe(200);
+
+      resolveExecution({ steps: [step], assertions: [] });
+      let terminalRead = evidenceRead;
+      await vi.waitFor(async () => {
+        terminalRead = await app.inject({ method: "GET", url: `/api/v1/runs/${id}` });
+        expect(terminalRead.json().status).toBe("passed");
+      });
+      expect(terminalRead.headers.etag).not.toBe(evidenceTag);
+      const terminalTag = terminalRead.headers.etag as string;
+      const unchangedTerminal = await app.inject({
+        method: "GET",
+        url: `/api/v1/runs/${id}`,
+        headers: { "if-none-match": terminalTag },
+      });
+      expect(unchangedTerminal.statusCode).toBe(304);
     });
   });
 
