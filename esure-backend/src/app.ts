@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
+import Fastify, { type FastifyInstance } from "fastify";
 export type AppInstance = FastifyInstance & { runs: RunService };
 
 export async function closeAfterDrain(app: { close: () => Promise<void>; runs: Pick<AppInstance["runs"], "drain"> }, timeoutMs: number): Promise<void> {
@@ -43,38 +43,6 @@ const runBodySchema = {
   },
 } as const;
 
-const scenarioIdParamsSchema = {
-  type: "object",
-  additionalProperties: false,
-  required: ["scenarioId"],
-  properties: { scenarioId: { type: "string", pattern: "^[a-z0-9-]{1,64}$" } },
-} as const;
-
-const versionParamsSchema = {
-  type: "object",
-  additionalProperties: false,
-  required: ["scenarioId", "version"],
-  properties: {
-    scenarioId: { type: "string", pattern: "^[a-z0-9-]{1,64}$" },
-    version: { type: "string", pattern: "^[1-9][0-9]{0,9}$" },
-  },
-} as const;
-
-const historyQuerySchema = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    limit: { type: "string", pattern: "^[1-9][0-9]{0,2}$" },
-    cursor: { type: "string", pattern: "^[1-9][0-9]{0,9}$" },
-  },
-} as const;
-
-const exportQuerySchema = {
-  type: "object",
-  additionalProperties: false,
-  properties: { format: { type: "string", enum: ["json", "yaml"] } },
-} as const;
-
 /** Maximum Idempotency-Key length accepted (issue #72). */
 const IDEMPOTENCY_KEY_MAX_LENGTH = 128;
 
@@ -88,7 +56,6 @@ const IDEMPOTENCY_MAX_ENTRIES = 1_000;
 const IDEMPOTENCY_RETENTION_MS = 86_400_000;
 
 export function buildApp(options: BuildAppOptions): AppInstance {
-  const clock = options.clock ?? Date.now;
   const app = Fastify({ logger: options.logger ?? false, bodyLimit: options.config.bodyLimitBytes, ajv: { customOptions: { removeAdditional: false } } });
   app.addContentTypeParser(["application/yaml", "application/x-yaml", "text/yaml"], { parseAs: "string" }, (_request, body, done) => done(null, body));
   // Issue #77: fastify's default text/plain parser would otherwise accept
@@ -122,7 +89,7 @@ export function buildApp(options: BuildAppOptions): AppInstance {
   const ledger = options.ledger ?? new StellarTestnetGateway(options.config.horizonUrl, options.config.friendbotUrl, {
     fundingConcurrency: options.config.maxConcurrentFriendbotRequests,
   });
-  const runs = new RunService(persistence.runStore ?? new InMemoryRunStore(options.config.maxStoredRuns, options.config.runRetentionMs, clock), ledger, {
+  const runs = new RunService(persistence.runStore ?? new InMemoryRunStore(options.config.maxStoredRuns, options.config.runRetentionMs), ledger, {
     maxConcurrentRuns: options.config.maxConcurrentRuns, runTimeoutMs: options.config.runTimeoutMs, stepTimeoutMs: options.config.stepTimeoutMs,
   }, clock);
 
@@ -268,14 +235,13 @@ export function buildApp(options: BuildAppOptions): AppInstance {
   app.get<{ Params: { runId: string } }>("/api/v1/runs/:runId", async (request, reply) => {
     const run = await runs.get(request.params.runId);
     if (!run) return reply.code(404).send(apiError("RUN_NOT_FOUND", "The requested run does not exist.", request.id));
-    return sendConditionalRunReport(request, reply, withRetentionMetadata(run, options.config.runRetentionMs));
+    return withRetentionMetadata(run, options.config.runRetentionMs);
   });
   app.get<{ Params: { runId: string } }>("/api/v1/runs/:runId/report", async (request, reply) => {
     const run = await runs.get(request.params.runId);
     if (!run) return reply.code(404).send(apiError("RUN_NOT_FOUND", "The requested run does not exist.", request.id));
     if (run.status !== "passed" && run.status !== "failed") return reply.code(409).send(apiError("RUN_NOT_COMPLETE", "The requested run is not complete.", request.id));
-    reply.header("content-disposition", `attachment; filename=esure-run-${run.id}.json`);
-    return sendConditionalRunReport(request, reply, withRetentionMetadata(run, options.config.runRetentionMs));
+    return reply.header("content-disposition", `attachment; filename=esure-run-${run.id}.json`).send(withRetentionMetadata(run, options.config.runRetentionMs));
   });
 
   app.setErrorHandler((error, request, reply) => {
@@ -316,28 +282,6 @@ function catalogueETag(items: { id: string; version: number; contentHash: string
     .update(canonicalJson(sorted.map(({ id, version, contentHash }) => ({ id, version, contentHash }))))
     .digest("hex");
   return `"${digest}"`;
-}
-
-function sendConditionalRunReport(
-  request: FastifyRequest,
-  reply: FastifyReply,
-  report: RunReport,
-) {
-  const body = JSON.stringify(report);
-  const etag = `"${createHash("sha256").update(body).digest("hex")}"`;
-  reply.header("ETag", etag);
-  reply.header("Cache-Control", "no-cache");
-
-  const ifNoneMatchHeader = request.headers["if-none-match"];
-  const ifNoneMatch = Array.isArray(ifNoneMatchHeader) ? ifNoneMatchHeader.join(",") : ifNoneMatchHeader;
-  if (ifNoneMatch && ifNoneMatch.split(",").some((candidate) => {
-    const tag = candidate.trim();
-    return tag === "*" || (tag.startsWith("W/") ? tag.slice(2) : tag) === etag;
-  })) {
-    return reply.code(304).send();
-  }
-
-  return reply.type("application/json").send(body);
 }
 
 // ── Issue #72: idempotency helpers ─────────────────────────────────────────

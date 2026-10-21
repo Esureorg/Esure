@@ -37,8 +37,6 @@ export interface RunReport {
   status: RunStatus;
   createdAt: string;
   completedAt?: string;
-  /** Untrusted optional hint; malformed values must not invalidate a report. */
-  expiresAt?: unknown;
   steps: StepResult[];
   assertions: AssertionResult[];
   summary: {

@@ -129,41 +129,17 @@ export function openApiDocument() {
             "Active reports never include `expiresAt` — a running run has no terminal expiry to claim.",
             "`expiresAt` is a best-effort upper bound, not a guarantee: the in-memory run store may evict a",
             "terminal run earlier under capacity pressure, and no run state survives a process restart.",
-            "Supports conditional GET with `If-None-Match`; a matching report returns 304 without a body.",
-            "Responses include an ETag for the complete representation and `Cache-Control: no-cache`,",
-            "so active reports are revalidated rather than treated as immutable.",
           ].join(" "),
           parameters: [{ name: "runId", in: "path", required: true, schema: { type: "string", format: "uuid" } }],
-          responses: {
-            "200": {
-              description: "Run report",
-              headers: {
-                "ETag": { schema: { type: "string" }, description: "Fingerprint of the complete run representation; changes when any report field changes." },
-                "Cache-Control": { schema: { type: "string" }, description: "no-cache requires revalidation before reuse, including for active reports." },
-              },
-            },
-            "304": { description: "Run report unchanged; no response body." },
-            "404": { description: "Not found" },
-          },
+          responses: { "200": { description: "Run report" }, "404": { description: "Not found" } },
         },
       },
       "/api/v1/runs/{runId}/report": {
         get: {
           operationId: "downloadRunReport",
-          description: "Final JSON report for a terminal run, including the same best-effort `expiresAt` retention hint and ETag revalidation behavior as GET /api/v1/runs/{runId}.",
+          description: "Final JSON report for a terminal run, including the same best-effort `expiresAt` retention hint as GET /api/v1/runs/{runId} (issue #76).",
           parameters: [{ name: "runId", in: "path", required: true, schema: { type: "string", format: "uuid" } }],
-          responses: {
-            "200": {
-              description: "Final JSON report",
-              headers: {
-                "ETag": { schema: { type: "string" }, description: "Fingerprint of the complete report representation." },
-                "Cache-Control": { schema: { type: "string" }, description: "no-cache requires revalidation before reuse." },
-              },
-            },
-            "304": { description: "Report unchanged; no response body." },
-            "409": { description: "Run incomplete" },
-            "404": { description: "Not found" },
-          },
+          responses: { "200": { description: "Final JSON report" }, "409": { description: "Run incomplete" } },
         },
       },
     },

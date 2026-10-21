@@ -119,7 +119,6 @@ export interface RunReport {
   status: RunStatus;
   createdAt: string;
   completedAt?: string;
-  expiresAt?: string;
   steps: StepResult[];
   assertions: AssertionResult[];
   summary: RunSummary;
