@@ -1,3 +1,6 @@
 .repo-history-backups/
+temp_auto_push.bat
 .claude/
 
+.gitignore
+branch_structure.json

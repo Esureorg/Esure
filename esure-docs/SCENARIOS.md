@@ -13,6 +13,7 @@ ESURE includes 14 bundled scenarios for Testnet integration testing:
 | `xml-payment` | Fund two accounts, transfer 5 XLM, verify balance change | Pass |
 | `issued-asset-payment` | Create TESTUSJ trustline, issue 100 TESTUSD, verify balance | Pass |
 | `issued-asset-holder-transfer` | Issue 100 TESTUSD to a sender, who transfers 40 to a second holder | Pass |
+| `issued-asset-partial-redemption-transfer` | Redeem 30 of 100 TESTUSD, then transfer 20 of the remainder to another holder | Pass; holder balances are 50 and 20 |
 | `missing-trustline` | Attempt issued-asset payment without recipient trustline | Controlled `op_no_trust` failure |
 | `sender-missing-trustline` | Attempt issued-asset payment from a funded, non-issuer sender without a trustline | Controlled `op_src_no_trust` failure |
 | `wrong-issuer-trustline` | Pay a same-code asset whose issuer the recipient does not trust | Controlled `op_no_trust` failure for the actual issuer |
@@ -22,10 +23,12 @@ ESURE includes 14 bundled scenarios for Testnet integration testing:
 | `multi-operation-transaction` | Execute trustline + payment atomically in single tx | Pass |
 | `trustline-limit-exceeded` | Attempt payment exceeding trustline limit | Controlled `op_line_full` failure |
 | `trustline-limit-exact` | Pay exactly the fractional trustline limit and verify the final balance | Pass |
+| `trustline-balance-reduction` | Attempt to lower an issued-asset trustline below its current balance | Controlled `op_invalid_limit` failure; balance unchanged |
 | `trustline-already-exists` | Multiple payments using existing trustline | Pass |
 | `basic-payment-with-checks` | Send XLM and verify both accounts exist | Pass |
 | `minimum-xlm-payment` | Send minimum viable XLM (1 stroop) | Pass |
-| `path-payment` | Create EUR/XLM and USDC/EUR offers and send XLM through EUR cto deliver USDC | Pass on Testnet |
+| `minimum-issued-asset-payment` | Transfer the smallest issued-asset unit between holders | Pass; sender and recipient balances are exact |
+| `path-payment` | Create EUR/XLM and USDC/EUR offers and send XLM through EUR to deliver USDC | Pass on Testnet |
 
 These scenarios demonstrate XLM transfers, issued assets, trustline management,
 expected failure handling, and multi-step transaction flows that Stellar developers
@@ -73,6 +76,13 @@ never trusted the asset, so Stellar reports `op_src_no_trust` and the
 recipient's balance stays at exactly 50. The sender is deliberately not the
 issuer: an issuer can always send its own asset without a trustline.
 
+`trustline-limit-exceeded` fails because a payment would put the recipient
+above its trustline limit (`op_line_full`). `trustline-balance-reduction` is a
+different operation: it first issues 10 units to a holder, then attempts to
+lower that trustline's limit to 5. Stellar rejects the `changeTrust` operation
+with `op_invalid_limit`, and the holder's issued-asset balance remains exactly
+10.
+
 `path-payment` provisions its own Testnet liquidity. It creates generated sender,
 market-maker, recipient, and issuer accounts, then submits trustlines, issues
 test-issued EUR/USDC assets to the market maker, and places EUR/XLM and USDC/EUR
@@ -102,6 +112,17 @@ payment issuer rather than the code. Mocked Horizon responses verify the
 `op_no_trust` result and the unchanged first-issuer trustline balance. The
 optional live path is `RUN_STELLAR_SMOKE=1 npm test -- test/testnet-smoke.test.ts
 -t wrong-issuer-trustline` from `esure-backend`.
+
+`issued-asset-partial-redemption-transfer` issues 100 TESTUSD to the sender,
+returns 30 to the issuer for redemption, then transfers 20 of the sender's
+remaining balance to the receiver. The final holder balances are 50 and 20:
+the 30 redeemed units are no longer held by either holder, and the issuer is
+not counted as an ordinary trustline balance in this conservation check.
+
+`minimum-issued-asset-payment` transfers `0.0000001` units, one stroop, the
+smallest amount representable for a Stellar asset with seven decimal places.
+The sender's balance decreases from 1 to `0.9999999`, and the recipient's
+balance increases to `0.0000001`.
 
 ```yaml
 schemaVersion: 1
@@ -181,6 +202,193 @@ signed 64-bit stroop range.
 Reports include explicit `expected` and `actual` values for every assertion,
 plus `scenarioVersion`, `scenarioSchemaVersion`, and a canonical SHA-256
 `scenarioContentHash`.
+
+## Expected-failure matching and continuation semantics
+
+Negative scenarios are easy to misread as ordinary failures unless exact matching and continuation behavior are explained. This section clarifies the mechanics of `stepFailedWith` assertions.
+
+### What is an expected failure?
+
+An expected failure is a deliberate scenario outcome where a transaction is expected to fail with specific Stellar error codes. Unlike an unexpected crash or assertion failure, an expected failure that matches the specification counts as a **passing** assertion and allows the scenario to continue.
+
+### Using `stepFailedWith`
+
+The `stepFailedWith` assertion expects a step to fail with an exact sequence of transaction and operation codes:
+
+```yaml
+assertions:
+  - type: stepFailedWith
+    step: send-without-trustline
+    transactionCode: tx_failed
+    operationCodes: [op_no_trust]
+```
+
+This assertion passes only if:
+1. The step `send-without-trustline` submitted a transaction.
+2. The transaction was rejected by Stellar with code `tx_failed`.
+3. The first (and only) operation failed with code `op_no_trust`.
+
+### Code matching rules
+
+**Transaction code** is the top-level response from Stellar (e.g. `tx_success`, `tx_failed`, `tx_too_late`). Only one transaction code per submission.
+
+**Operation codes** are per-operation results within a transaction, listed in order. If a transaction contains three operations and the second fails, the array is `[op_no_trust]` (Stellar stops processing at the first failure; codes after the failure are not reported).
+
+**Exact matching is required**: both the transaction code and the complete operation-code sequence must match exactly. For example:
+- Expecting `[op_no_trust]` but receiving `[op_no_trust, op_src_no_trust]` fails the assertion.
+- Expecting `[op_no_trust]` but receiving `[op_underfunded]` fails the assertion.
+- Expecting `tx_failed` but receiving `tx_success` fails the assertion.
+
+### Worked example: missing-trustline scenario
+
+The bundled `missing-trustline` scenario demonstrates expected-failure matching:
+
+```yaml
+accounts:
+  - { id: issuer, generate: true, fund: true }
+  - { id: recipient, generate: true, fund: true }
+assets:
+  - { id: xlm, type: native }
+  - { id: test, type: issued, code: TESTUSD, issuer: issuer }
+steps:
+  - id: issue-asset
+    type: payment
+    from: issuer
+    to: recipient
+    asset: xlm
+    amount: "10"
+  - id: send-without-trustline
+    type: payment
+    from: issuer
+    to: recipient
+    asset: test
+    amount: "1"
+assertions:
+  - type: stepSucceeded
+    step: issue-asset
+  - type: stepFailedWith
+    step: send-without-trustline
+    transactionCode: tx_failed
+    operationCodes: [op_no_trust]
+```
+
+**Why it fails**: The recipient has not created a trustline to TESTUSD, so it cannot hold the asset. Stellar rejects the payment with:
+- Transaction code: `tx_failed` (the transaction was submitted but failed)
+- Operation code: `op_no_trust` (the operation failed because no trustline exists)
+
+**Why the assertion passes**: Both codes match the expectation; the scenario continues to the next assertion.
+
+### What happens if the transaction unexpectedly succeeds?
+
+If a step expected to fail instead succeeds:
+
+```yaml
+assertions:
+  - type: stepFailedWith
+    step: send-without-trustline
+    transactionCode: tx_failed
+    operationCodes: [op_no_trust]
+```
+
+Result: **Assertion fails**. The scenario halts and reports:
+- Expected: `tx_failed` / `[op_no_trust]`
+- Actual: `tx_success` (or the actual codes received)
+
+This is a test failure, not a passing run. The scenario does not continue.
+
+### What happens if the transaction fails with a different code?
+
+If the transaction fails but with different codes than expected:
+
+```yaml
+assertions:
+  - type: stepFailedWith
+    step: send-payment
+    transactionCode: tx_failed
+    operationCodes: [op_no_trust]
+```
+
+But the actual result is: `tx_failed` / `[op_underfunded]`
+
+Result: **Assertion fails**. The scenario halts and reports:
+- Expected: `op_no_trust`
+- Actual: `op_underfunded`
+
+The scenario does not continue. Even though the transaction failed (expected), the specific failure reason was wrong.
+
+### Multi-operation transaction failures
+
+If a transaction contains multiple operations and the second fails:
+
+```yaml
+steps:
+  - id: trustline-and-payment
+    type: transaction
+    operations:
+      - { type: changeTrust, account: recipient, asset: test }
+      - { type: payment, from: issuer, to: recipient, asset: test, amount: "1" }
+assertions:
+  - type: stepFailedWith
+    step: trustline-and-payment
+    transactionCode: tx_failed
+    operationCodes: [op_no_trust]
+```
+
+**If the first operation succeeds and the second fails**:
+- Actual codes: `[op_no_trust]` (Stellar reports only the first failure)
+
+**If the first operation fails**:
+- Actual codes: `[op_something]` (Stellar stops at the first failure)
+
+Exact matching applies: the assertion passes only if the operation-code sequence matches exactly.
+
+### Continuation after a matched expected failure
+
+If a `stepFailedWith` assertion passes, the scenario continues to the next step:
+
+```yaml
+steps:
+  - id: step-1
+    ...
+  - id: step-2
+    ...
+assertions:
+  - type: stepFailedWith
+    step: step-1
+    transactionCode: tx_failed
+    operationCodes: [op_no_trust]
+  - type: stepSucceeded
+    step: step-2
+```
+
+If the assertion on `step-1` passes (the expected failure matched), `step-2` executes normally. If the assertion fails, the scenario halts and `step-2` does not run.
+
+### Combining expected success and expected failure
+
+A scenario can have both successful and failing steps in the same run:
+
+```yaml
+assertions:
+  - type: stepSucceeded
+    step: create-trustline
+  - type: stepSucceeded
+    step: issue-asset
+  - type: stepFailedWith
+    step: invalid-payment
+    transactionCode: tx_failed
+    operationCodes: [op_underfunded]
+```
+
+All assertions are evaluated once execution completes. If any assertion fails, the run fails. If all pass, the run passes.
+
+### Debugging unmatched failures
+
+When a step fails but the codes do not match:
+
+1. Check the report's `actual` codes.
+2. Compare against the expected codes in the assertion.
+3. Consult the [Stellar error code reference](https://developers.stellar.org/docs/learn/errors) for the meaning of each code.
+4. Verify the scenario definition matches the intended test. For example, if expecting `op_underfunded` but seeing `op_no_trust`, check whether the issue is balance or trustline.
 
 ## Validation and limits
 

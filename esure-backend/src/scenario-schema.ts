@@ -13,6 +13,7 @@ export const SCENARIO_LIMITS = {
 const id = { type: "string", pattern: "^[a-z][a-z0-9-]{0,63}$", maxLength: 64 } as const;
 const amount = { type: "string", pattern: "^(?:0|[1-9][0-9]{0,11})(?:\\.[0-9]{1,7})?$", maxLength: 20 } as const;
 const positiveAmount = { ...amount, not: { pattern: "^0(?:\\.0+)?$" } } as const;
+const nonNegativeAmount = { ...amount } as const;
 const signedAmount = { type: "string", pattern: "^-?(?:0|[1-9][0-9]{0,11})(?:\\.[0-9]{1,7})?$", maxLength: 21 } as const;
 const code = { type: "string", pattern: "^[A-Z0-9]{1,12}$", maxLength: 12 } as const;
 const resultCode = { type: "string", pattern: "^[a-z][a-z0-9_]{0,63}$", maxLength: 64 } as const;
@@ -44,7 +45,7 @@ export const scenarioSchemaV1 = {
     steps: {
       type: "array", minItems: 0, maxItems: SCENARIO_LIMITS.steps,
       items: { oneOf: [
-        { type: "object", additionalProperties: false, required: ["id", "type", "account", "asset"], properties: { id, type: { const: "changeTrust" }, account: id, asset: id, limit: positiveAmount } },
+        { type: "object", additionalProperties: false, required: ["id", "type", "account", "asset"], properties: { id, type: { const: "changeTrust" }, account: id, asset: id, limit: nonNegativeAmount } },
         { type: "object", additionalProperties: false, required: ["id", "type", "from", "to", "asset", "amount"], properties: { id, type: { const: "payment" }, from: id, to: id, asset: id, amount: positiveAmount, memo } },
         { type: "object", additionalProperties: false, required: ["id", "type", "account", "sellingAsset", "buyingAsset", "amount", "price"], properties: { id, type: { const: "manageSellOffer" }, account: id, sellingAsset: id, buyingAsset: id, amount: positiveAmount, price: positiveAmount } },
         { type: "object", additionalProperties: false, required: ["id", "type", "from", "to", "sendAsset", "sendMax", "destAsset", "destAmount", "path"], properties: { id, type: { const: "pathPaymentStrictReceive" }, from: id, to: id, sendAsset: id, sendMax: positiveAmount, destAsset: id, destAmount: positiveAmount, path: { type: "array", maxItems: 5, items: id } } },
@@ -60,7 +61,9 @@ export const scenarioSchemaV1 = {
         { type: "object", additionalProperties: false, required: ["type", "step"], properties: { type: { enum: ["stepSucceeded", "transactionConfirmed"] }, step: id } },
         { type: "object", additionalProperties: false, required: ["type", "step", "transactionCode", "operationCodes"], properties: { type: { const: "stepFailedWith" }, step: id, transactionCode: resultCode, operationCodes: { type: "array", minItems: 0, maxItems: 100, items: resultCode } } },
         { type: "object", additionalProperties: false, required: ["type", "account", "asset"], properties: { type: { enum: ["trustlineExists", "trustlineMissing"] }, account: id, asset: id } },
-        { type: "object", additionalProperties: false, required: ["type", "account"], properties: { type: { const: "accountExists" }, account: id } },
+        { type: "object", additionalProperties: false, required: ["type", "account", "asset", "limit"], properties: { type: { const: "trustlineLimitEquals" }, account: id, asset: id, limit: positiveAmount } },
+        { type: "object", additionalProperties: false, required: ["type", "account"], properties: { type: { enum: ["accountExists", "accountMissing"] }, account: id } },
+        { type: "object", additionalProperties: false, required: ["type", "account", "asset", "amount", "step"], properties: { type: { const: "feeAwareNativeBalanceDelta" }, account: id, asset: id, amount: signedAmount, step: id } },
       ] },
     },
   },
@@ -123,7 +126,10 @@ function validateAmounts(scenario: ScenarioDefinition): void {
     if (step.type === "pathPaymentStrictReceive") values.push([`step ${step.id} sendMax`, step.sendMax], [`step ${step.id} destAmount`, step.destAmount]);
     if (step.type === "pathPaymentStrictSend") values.push([`step ${step.id} sendAmount`, step.sendAmount], [`step ${step.id} destMin`, step.destMin]);
   }
-  for (const assertion of scenario.assertions) if ("amount" in assertion) values.push([`assertion ${assertion.type} amount`, assertion.amount]);
+  for (const assertion of scenario.assertions) {
+    if ("amount" in assertion) values.push([`assertion ${assertion.type} amount`, assertion.amount]);
+    if (assertion.type === "trustlineLimitEquals") values.push([`assertion trustlineLimitEquals limit`, assertion.limit]);
+  }
   for (const [label, value] of values) {
     const absolute = value.startsWith("-") ? value.slice(1) : value;
     const [integer = "0", fraction = ""] = absolute.split(".");
@@ -185,7 +191,25 @@ function validateReferences(scenario: ScenarioDefinition): void {
   if (issues.length) throw new ScenarioValidationError(issues);
 }
 
-function uniqueIds(items: ReadonlyArray<{ id: string }>, label: string, issues: string[]): Set<string> {
+function validateAssertionReferences(assertion: ScenarioAssertion, accounts: Set<string>, assets: Set<string>, steps: Set<string>, scenario: ScenarioDefinition, issues: string[]): void {
+  if ("account" in assertion && !accounts.has(assertion.account)) issues.push(`assertion ${assertion.type} references unknown account ${assertion.account}`);
+  if ("asset" in assertion && !assets.has(assertion.asset)) issues.push(`assertion ${assertion.type} references unknown asset ${assertion.asset}`);
+  if ("step" in assertion && !steps.has(assertion.step)) issues.push(`assertion ${assertion.type} references unknown step ${assertion.step}`);
+  if (assertion.type === "transactionMemoEquals" && steps.has(assertion.step) && scenario.steps.find((step) => step.id === assertion.step)?.type !== "payment") {
+    issues.push("assertion transactionMemoEquals must target a payment step");
+  }
+  if ((assertion.type === "trustlineExists" || assertion.type === "trustlineMissing") && scenario.assets.find((asset) => asset.id === assertion.asset)?.type === "native") {
+    issues.push(`assertion ${assertion.type} cannot target native XLM`);
+  }
+  if (assertion.type === "trustlineLimitEquals" && scenario.assets.find((asset) => asset.id === assertion.asset)?.type === "native") {
+    issues.push("assertion trustlineLimitEquals cannot target native XLM");
+  }
+  if (assertion.type === "feeAwareNativeBalanceDelta" && assets.has(assertion.asset) && scenario.assets.find((asset) => asset.id === assertion.asset)?.type !== "native") {
+    issues.push("assertion feeAwareNativeBalanceDelta must target the native XLM asset");
+  }
+}
+
+function uniqueIds(items: readonly { id: string }[], label: string, issues: string[]): Set<string> {
   const seen = new Set<string>();
   for (const item of items) {
     if (seen.has(item.id)) issues.push(`${label} contains duplicate id ${item.id}`);

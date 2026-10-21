@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiError, getRun, listScenarios, startRun, type RunReport, type ScenarioSummary } from "./api";
+import { ApiError, compareReports, getRun, listScenarios, parseReportJson, startRun, type RunReport, type ScenarioSummary } from "./api";
+import { ApiError, RateLimitError, getRun, listScenarios, parseRetryAfter, startRun, type RunReport, type ScenarioSummary } from "./api";
 
 const scenario: ScenarioSummary = {
   id: "xlm-payment",
@@ -132,5 +133,165 @@ describe("frontend API response validation", () => {
     });
     if (!(error instanceof ApiError)) throw new Error("Expected ApiError");
     expect(error.message).not.toContain("private upstream diagnostic");
+  });
+});
+
+describe("offline report parsing (Issue #47)", () => {
+  it("parses valid report JSON successfully", () => {
+    const parsed = parseReportJson(JSON.stringify(run));
+    expect(parsed.id).toBe("run-123");
+    expect(parsed.scenarioId).toBe("xlm-payment");
+    expect(parsed.steps).toHaveLength(1);
+  });
+
+  it("rejects files exceeding byte limit", () => {
+    expect(() => parseReportJson(JSON.stringify(run), 10)).toThrow(/too large/i);
+  });
+
+  it("rejects invalid JSON", () => {
+    expect(() => parseReportJson("not json content")).toThrow(/valid JSON document/i);
+  });
+
+  it("rejects invalid report schema", () => {
+    expect(() => parseReportJson(JSON.stringify({ not: "a report" }))).toThrow(/missing required report fields/i);
+  });
+});
+
+describe("report comparison (Issue #48)", () => {
+  const baseRun: RunReport = { ...run };
+  const nextRun: RunReport = {
+    ...run,
+    id: "run-456",
+    status: "passed",
+    completedAt: "2026-10-16T00:00:15.000Z", // 15s duration vs 10s
+    steps: [
+      {
+        id: "pay",
+        type: "payment",
+        status: "passed",
+        message: "Payment succeeded.",
+      },
+      {
+        id: "check",
+        type: "balance",
+        status: "passed",
+        message: "Balance checked.",
+      },
+    ],
+    assertions: [
+      {
+        type: "balanceEquals",
+        status: "passed",
+        expected: "100.0000000",
+        actual: "100.0000000",
+        message: "Balance matches.",
+      },
+      {
+        type: "balanceEquals",
+        status: "passed",
+        expected: "200.0000000",
+        actual: "200.0000000",
+        message: "Second balance matches.",
+      },
+    ],
+    summary: { stepsPassed: 2, stepsFailed: 0, assertionsPassed: 2, assertionsFailed: 0 },
+    error: undefined,
+  };
+
+  it("computes step and assertion differences with stable keys and duration diff", () => {
+    const comp = compareReports(baseRun, nextRun);
+    expect(comp.scenariosMatch).toBe(true);
+    expect(comp.scenarioIdMatch).toBe(true);
+    expect(comp.versionMatch).toBe(true);
+    expect(comp.contentHashMatch).toBe(true);
+    expect(comp.statusA).toBe("failed");
+    expect(comp.statusB).toBe("passed");
+    expect(comp.statusChanged).toBe(true);
+    expect(comp.durationMsA).toBe(10000);
+    expect(comp.durationMsB).toBe(15000);
+    expect(comp.durationDiffMs).toBe(5000);
+
+    // pay changed from failed to passed, check was added
+    expect(comp.steps).toHaveLength(2);
+    const payStep = comp.steps.find((s) => s.id === "pay");
+    expect(payStep?.statusChange).toBe("changed");
+    expect(payStep?.statusA).toBe("failed");
+    expect(payStep?.statusB).toBe("passed");
+
+    const checkStep = comp.steps.find((s) => s.id === "check");
+    expect(checkStep?.statusChange).toBe("added");
+
+    // Assertions: balanceEquals#0 changed from failed to passed; balanceEquals#1 was added
+    expect(comp.assertions).toHaveLength(2);
+    const firstAssert = comp.assertions.find((a) => a.key === "balanceEquals#0");
+    expect(firstAssert?.statusChange).toBe("changed");
+    const secondAssert = comp.assertions.find((a) => a.key === "balanceEquals#1");
+    expect(secondAssert?.statusChange).toBe("added");
+  });
+
+  it("detects scenario mismatch when id, version, or hash differs", () => {
+    const mismatched = { ...nextRun, scenarioId: "other-flow" };
+    const comp = compareReports(baseRun, mismatched);
+    expect(comp.scenariosMatch).toBe(false);
+    expect(comp.scenarioIdMatch).toBe(false);
+  });
+});
+
+describe("parseRetryAfter", () => {
+
+  it("parses a numeric seconds value", () => {
+    expect(parseRetryAfter("30")).toBe(30);
+    expect(parseRetryAfter("0")).toBe(0);
+  });
+
+  it("caps at maxSeconds (default 60)", () => {
+    expect(parseRetryAfter("120")).toBe(60);
+    expect(parseRetryAfter("120", 90)).toBe(90);
+  });
+
+  it("parses an HTTP-date value and returns remaining seconds (capped)", () => {
+    const future = new Date(Date.now() + 5000).toUTCString();
+    const result = parseRetryAfter(future);
+    expect(result).toBeGreaterThanOrEqual(4);
+    expect(result).toBeLessThanOrEqual(6);
+  });
+
+  it("returns null for null, empty, or unparseable values", () => {
+    expect(parseRetryAfter(null)).toBeNull();
+    expect(parseRetryAfter("")).toBeNull();
+    expect(parseRetryAfter("invalid-date")).toBeNull();
+  });
+
+  it("clamps expired HTTP-date to 0", () => {
+    const past = new Date(Date.now() - 5000).toUTCString();
+    const result = parseRetryAfter(past);
+    expect(result).toBe(0);
+  });
+});
+
+describe("RateLimitError from 429 response", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("throws RateLimitError with parsed retry-after seconds", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(
+      JSON.stringify({ error: { code: "RATE_LIMITED", message: "Too many requests" } }),
+      { status: 429, headers: { "content-type": "application/json", "retry-after": "15" } }
+    )));
+    const error = await listScenarios().catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(RateLimitError);
+    if (!(error instanceof RateLimitError)) throw new Error("Expected RateLimitError");
+    expect(error.retryAfterSeconds).toBe(15);
+    expect(error.status).toBe(429);
+  });
+
+  it("throws RateLimitError with null retryAfterSeconds when header is absent", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(
+      JSON.stringify({ error: { code: "RATE_LIMITED", message: "Rate limited" } }),
+      { status: 429, headers: { "content-type": "application/json" } }
+    )));
+    const error = await listScenarios().catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(RateLimitError);
+    if (!(error instanceof RateLimitError)) throw new Error("Expected RateLimitError");
+    expect(error.retryAfterSeconds).toBeNull();
   });
 });

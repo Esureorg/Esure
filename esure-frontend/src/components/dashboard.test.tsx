@@ -203,7 +203,7 @@ describe("Dashboard component scenario filtering", () => {
 
     expect(screen.getByText("00 AVAILABLE")).toBeDefined();
     expect(screen.getByText("No scenarios found")).toBeDefined();
-    expect(screen.getByRole("status")).toBeDefined();
+    expect(screen.getAllByRole("status").length).toBeGreaterThan(0);
   });
 });
 
@@ -629,4 +629,284 @@ describe("Dashboard Sequential Polling and Recovery", () => {
     await act(async () => { vi.advanceTimersByTime(1000); await Promise.resolve(); });
     expect(getRunMock).toHaveBeenCalledTimes(7);
   });
+
 });
+describe("Scenario definition preview, rate limiting, and ARIA announcements (#32, #39, #42)", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    mockSearchParams = new URLSearchParams();
+    vi.spyOn(api, "listScenarios").mockResolvedValue(mockScenarios);
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+  it("renders polite ARIA live region for screen readers (#42)", async () => {
+    render(<Dashboard />);
+    await act(async () => { await Promise.resolve(); });
+
+    const liveRegion = document.getElementById("run-live-region");
+    expect(liveRegion).not.toBeNull();
+    expect(liveRegion?.getAttribute("role")).toBe("status");
+    expect(liveRegion?.getAttribute("aria-live")).toBe("polite");
+  });
+
+  it("opens scenario preview panel and fetches detail when Details button is clicked (#32)", async () => {
+    const mockDetail: api.ScenarioDetail = {
+      id: "xlm-payment",
+      version: 1,
+      name: "XLM payment",
+      description: "Detailed description of XLM payment.",
+      contentHash: "hash-full-123456789",
+      network: "testnet",
+      schemaVersion: 1,
+      accounts: [{ id: "acc1", label: "Sender" }],
+      assets: [{ code: "XLM", issuer: "native" }],
+      steps: [{ id: "step1", description: "Send payment" }],
+      assertions: [{ id: "ast1", description: "Balance check" }],
+    };
+    vi.spyOn(api, "getScenario").mockResolvedValueOnce(mockDetail);
+
+    render(<Dashboard />);
+    await act(async () => { await Promise.resolve(); });
+
+    const detailsBtn = screen.getByLabelText("Preview definition for XLM payment");
+    expect(detailsBtn).toBeDefined();
+
+    await act(async () => {
+      fireEvent.click(detailsBtn);
+    });
+
+    expect(screen.getByRole("dialog", { name: "Scenario definition preview" })).toBeDefined();
+    await waitFor(() => {
+      expect(screen.getByText("Detailed description of XLM payment.")).toBeDefined();
+      expect(screen.getByText("hash-full-123456789")).toBeDefined();
+    });
+  });
+
+  it("handles 429 RateLimitError with retry countdown (#39)", async () => {
+    vi.spyOn(api, "startRun").mockRejectedValueOnce(
+      new api.RateLimitError("Rate limit reached", 429, 15)
+    );
+
+    render(<Dashboard />);
+    await act(async () => { await Promise.resolve(); });
+
+    // Click the scenario card by ID
+    const card = document.getElementById("scenario-card-xlm-payment");
+    expect(card).not.toBeNull();
+    await act(async () => {
+      fireEvent.click(card!);
+    });
+
+    const runBtn = screen.getByRole("button", { name: /Run on Testnet/i });
+    await act(async () => {
+      fireEvent.click(runBtn);
+    });
+
+    expect(screen.getByText(/Rate limited. Retry in 15s./i)).toBeDefined();
+    expect(screen.getByRole("button", { name: /Retry in 15s/i })).toBeDefined();
+  });
+});
+
+describe("Dashboard Live Elapsed Timer (#41)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.spyOn(api, "listScenarios").mockResolvedValue(mockScenarios);
+    mockSearchParams = new URLSearchParams({ runId: "run-active" });
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    mockSearchParams = new URLSearchParams();
+  });
+
+  it("displays live ticking elapsed timer for active run and freezes when terminal", async () => {
+    const baseTime = new Date("2026-10-16T12:00:00.000Z").getTime();
+    vi.setSystemTime(baseTime);
+
+    const activeRun: RunReport = {
+      ...mockRun,
+      id: "run-active",
+      status: "running",
+      createdAt: new Date(baseTime).toISOString(),
+      completedAt: undefined,
+    };
+
+    const terminalRun: RunReport = {
+      ...mockRun,
+      id: "run-active",
+      status: "passed",
+      createdAt: new Date(baseTime).toISOString(),
+      completedAt: new Date(baseTime + 5000).toISOString(),
+    };
+
+    let currentRun: RunReport = activeRun;
+    vi.spyOn(api, "getRun").mockImplementation(async () => ({ ...currentRun }));
+
+    render(<Dashboard />);
+    await act(async () => { await Promise.resolve(); });
+
+    const timer = screen.getByTestId("run-duration");
+    expect(timer.textContent).toBe("0s");
+
+    // Advance 3 seconds
+    await act(async () => {
+      vi.advanceTimersByTime(3000);
+      await Promise.resolve();
+    });
+    expect(timer.textContent).toBe("3s");
+
+    // Transition to terminal run
+    currentRun = terminalRun;
+    await act(async () => {
+      vi.advanceTimersByTime(1000);
+      await Promise.resolve();
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(1000);
+      await Promise.resolve();
+    });
+
+    // Terminal run duration should freeze at 5s
+    expect(screen.getByTestId("run-duration").textContent).toBe("5s");
+
+    // Advancing more time should keep it frozen at 5s
+    await act(async () => {
+      vi.advanceTimersByTime(10000);
+      await Promise.resolve();
+    });
+    expect(screen.getByTestId("run-duration").textContent).toBe("5s");
+  });
+
+  it("safely clamps invalid or future timestamps to 0s", async () => {
+    const baseTime = new Date("2026-10-16T12:00:00.000Z").getTime();
+    vi.setSystemTime(baseTime);
+
+    const futureRun: RunReport = {
+      ...mockRun,
+      id: "run-future",
+      status: "running",
+      createdAt: new Date(baseTime + 60000).toISOString(),
+      completedAt: undefined,
+    };
+
+    vi.spyOn(api, "getRun").mockResolvedValue(futureRun);
+
+    render(<Dashboard />);
+    await act(async () => { await Promise.resolve(); });
+
+    expect(screen.getByTestId("run-duration").textContent).toBe("0s");
+  });
+});
+
+describe("Dashboard Skip Link (#44)", () => {
+  beforeEach(() => {
+    vi.spyOn(api, "listScenarios").mockResolvedValue(mockScenarios);
+    mockSearchParams = new URLSearchParams();
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+  it("renders a skip link pointing to #main-content and moves focus on activation", async () => {
+    render(<Dashboard />);
+    await act(async () => { await Promise.resolve(); });
+
+    const skipLink = screen.getByRole("link", { name: "Skip to main content" });
+    expect(skipLink).toBeDefined();
+    expect(skipLink.getAttribute("href")).toBe("#main-content");
+
+    const mainContent = document.getElementById("main-content");
+    expect(mainContent).toBeDefined();
+    expect(mainContent?.getAttribute("tabindex")).toBe("-1");
+
+    const focusSpy = vi.spyOn(mainContent!, "focus");
+    fireEvent.click(skipLink);
+    expect(focusSpy).toHaveBeenCalled();
+  });
+});
+
+describe("Dashboard Report Download Feedback (#45)", () => {
+  beforeEach(() => {
+    vi.spyOn(api, "listScenarios").mockResolvedValue(mockScenarios);
+    mockSearchParams = new URLSearchParams({ runId: "run-123" });
+    if (!window.URL.createObjectURL) {
+      window.URL.createObjectURL = vi.fn();
+    }
+    if (!window.URL.revokeObjectURL) {
+      window.URL.revokeObjectURL = vi.fn();
+    }
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+  it("handles successful download and releases object URL", async () => {
+    vi.spyOn(api, "getRun").mockResolvedValue(mockRun);
+    const downloadMock = vi.spyOn(api, "downloadReport").mockResolvedValue(mockRun);
+
+    const createUrlSpy = vi.spyOn(window.URL, "createObjectURL").mockReturnValue("blob:mock-url");
+    const revokeUrlSpy = vi.spyOn(window.URL, "revokeObjectURL").mockImplementation(() => {});
+
+    render(<Dashboard />);
+    await screen.findByText("run-123");
+
+    const downloadButton = screen.getByRole("button", { name: /download json report/i });
+    expect(downloadButton).toBeDefined();
+
+    await act(async () => {
+      fireEvent.click(downloadButton);
+      await Promise.resolve();
+    });
+
+    expect(downloadMock).toHaveBeenCalledWith("run-123");
+    expect(createUrlSpy).toHaveBeenCalled();
+    expect(revokeUrlSpy).toHaveBeenCalledWith("blob:mock-url");
+  });
+
+  it("handles 404, 409, and 503 download errors with distinct feedback", async () => {
+    vi.spyOn(api, "getRun").mockResolvedValue(mockRun);
+    const downloadMock = vi.spyOn(api, "downloadReport");
+
+    // 404 error
+    downloadMock.mockRejectedValueOnce(new api.ApiError("Not found", "RUN_NOT_FOUND", 404));
+
+    render(<Dashboard />);
+    await screen.findByText("run-123");
+
+    const downloadButton = screen.getByRole("button", { name: /download json report/i });
+
+    await act(async () => {
+      fireEvent.click(downloadButton);
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText("Report expired or not found. Please run the scenario again.")).toBeDefined();
+
+    // 409 error
+    downloadMock.mockRejectedValueOnce(new api.ApiError("Incomplete", "RUN_NOT_COMPLETE", 409));
+    await act(async () => {
+      fireEvent.click(downloadButton);
+      await Promise.resolve();
+    });
+    expect(screen.getByText("Report is not complete yet. Please wait for the run to finish.")).toBeDefined();
+
+    // 503 error
+    downloadMock.mockRejectedValueOnce(new api.ApiError("Service unavailable", "DATABASE_UNAVAILABLE", 503));
+    await act(async () => {
+      fireEvent.click(downloadButton);
+      await Promise.resolve();
+    });
+    expect(screen.getByText("Backend service is temporarily unavailable. Please try again shortly.")).toBeDefined();
+  });
+});
+
