@@ -91,12 +91,18 @@ function changeDocumentVisibility(state: "visible" | "hidden") {
   document.dispatchEvent(new Event("visibilitychange"));
 }
 
+function changeConnectionState(online: boolean) {
+  Object.defineProperty(navigator, "onLine", { configurable: true, value: online });
+  window.dispatchEvent(new Event(online ? "online" : "offline"));
+}
+
 describe("filterScenario helper", () => {
   it("includes all scenarios when filter is 'all'", () => {
     mockScenarios.forEach((scenario) => {
       expect(filterScenario(scenario, "all")).toBe(true);
     });
   });
+
 
   it("filters XLM scenarios correctly", () => {
     expect(filterScenario(mockScenarios[0], "xlm")).toBe(true);
@@ -439,6 +445,7 @@ describe("Dashboard Sequential Polling and Recovery", () => {
     vi.useRealTimers();
     cleanup();
     Reflect.deleteProperty(document, "visibilityState");
+    Reflect.deleteProperty(navigator, "onLine");
     vi.restoreAllMocks();
   });
 
@@ -522,6 +529,65 @@ describe("Dashboard Sequential Polling and Recovery", () => {
     expect(getRunMock).toHaveBeenCalledTimes(3);
   });
 
+  it("pauses polling offline and performs one immediate refresh when reconnected", async () => {
+    const getRunMock = vi.spyOn(api, "getRun")
+      .mockResolvedValueOnce({ ...mockRun, status: "pending" })
+      .mockResolvedValueOnce({ ...mockRun, status: "pending", createdAt: "2026-01-01T00:00:00.000Z" })
+      .mockResolvedValueOnce({ ...mockRun, status: "pending", createdAt: "2026-01-02T00:00:00.000Z" });
+
+    render(<Dashboard />);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(getRunMock).toHaveBeenCalledTimes(1);
+
+    act(() => { changeConnectionState(false); });
+    const offlineMessage = screen.getByText(/You are offline/);
+    expect(offlineMessage.getAttribute("role")).toBe("status");
+
+    await act(async () => { vi.advanceTimersByTime(5000); await Promise.resolve(); });
+    expect(getRunMock).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("run-123")).toBeDefined();
+
+    await act(async () => { changeConnectionState(true); await Promise.resolve(); });
+    expect(getRunMock).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText(/You are offline/)).toBeNull();
+
+    await act(async () => { vi.advanceTimersByTime(999); await Promise.resolve(); });
+    expect(getRunMock).toHaveBeenCalledTimes(2);
+    await act(async () => { vi.advanceTimersByTime(1); await Promise.resolve(); });
+    expect(getRunMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("aborts an in-flight poll when offline and does not apply its stale result", async () => {
+    let resolveInFlight!: (value: RunReport) => void;
+    let inFlightSignal: AbortSignal | undefined;
+    const getRunMock = vi.spyOn(api, "getRun")
+      .mockResolvedValueOnce({ ...mockRun, status: "pending" })
+      .mockImplementationOnce((_runId, signal) => {
+        inFlightSignal = signal;
+        return new Promise((resolve) => { resolveInFlight = resolve; });
+      })
+      .mockResolvedValueOnce({ ...mockRun, status: "passed" });
+
+    render(<Dashboard />);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    await act(async () => { vi.advanceTimersByTime(1000); await Promise.resolve(); });
+    expect(getRunMock).toHaveBeenCalledTimes(2);
+
+    act(() => { changeConnectionState(false); });
+    expect(inFlightSignal?.aborted).toBe(true);
+
+    await act(async () => {
+      resolveInFlight({ ...mockRun, id: "stale-run", status: "failed" });
+      await Promise.resolve();
+    });
+    expect(screen.queryByText("stale-run")).toBeNull();
+    expect(screen.getByText("run-123")).toBeDefined();
+
+    await act(async () => { changeConnectionState(true); await Promise.resolve(); });
+    expect(getRunMock).toHaveBeenCalledTimes(3);
+    expect(screen.getAllByText("Passed").length).toBeGreaterThan(0);
+  });
+
   it("aborts an in-flight refresh on hide and ignores its stale result", async () => {
     let resolveInFlight!: (value: RunReport) => void;
     let inFlightSignal: AbortSignal | undefined;
@@ -561,16 +627,24 @@ describe("Dashboard Sequential Polling and Recovery", () => {
   it("removes the visibility listener and scheduled timer on unmount", async () => {
     const addListener = vi.spyOn(document, "addEventListener");
     const removeListener = vi.spyOn(document, "removeEventListener");
+    const addWindowListener = vi.spyOn(window, "addEventListener");
+    const removeWindowListener = vi.spyOn(window, "removeEventListener");
     const getRunMock = vi.spyOn(api, "getRun").mockResolvedValue({ ...mockRun, status: "pending" });
     const { unmount } = render(<Dashboard />);
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
 
     const visibilityListener = addListener.mock.calls.find(([type]) => type === "visibilitychange")?.[1];
     expect(visibilityListener).toBeDefined();
+    const offlineListener = addWindowListener.mock.calls.find(([type]) => type === "offline")?.[1];
+    const onlineListener = addWindowListener.mock.calls.find(([type]) => type === "online")?.[1];
+    expect(offlineListener).toBeDefined();
+    expect(onlineListener).toBeDefined();
     const callsBeforeUnmount = getRunMock.mock.calls.length;
 
     unmount();
     expect(removeListener).toHaveBeenCalledWith("visibilitychange", visibilityListener);
+    expect(removeWindowListener).toHaveBeenCalledWith("offline", offlineListener);
+    expect(removeWindowListener).toHaveBeenCalledWith("online", onlineListener);
     await act(async () => { vi.advanceTimersByTime(5000); await Promise.resolve(); });
     expect(getRunMock).toHaveBeenCalledTimes(callsBeforeUnmount);
   });
@@ -802,6 +876,57 @@ describe("Dashboard Live Elapsed Timer (#41)", () => {
 
     expect(screen.getByTestId("run-duration").textContent).toBe("0s");
   });
+
+  it("does not show an expiry hint when metadata is absent", async () => {
+    vi.setSystemTime(new Date("2026-10-16T12:00:00.000Z"));
+    vi.spyOn(api, "getRun").mockResolvedValue(mockRun);
+
+    render(<Dashboard />);
+    await screen.findByText("run-123");
+
+    expect(screen.queryByText(/Best-effort report retention deadline/)).toBeNull();
+    expect(screen.getByRole("heading", { name: "Execution report" })).toBeDefined();
+  });
+
+  it("shows a localized best-effort expiry hint for a future deadline", async () => {
+    vi.setSystemTime(new Date("2026-10-16T12:00:00.000Z"));
+    const expiresAt = "2026-10-16T13:00:00.000Z";
+    vi.spyOn(api, "getRun").mockResolvedValue({ ...mockRun, expiresAt });
+
+    render(<Dashboard />);
+    await screen.findByText("run-123");
+
+    const hint = screen.getByText(/Best-effort report retention deadline/);
+    expect(hint.textContent).toContain(
+      new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(expiresAt)),
+    );
+    expect(hint.querySelector("time")?.getAttribute("dateTime")).toBe(expiresAt);
+    expect(hint.textContent).toContain("local time");
+    expect(hint.textContent).toContain("Retention is not guaranteed");
+  });
+
+  it("keeps the loaded report visible and shows the hint after its deadline", async () => {
+    vi.setSystemTime(new Date("2026-10-16T12:00:00.000Z"));
+    const expiresAt = "2026-10-16T11:00:00.000Z";
+    vi.spyOn(api, "getRun").mockResolvedValue({ ...mockRun, expiresAt });
+
+    render(<Dashboard />);
+    await screen.findByText("run-123");
+
+    expect(screen.getByText(/Best-effort report retention deadline/)).toBeDefined();
+    expect(screen.getByRole("heading", { name: "Execution report" })).toBeDefined();
+  });
+
+  it("ignores malformed expiry metadata without hiding the report", async () => {
+    vi.setSystemTime(new Date("2026-10-16T12:00:00.000Z"));
+    vi.spyOn(api, "getRun").mockResolvedValue({ ...mockRun, expiresAt: "not-a-date" });
+
+    render(<Dashboard />);
+    await screen.findByText("run-123");
+
+    expect(screen.queryByText(/Best-effort report retention deadline/)).toBeNull();
+    expect(screen.getByRole("heading", { name: "Execution report" })).toBeDefined();
+  });
 });
 
 describe("Dashboard Skip Link (#44)", () => {
@@ -909,4 +1034,3 @@ describe("Dashboard Report Download Feedback (#45)", () => {
     expect(screen.getByText("Backend service is temporarily unavailable. Please try again shortly.")).toBeDefined();
   });
 });
-

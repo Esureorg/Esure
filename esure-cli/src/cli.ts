@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 
-import { access, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { access, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { validateScenarioDefinition } from "@esure/backend/scenario-schema.js";
+import { RunReportValidationError, validateRunReport } from "@esure/backend/report-schema.js";
 import { prepareScenario } from "@esure/backend/scenario-loader.js";
 import { createScenarioRegistry } from "@esure/backend/scenarios.js";
 import { StellarTestnetGateway } from "@esure/backend/stellar-gateway.js";
@@ -13,6 +14,7 @@ import type { LedgerExecution, LedgerExecutionOptions } from "@esure/backend/dom
 
 const VERSION = "0.1.0";
 const BUNDLED_SCENARIO_DIR_TIMEOUT_MS = 30_000;
+const MAX_REPORT_FILE_BYTES = 5 * 1024 * 1024;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared types
@@ -62,6 +64,7 @@ esure - Stellar Testnet scenario testing toolkit
 Usage:
   esure list                              List bundled scenarios
   esure validate <file>                   Validate a scenario file
+  esure report validate <file>            Validate an archived JSON run report offline
   esure init <file>                       Scaffold a new scenario file (.json, .yaml, .yml)
   esure run <scenario-id>                 Run a bundled scenario
   esure run <file>                        Run a scenario from file
@@ -82,6 +85,7 @@ Examples:
   esure list
   esure init ./my-scenario.yaml
   esure validate ./my-scenario.yaml
+  esure report validate ./report.json --output json
   esure run xlm-payment
   esure run ./my-scenario.yaml --output json --report-file report.json
   esure run ./my-scenario.yaml --junit junit.xml
@@ -107,8 +111,8 @@ function parseCliArgs(): {
   failFast: boolean;
   parseError?: string;
 } {
-  let values: Record<string, string | boolean | undefined>;
-  let positionals: string[];
+  let parsedValues: Record<string, string | boolean | undefined>;
+  let parsedPositionals: string[];
 
   try {
     const parsed = parseArgs({
@@ -118,12 +122,18 @@ function parseCliArgs(): {
         version: { type: "boolean", short: "v" },
         ascii: { type: "boolean" },
         "fail-fast": { type: "boolean" },
+        "report-file": { type: "string" },
+        junit: { type: "string" },
+        "junit-file": { type: "string" },
+        csv: { type: "string" },
+        overwrite: { type: "boolean" },
+        force: { type: "boolean" },
       },
       allowPositionals: true,
       strict: true,
     });
-    values = parsed.values;
-    positionals = parsed.positionals;
+    parsedValues = parsed.values;
+    parsedPositionals = parsed.positionals;
   } catch (err: any) {
     return {
       command: undefined,
@@ -134,13 +144,13 @@ function parseCliArgs(): {
     };
   }
 
-  if (values.output !== undefined && values.output !== "human" && values.output !== "json") {
+  if (parsedValues.output !== undefined && parsedValues.output !== "human" && parsedValues.output !== "json") {
     return {
-      command: positionals[0],
-      args: positionals.slice(1),
+      command: parsedPositionals[0],
+      args: parsedPositionals.slice(1),
       options: { output: "human", help: false, version: false, ascii: false },
       failFast: false,
-      parseError: `Invalid output format "${values.output}". Supported formats: human, json`,
+      parseError: `Invalid output format "${parsedValues.output}". Supported formats: human, json`,
     };
   }
   const { values, positionals } = parseArgs({
@@ -605,6 +615,83 @@ async function validateCommand(filePath: string, options: CliOptions): Promise<n
   }
 }
 
+async function readBoundedReportFile(filePath: string): Promise<string> {
+  const handle = await open(resolve(filePath), "r");
+  try {
+    const { size } = await handle.stat();
+    if (size > MAX_REPORT_FILE_BYTES) {
+      throw new Error(`Report file exceeds the maximum size of ${MAX_REPORT_FILE_BYTES / (1024 * 1024)} MiB.`);
+    }
+
+    const buffer = Buffer.alloc(MAX_REPORT_FILE_BYTES + 1);
+    let totalBytes = 0;
+    while (totalBytes < buffer.length) {
+      const { bytesRead } = await handle.read(
+        buffer,
+        totalBytes,
+        Math.min(64 * 1024, buffer.length - totalBytes),
+        totalBytes,
+      );
+      if (bytesRead === 0) break;
+      totalBytes += bytesRead;
+    }
+    if (totalBytes > MAX_REPORT_FILE_BYTES) {
+      throw new Error(`Report file exceeds the maximum size of ${MAX_REPORT_FILE_BYTES / (1024 * 1024)} MiB.`);
+    }
+
+    try {
+      return new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, totalBytes));
+    } catch {
+      throw new Error("Report file is not valid UTF-8.");
+    }
+  } finally {
+    await handle.close();
+  }
+}
+
+async function validateReportCommand(filePath: string, options: CliOptions): Promise<number> {
+  try {
+    if (extname(filePath).toLowerCase() !== ".json") {
+      throw new Error("Report file must have a .json extension.");
+    }
+
+    const content = await readBoundedReportFile(filePath);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(content);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "invalid JSON";
+      throw new Error(`Report file contains invalid JSON: ${detail}`);
+    }
+
+    const report = validateRunReport(parsed);
+    if (options.output === "json") {
+      console.log(JSON.stringify({
+        valid: true,
+        reportId: report.id,
+        scenarioId: report.scenarioId,
+        status: report.status,
+      }, null, 2));
+    } else {
+      console.log("✓ Report is valid");
+      console.log(`  ID: ${report.id}`);
+      console.log(`  Scenario: ${report.scenarioId}`);
+      console.log(`  Status: ${report.status}`);
+    }
+    return 0;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const issues = error instanceof RunReportValidationError ? error.issues : undefined;
+    if (options.output === "json") {
+      console.error(JSON.stringify({ valid: false, error: { message, ...(issues ? { issues } : {}) } }, null, 2));
+    } else {
+      console.error(`✗ Report validation failed: ${message}`);
+      for (const issue of issues ?? []) console.error(`  - ${issue}`);
+    }
+    return 1;
+  }
+}
+
 async function runCommand(target: string, options: CliOptions): Promise<number> {
   let scenario: ValidatedScenario | undefined;
   let execution: LedgerExecution | undefined;
@@ -1027,6 +1114,12 @@ async function main(): Promise<number> {
         return 1;
       }
       return validateCommand(args[0], options);
+    case "report":
+      if (args[0] !== "validate" || !args[1] || args.length > 2) {
+        console.error("Usage: esure report validate <file> [--output human|json]");
+        return 1;
+      }
+      return validateReportCommand(args[1], options);
     case "init":
       if (args.length === 0) {
         console.error("Error: Missing file path argument");
