@@ -26,8 +26,11 @@ export function completeScenario(): ScenarioDefinition {
       { type: "stepFailedWith", step: "reject-demo", transactionCode: "tx_failed", operationCodes: ["op_no_trust"] },
       { type: "trustlineExists", account: "recipient", asset: "demo" },
       { type: "trustlineMissing", account: "without-trust", asset: "demo" },
+      { type: "trustlineLimitEquals", account: "recipient", asset: "demo", limit: "1000" },
       { type: "transactionConfirmed", step: "pay-demo" },
       { type: "accountExists", account: "recipient" },
+      { type: "accountMissing", account: "without-trust" },
+      { type: "feeAwareNativeBalanceDelta", account: "recipient", asset: "xlm", amount: "1.5", step: "pay-xlm" },
     ],
   };
 }

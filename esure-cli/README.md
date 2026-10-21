@@ -28,6 +28,17 @@ node ./dist/cli.js validate ./my-scenario.yaml
 node ./dist/cli.js validate ./my-scenario.json
 ```
 
+### Validate an archived JSON report offline
+
+```bash
+npx esure report validate ./run-report.json
+npx esure report validate ./run-report.json --output json
+```
+
+This command reads at most 5 MiB, checks the backend's maintained run-report
+contract, and never executes imported content or makes network requests.
+`--output json` writes successful results to stdout and failures to stderr.
+
 ### Run a bundled scenario
 
 ```bash
@@ -233,6 +244,19 @@ Validates a scenario file without executing it.
 
 - `0`: Valid scenario
 - `1`: Invalid scenario or validation error
+
+### `esure report validate <file>`
+
+Validates an archived JSON run report against the backend's maintained report
+contract without network access or scenario execution. Files larger than 5 MiB
+are rejected.
+
+**Options:**
+- `--output json`: Output the validation result in JSON format
+
+**Exit codes:**
+- `0`: Valid report
+- `1`: Invalid, unreadable, unsupported, or oversized report
 
 ### `esure run <target>`
 
