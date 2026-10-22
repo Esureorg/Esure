@@ -7,6 +7,32 @@ export class SafeRunError extends Error {
   }
 }
 
+const TESTNET_RETRY_SUGGESTION = "This may be a temporary Testnet issue. Try again.";
+
+export function friendbotTimeoutError(failedStepId: string): SafeRunError {
+  return new SafeRunError({
+    code: "FRIENDBOT_UNAVAILABLE",
+    message: `Friendbot did not respond in time. ${TESTNET_RETRY_SUGGESTION}`,
+    category: "network",
+    retryable: true,
+    failedStepId,
+  });
+}
+
+export function horizonTimeoutError(
+  request: "transaction submission" | "account loading" | "transaction lookup",
+): SafeRunError {
+  const service = request === "transaction submission"
+    ? "Horizon transaction submission"
+    : request === "transaction lookup" ? "Horizon transaction lookup" : "Horizon account loading";
+  return new SafeRunError({
+    code: "HORIZON_UNAVAILABLE",
+    message: `${service} timed out. ${TESTNET_RETRY_SUGGESTION}`,
+    category: "network",
+    retryable: true,
+  });
+}
+
 export class RunCapacityError extends SafeRunError {
   constructor(message = "The runner is at capacity. Try again later.") {
     super({ code: "RUNNER_AT_CAPACITY", message, category: "capacity", retryable: true });
@@ -36,6 +62,30 @@ export class RunTimeoutError extends SafeRunError {
       retryable: true,
     });
     this.name = "RunTimeoutError";
+  }
+}
+
+export class OptimisticConcurrencyError extends SafeRunError {
+  constructor(runId: string) {
+    super({
+      code: "OPTIMISTIC_CONCURRENCY_CONFLICT",
+      message: `Run ${runId} was modified by another writer; the update was rejected.`,
+      category: "internal",
+      retryable: true,
+    });
+    this.name = "OptimisticConcurrencyError";
+  }
+}
+
+export class ShutdownError extends SafeRunError {
+  constructor() {
+    super({
+      code: "SERVER_SHUTDOWN",
+      message: "The server is shutting down. The run was cancelled.",
+      category: "internal",
+      retryable: true,
+    });
+    this.name = "ShutdownError";
   }
 }
 

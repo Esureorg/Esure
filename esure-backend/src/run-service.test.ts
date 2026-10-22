@@ -2,7 +2,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { RunService } from "./run-service.js";
 import { InMemoryRunStore } from "./run-store.js";
 import type { LedgerGateway, ValidatedScenario, StepResult, AssertionResult, LedgerExecutionOptions } from "./domain.js";
-import { RunTimeoutError } from "./errors.js";
+import { RunTimeoutError, SafeRunError } from "./errors.js";
+import type { RunLifecycleLog } from "./run-service.js";
 
 const dummyScenario: ValidatedScenario = {
   id: "test-scenario",
@@ -46,6 +47,7 @@ describe("RunService", () => {
   });
 
   it("handles normal success", async () => {
+    const events: RunLifecycleLog[] = [];
     const gateway: LedgerGateway = {
       async execute(scenario, options) {
         options?.onStep?.(dummyStep);
@@ -54,9 +56,24 @@ describe("RunService", () => {
       }
     };
     
-    const service = new RunService(store, gateway, { maxConcurrentRuns: 1, runTimeoutMs: 1000, stepTimeoutMs: 500 });
-    const run = await service.start(dummyScenario);
+    const service = new RunService(
+      store,
+      gateway,
+      { maxConcurrentRuns: 1, runTimeoutMs: 1000, stepTimeoutMs: 500 },
+      Date.now,
+      { info: (event) => events.push(event) },
+    );
+    const run = await service.start(dummyScenario, "request-123");
     expect(run.status).toBe("requested");
+    expect(events).toEqual([{
+      event: "run.started",
+      runId: run.id,
+      scenarioId: dummyScenario.id,
+      scenarioVersion: dummyScenario.version,
+      requestId: "request-123",
+      status: "requested",
+      durationMs: 0,
+    }]);
     
     // allow event loop to run async execute
     await vi.runAllTimersAsync();
@@ -65,9 +82,96 @@ describe("RunService", () => {
     expect(finalized?.status).toBe("passed");
     expect(finalized?.summary.stepsPassed).toBe(1);
     expect(finalized?.summary.assertionsPassed).toBe(1);
+    expect(events).toHaveLength(2);
+    expect(events[1]).toMatchObject({
+      event: "run.completed",
+      runId: run.id,
+      scenarioId: dummyScenario.id,
+      scenarioVersion: dummyScenario.version,
+      requestId: "request-123",
+      status: "passed",
+      durationMs: expect.any(Number),
+    });
+  });
+
+  it("tracks active runs, capacity and draining rejections, terminal totals, and duration", async () => {
+    let resolveExecution!: (result: { steps: StepResult[]; assertions: AssertionResult[] }) => void;
+    let now = 1_000;
+    const gateway: LedgerGateway = {
+      execute: vi.fn(() => new Promise<{ steps: StepResult[]; assertions: AssertionResult[] }>((resolve) => {
+        resolveExecution = resolve;
+      })),
+    };
+    const service = new RunService(
+      store,
+      gateway,
+      { maxConcurrentRuns: 1, runTimeoutMs: 60_000, stepTimeoutMs: 500 },
+      () => now,
+    );
+
+    await service.start(dummyScenario);
+    expect(service.getMetrics().activeRuns).toBe(1);
+    await expect(service.start({ ...dummyScenario, id: "secret-scenario-label" })).rejects.toThrow();
+    expect(service.getMetrics().rejectedStarts.capacity).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(0);
+    now = 1_600;
+    resolveExecution({ steps: [dummyStep], assertions: [dummyAssertion] });
+    await vi.runAllTimersAsync();
+
+    expect(service.getMetrics()).toEqual({
+      activeRuns: 0,
+      terminalRuns: { passed: 1, failed: 0 },
+      rejectedStarts: { capacity: 1, draining: 0 },
+      runDuration: { count: 1, totalMilliseconds: 600 },
+    });
+
+    await service.drain();
+    await expect(service.start(dummyScenario)).rejects.toThrow("shutting down");
+    expect(service.getMetrics().rejectedStarts.draining).toBe(1);
+  });
+
+  it("counts execution exceptions as terminal failures and releases capacity", async () => {
+    const events: RunLifecycleLog[] = [];
+    const gateway: LedgerGateway = {
+      execute: vi.fn().mockRejectedValue(new SafeRunError({
+        code: "PRIVATE_SEED_VALUE",
+        message: "sensitive execution detail",
+        category: "internal",
+        retryable: false,
+      })),
+    };
+    const service = new RunService(
+      store,
+      gateway,
+      { maxConcurrentRuns: 1, runTimeoutMs: 1_000, stepTimeoutMs: 500 },
+      Date.now,
+      { info: (event) => events.push(event) },
+    );
+    const run = await service.start(dummyScenario, "failure-request");
+    await vi.runAllTimersAsync();
+
+    expect(store.get(run.id)?.status).toBe("failed");
+    expect(service.getMetrics()).toMatchObject({
+      activeRuns: 0,
+      terminalRuns: { passed: 0, failed: 1 },
+      runDuration: { count: 1 },
+    });
+    expect(JSON.stringify(service.getMetrics())).not.toContain("sensitive");
+    expect(events).toHaveLength(2);
+    expect(events[1]).toMatchObject({
+      event: "run.failed",
+      runId: run.id,
+      requestId: "failure-request",
+      status: "failed",
+      errorCode: "INTERNAL_ERROR",
+    });
+    expect(JSON.stringify(events)).not.toContain("sensitive");
+    expect(JSON.stringify(events)).not.toContain("PRIVATE_SEED_VALUE");
   });
 
   it("handles timeout, retains progress, and ignores late callbacks and settlement", async () => {
+    const events: RunLifecycleLog[] = [];
     let capturedOptions: LedgerExecutionOptions | undefined;
     let resolveExecution!: (val: any) => void;
     let rejectExecution!: (err: any) => void;
@@ -82,8 +186,14 @@ describe("RunService", () => {
       }
     };
 
-    const service = new RunService(store, gateway, { maxConcurrentRuns: 1, runTimeoutMs: 1000, stepTimeoutMs: 500 });
-    const run = await service.start(dummyScenario);
+    const service = new RunService(
+      store,
+      gateway,
+      { maxConcurrentRuns: 1, runTimeoutMs: 1000, stepTimeoutMs: 500 },
+      Date.now,
+      { info: (event) => events.push(event) },
+    );
+    const run = await service.start(dummyScenario, "timeout-request");
     
     // Run immediate tasks to enter execute()
     await vi.advanceTimersByTimeAsync(0);
@@ -100,6 +210,14 @@ describe("RunService", () => {
     expect(timedOut?.error?.code).toBe("RUN_TIMEOUT");
     expect(timedOut?.steps).toHaveLength(1);
     expect(timedOut?.summary.stepsPassed).toBe(1); // from early step
+    expect(events).toHaveLength(2);
+    expect(events[1]).toMatchObject({
+      event: "run.failed",
+      runId: run.id,
+      requestId: "timeout-request",
+      status: "failed",
+      errorCode: "RUN_TIMEOUT",
+    });
     
     const completedAt = timedOut?.completedAt;
 
@@ -118,6 +236,7 @@ describe("RunService", () => {
 
     const afterLateResolve = store.get(run.id);
     expect(afterLateResolve?.steps).toHaveLength(1); // still unmodified
+    expect(events).toHaveLength(2);
     
     // Fire late settlement (reject) on a new run
     const run2 = await service.start(dummyScenario);
@@ -129,6 +248,12 @@ describe("RunService", () => {
     const run2Failed = store.get(run2.id);
     expect(run2Failed?.status).toBe("failed");
     expect(run2Failed?.error?.code).toBe("RUN_TIMEOUT");
+    expect(service.getMetrics()).toMatchObject({
+      activeRuns: 0,
+      terminalRuns: { passed: 0, failed: 2 },
+      runDuration: { count: 2 },
+    });
+    expect(events.filter((event) => event.event !== "run.started")).toHaveLength(2);
   });
 
   it("ignores late callbacks after report eviction", async () => {
@@ -162,5 +287,75 @@ describe("RunService", () => {
     }).not.toThrow();
 
     expect(store.get(run.id)).toBeUndefined(); // still evicted
+  });
+});
+
+describe("RunService — graceful shutdown", () => {
+  let store: InMemoryRunStore;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    store = new InMemoryRunStore();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("rejects new starts after drain() is called", async () => {
+    const gateway: LedgerGateway = { execute: vi.fn().mockResolvedValue({ steps: [], assertions: [] }) };
+    const service = new RunService(store, gateway, { maxConcurrentRuns: 2, runTimeoutMs: 1000, stepTimeoutMs: 500 });
+    service.drain();
+    await expect(service.start(dummyScenario)).rejects.toThrow("shutting down");
+  });
+
+  it("drain() resolves once all active executions finish", async () => {
+    let resolveExecution!: () => void;
+    const gateway: LedgerGateway = {
+      execute: vi.fn().mockReturnValue(new Promise<{ steps: StepResult[]; assertions: AssertionResult[] }>((resolve) => {
+        resolveExecution = () => resolve({ steps: [dummyStep], assertions: [dummyAssertion] });
+      })),
+    };
+    const service = new RunService(store, gateway, { maxConcurrentRuns: 2, runTimeoutMs: 60_000, stepTimeoutMs: 1_000 });
+    const run = await service.start(dummyScenario);
+    await vi.advanceTimersByTimeAsync(0); // enter execute()
+
+    let drained = false;
+    const drainPromise = service.drain().then(() => { drained = true; });
+
+    // drain not resolved yet
+    await Promise.resolve();
+    expect(drained).toBe(false);
+
+    // resolve the execution
+    resolveExecution();
+    await vi.runAllTimersAsync();
+    await drainPromise;
+
+    expect(drained).toBe(true);
+    expect(store.get(run.id)?.status).toBe("passed");
+  });
+
+  it("drain() with no active runs resolves immediately", async () => {
+    const gateway: LedgerGateway = { execute: vi.fn().mockResolvedValue({ steps: [], assertions: [] }) };
+    const service = new RunService(store, gateway, { maxConcurrentRuns: 2, runTimeoutMs: 1000, stepTimeoutMs: 500 });
+    await expect(service.drain()).resolves.toBeUndefined();
+  });
+
+  it("drain() resolves even when a run fails", async () => {
+    const gateway: LedgerGateway = {
+      execute: vi.fn().mockRejectedValue(new Error("network error")),
+    };
+    const service = new RunService(store, gateway, { maxConcurrentRuns: 2, runTimeoutMs: 1000, stepTimeoutMs: 500 });
+    const run = await service.start(dummyScenario);
+    await vi.runAllTimersAsync();
+    await expect(service.drain()).resolves.toBeUndefined();
+    expect(store.get(run.id)?.status).toBe("failed");
+  });
+
+  it("repeated drain() calls do not throw", async () => {
+    const gateway: LedgerGateway = { execute: vi.fn().mockResolvedValue({ steps: [], assertions: [] }) };
+    const service = new RunService(store, gateway, { maxConcurrentRuns: 2, runTimeoutMs: 1000, stepTimeoutMs: 500 });
+    await expect(Promise.all([service.drain(), service.drain(), service.drain()])).resolves.toBeDefined();
   });
 });
