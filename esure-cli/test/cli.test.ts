@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ValidatedScenario } from "@esure/backend/src/domain.js";
+import type { ValidatedScenario } from "@esure/backend/domain.js";
 
 const mocks = vi.hoisted(() => ({
   execute: vi.fn(),
@@ -7,13 +7,17 @@ const mocks = vi.hoisted(() => ({
   list: vi.fn(),
   createRegistry: vi.fn(),
   readFile: vi.fn(),
+  stat: vi.fn(),
 }));
 
-vi.mock("node:fs/promises", () => ({ readFile: mocks.readFile }));
+vi.mock("node:fs/promises", () => ({
+  readFile: mocks.readFile,
+  stat: mocks.stat,
+}));
 vi.mock("@esure/backend/src/scenarios.js", () => ({
   createScenarioRegistry: mocks.createRegistry,
 }));
-vi.mock("@esure/backend/src/stellar-gateway.js", () => ({
+vi.mock("@esure/backend/stellar-gateway.js", () => ({
   StellarTestnetGateway: class {
     execute = mocks.execute;
   },
@@ -106,6 +110,8 @@ describe("CLI commands", () => {
     mocks.createRegistry.mockReturnValue({ list: mocks.list, find: mocks.find });
     mocks.execute.mockResolvedValue(passedExecution);
     mocks.readFile.mockReset();
+    mocks.stat.mockReset();
+    mocks.stat.mockResolvedValue({ size: 100, isFile: () => true });
     mocks.list.mockClear();
     mocks.find.mockClear();
     mocks.createRegistry.mockClear();
@@ -267,6 +273,122 @@ describe("CLI commands", () => {
     stdout = [];
     expect(await invokeCli("--version")).toBe(0);
     expect(stdout.join("\n")).toContain("esure v0.1.0");
+  });
+
+  describe("#50 positional argument count enforcement", () => {
+    it("list rejects any positional target", async () => {
+      expect(await invokeCli("list", "unexpected-arg")).toBe(1);
+      expect(stderr.join("\n")).toContain("Error: Unexpected argument(s) for list command");
+      expect(stderr.join("\n")).toContain("Usage: esure list");
+    });
+
+    it("validate requires exactly one target (rejects missing target)", async () => {
+      expect(await invokeCli("validate")).toBe(1);
+      expect(stderr.join("\n")).toContain("Error: Missing file path argument");
+      expect(stderr.join("\n")).toContain("Usage: esure validate <file>");
+    });
+
+    it("validate requires exactly one target (rejects multiple targets)", async () => {
+      expect(await invokeCli("validate", "scenario1.json", "scenario2.json")).toBe(1);
+      expect(stderr.join("\n")).toContain("Error: Unexpected argument(s) for validate command");
+      expect(stderr.join("\n")).toContain("Usage: esure validate <file>");
+    });
+
+    it("run requires a target (rejects missing target)", async () => {
+      expect(await invokeCli("run")).toBe(1);
+      expect(stderr.join("\n")).toContain("Error: Missing scenario ID or file path");
+      expect(stderr.join("\n")).toContain("Usage: esure run <scenario-id> or esure run <file>");
+    });
+
+    it("run rejects multiple positional targets", async () => {
+      expect(await invokeCli("run", "target1", "target2")).toBe(1);
+      expect(stderr.join("\n")).toContain("Error: Unexpected argument(s) for run command");
+      expect(stderr.join("\n")).toContain("Usage: esure run <scenario-id> or esure run <file>");
+    });
+
+    it("accepts paths containing spaces when passed as a single argument", async () => {
+      await withFile(validJson);
+      expect(await invokeCli("validate", "my scenarios/path payment.json")).toBe(0);
+      expect(stdout.join("\n")).toContain("Scenario is valid");
+    });
+  });
+
+  describe("#51 canonical scenario parser for local files", () => {
+    it("rejects YAML with duplicate mapping keys", async () => {
+      const duplicateKeyYaml = "id: test-scenario\nid: duplicate-scenario\n";
+      await withFile(duplicateKeyYaml);
+      expect(await invokeCli("validate", "scenario.yaml", "--output", "json")).toBe(1);
+      const res = JSON.parse(stderr.join("\n"));
+      expect(res.valid).toBe(false);
+      expect(res.error.issues).toContain("definition is not valid YAML");
+    });
+
+    it("enforces file size limit via stat before reading oversized files", async () => {
+      mocks.stat.mockResolvedValueOnce({ size: 16_385, isFile: () => true });
+      expect(await invokeCli("validate", "oversized.json", "--output", "json")).toBe(1);
+      const res = JSON.parse(stderr.join("\n"));
+      expect(res.valid).toBe(false);
+      expect(res.error.issues).toContain("definition exceeds 16384 bytes");
+      expect(mocks.readFile).not.toHaveBeenCalled();
+    });
+
+    it("rejects malformed syntax without printing full file content", async () => {
+      await withFile("{ not valid json at all");
+      expect(await invokeCli("validate", "malformed.json")).toBe(1);
+      expect(stderr.join("\n")).toContain("definition is not valid JSON");
+      expect(stderr.join("\n")).not.toContain("{ not valid json at all");
+    });
+  });
+
+  describe("#52 case-insensitive scenario file extensions", () => {
+    it.each([
+      ["uppercase JSON", "test.JSON", validJson],
+      ["uppercase YAML", "test.YAML", validYaml],
+      ["mixed-case YML", "test.Yml", validYaml],
+      ["mixed-case JSON", "test.jSoN", validJson],
+    ])("accepts %s file extensions", async (_label, filePath, content) => {
+      await withFile(content);
+      expect(await invokeCli("validate", filePath)).toBe(0);
+      expect(stdout.join("\n")).toContain("Scenario is valid");
+    });
+
+    it("rejects unsupported suffixes explicitly", async () => {
+      await withFile(validJson);
+      expect(await invokeCli("validate", "scenario.toml")).toBe(1);
+      expect(stderr.join("\n")).toContain("Scenario file must be .json, .yaml, or .yml");
+    });
+
+    it("does not let directory names containing .json determine file format", async () => {
+      await withFile(validYaml);
+      expect(await invokeCli("validate", "dir.json/scenario.yaml")).toBe(0);
+      expect(stdout.join("\n")).toContain("Scenario is valid");
+    });
+  });
+
+  describe("#53 explicit --file selector for run targets", () => {
+    it("runs local scenario with --file even if filename has no slashes or dots", async () => {
+      await withFile(validJson);
+      expect(await invokeCli("run", "--file", "custom-file.json")).toBe(0);
+      expect(stdout.join("\n")).toContain("Running scenario: Test scenario");
+      expect(stdout.join("\n")).toContain("Result: PASSED");
+    });
+
+    it("fails clearly when combining --file with positional target", async () => {
+      expect(await invokeCli("run", "--file", "scenario.json", "positional-id")).toBe(1);
+      expect(stderr.join("\n")).toContain("Error: Cannot specify both --file and a positional target");
+    });
+
+    it("produces useful path-related error when file does not exist", async () => {
+      mocks.stat.mockRejectedValueOnce(Object.assign(new Error("ENOENT: no such file or directory"), { code: "ENOENT" }));
+      expect(await invokeCli("run", "--file", "nonexistent.json")).toBe(1);
+      expect(stderr.join("\n")).toContain('Scenario file not found: "nonexistent.json"');
+    });
+
+    it("help text includes --file selector explanation", async () => {
+      stdout = [];
+      expect(await invokeCli("--help")).toBe(1);
+      expect(stdout.join("\n")).toContain("--file <path>");
+    });
   });
 });
 
@@ -504,6 +626,8 @@ describe("#68 ASCII status markers", () => {
     mocks.createRegistry.mockReturnValue({ list: mocks.list, find: mocks.find });
     mocks.execute.mockResolvedValue(passedExecution);
     mocks.readFile.mockReset();
+    mocks.stat.mockReset();
+    mocks.stat.mockResolvedValue({ size: 100, isFile: () => true });
   });
 
   afterEach(() => {
@@ -574,6 +698,32 @@ describe("#68 ASCII status markers", () => {
     stdout = [];
     expect(await invokeCli("--help")).toBe(1);
     expect(stdout.join("\n")).toContain("--ascii");
+  });
+
+  it("completions bash emits a bash completion script", async () => {
+    expect(await invokeCli("completions", "bash")).toBe(0);
+    const out = stdout.join("\n");
+    expect(out).toContain("_esure_complete()");
+    expect(out).toContain("complete -F _esure_complete esure");
+    expect(out).toContain("list");
+    expect(out).toContain("doctor");
+  });
+
+  it("completions zsh emits a zsh completion script", async () => {
+    expect(await invokeCli("completions", "zsh")).toBe(0);
+    const out = stdout.join("\n");
+    expect(out).toContain("#compdef esure");
+    expect(out).toContain("_esure()");
+    expect(out).toContain("list");
+    expect(out).toContain("doctor");
+  });
+
+  it("completions rejects an unsupported shell", async () => {
+    expect(await invokeCli("completions", "fish")).toBe(1);
+    const err = stderr.join("\n");
+    expect(err).toContain("Unsupported shell");
+    expect(err).toContain("bash");
+    expect(err).toContain("zsh");
   });
 });
 

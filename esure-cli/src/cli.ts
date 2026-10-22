@@ -5,8 +5,8 @@ import { readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { validateScenarioDefinition } from "@esure/backend/src/scenario-schema.js";
-import { prepareScenario } from "@esure/backend/src/scenario-loader.js";
+import { SCENARIO_LIMITS, ScenarioValidationError } from "@esure/backend/src/scenario-schema.js";
+import { parseScenario } from "@esure/backend/src/scenario-loader.js";
 import { createScenarioRegistry } from "@esure/backend/src/scenarios.js";
 import { StellarTestnetGateway } from "@esure/backend/src/stellar-gateway.js";
 import { SafeRunError } from "@esure/backend/src/errors.js";
@@ -45,6 +45,7 @@ export function resolveVersion(): string {
 
 const VERSION = resolveVersion();
 const BUNDLED_SCENARIO_DIR_TIMEOUT_MS = 30_000;
+const MAX_REPORT_FILE_BYTES = 5 * 1024 * 1024;
 
 /** Default overall run timeout in milliseconds (#55). */
 export const DEFAULT_CLI_TIMEOUT_MS = 120_000;
@@ -112,9 +113,14 @@ esure - Stellar Testnet scenario testing toolkit
 Usage:
   esure list                              List bundled scenarios
   esure validate <file>                   Validate a scenario file
+  esure report validate <file>            Validate an archived JSON run report offline
+  esure init <file>                       Scaffold a new scenario file (.json, .yaml, .yml)
   esure run <scenario-id>                 Run a bundled scenario
   esure run <file>                        Run a scenario from file
+  esure run --file <file>                 Run a scenario from file explicitly
   esure run-suite <id> [<id>...]          Run multiple bundled scenarios sequentially
+  esure completions <shell>               Generate shell completions (bash|zsh)
+  esure doctor                            Diagnose the local installation
 
 Options:
   --output, -o <format> Output format: human (default) or json
@@ -126,7 +132,9 @@ Options:
 
 Examples:
   esure list
+  esure init ./my-scenario.yaml
   esure validate ./my-scenario.yaml
+  esure report validate ./report.json --output json
   esure run xlm-payment
   esure run ./my-scenario.yaml --output json
   esure run xlm-payment --timeout-ms 30000
@@ -229,6 +237,13 @@ function parseCliArgs(): {
     timeoutMs = parsedTimeout;
   }
 
+  const rawJunit =
+    typeof values.junit === "string"
+      ? values.junit
+      : typeof values["junit-file"] === "string"
+        ? (values["junit-file"] as string)
+        : undefined;
+
   return {
     command: positionals[0],
     args: positionals.slice(1),
@@ -248,20 +263,33 @@ function parseCliArgs(): {
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function loadScenarioFile(filePath: string): Promise<ValidatedScenario> {
-  const absolutePath = resolve(filePath);
-  const content = await readFile(absolutePath, "utf-8");
-
-  let parsed: unknown;
-  if (filePath.endsWith(".json")) {
-    parsed = JSON.parse(content);
-  } else if (filePath.endsWith(".yaml") || filePath.endsWith(".yml")) {
-    parsed = parseYaml(content);
+  const ext = extname(filePath).toLowerCase();
+  let format: "json" | "yaml";
+  if (ext === ".json") {
+    format = "json";
+  } else if (ext === ".yaml" || ext === ".yml") {
+    format = "yaml";
   } else {
     throw new Error("Scenario file must be .json, .yaml, or .yml");
   }
 
-  const validated = validateScenarioDefinition(parsed);
-  return prepareScenario(validated);
+  const absolutePath = resolve(filePath);
+  let fileStat;
+  try {
+    fileStat = await stat(absolutePath);
+  } catch (err: unknown) {
+    if (err && typeof err === "object" && "code" in err && (err as { code: string }).code === "ENOENT") {
+      throw new Error(`Scenario file not found: "${filePath}"`);
+    }
+    throw err;
+  }
+
+  if (fileStat.size > SCENARIO_LIMITS.definitionBytes) {
+    throw new ScenarioValidationError([`definition exceeds ${SCENARIO_LIMITS.definitionBytes} bytes`]);
+  }
+
+  const content = await readFile(absolutePath, "utf-8");
+  return parseScenario(content, format);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -558,7 +586,7 @@ async function runCommand(target: string, options: CliOptions): Promise<number> 
   let scenario: ValidatedScenario;
   try {
     // Determine if target is a bundled scenario ID or file path
-    if (target.includes("/") || target.includes("\\") || target.includes(".")) {
+    if (isExplicitFile || target.includes("/") || target.includes("\\") || target.includes(".")) {
       scenario = await loadScenarioFile(target);
     } else {
       const registry = createScenarioRegistry();
@@ -571,6 +599,16 @@ async function runCommand(target: string, options: CliOptions): Promise<number> 
       scenario = found;
     }
   } catch (error) {
+    executionError = error instanceof Error ? error : new Error(String(error));
+    if (error && typeof error === "object" && "report" in error) {
+      const rawReport = (error as { report: unknown }).report;
+      if (rawReport && typeof rawReport === "object") {
+        execution =
+          (rawReport as { execution?: LedgerExecution }).execution ??
+          (rawReport as LedgerExecution);
+      }
+    }
+
     if (options.output === "json") {
       console.error(
         JSON.stringify({ error: { message: error instanceof Error ? error.message : String(error) } }),
@@ -578,10 +616,14 @@ async function runCommand(target: string, options: CliOptions): Promise<number> 
     } else {
       const m = markers(options.ascii ?? false);
       console.error(
-        `\n${m.fail} Run failed: ${error instanceof Error ? error.message : String(error)}`,
+        `\n${m.fail} Run failed: ${executionError.message}`,
       );
+      if (error && typeof error === "object" && "issues" in error && Array.isArray(error.issues)) {
+        for (const issue of error.issues) {
+          console.error(`  - ${issue}`);
+        }
+      }
     }
-    return 1;
   }
 
   const effectiveTimeout = options.timeoutMs ?? DEFAULT_CLI_TIMEOUT_MS;
@@ -820,7 +862,214 @@ async function runSuiteCommand(
     }
   }
 
+  // Handle artifacts for suite (#59, #60)
+  let artifactError = false;
+
+  if (options.reportFile) {
+    try {
+      const suiteReportPayload = {
+        status: suitePassed ? "passed" : "failed",
+        total: results.length,
+        passed: passedCount,
+        failed: failedCount,
+        scenarios: results,
+      };
+      await writeArtifactFile(
+        options.reportFile,
+        JSON.stringify(suiteReportPayload, null, 2) + "\n",
+        Boolean(options.overwrite),
+        "report",
+      );
+    } catch (err: unknown) {
+      artifactError = true;
+      const msg = err instanceof Error ? err.message : String(err);
+      if (options.output === "json") {
+        console.error(JSON.stringify({ error: { message: msg } }));
+      } else {
+        console.error(`Error writing report file: ${msg}`);
+      }
+    }
+  }
+
+  if (options.junit) {
+    try {
+      const xml = generateJunitXml(suiteJunitRuns);
+      await writeArtifactFile(
+        options.junit,
+        xml,
+        Boolean(options.overwrite),
+        "JUnit",
+      );
+    } catch (err: unknown) {
+      artifactError = true;
+      const msg = err instanceof Error ? err.message : String(err);
+      if (options.output === "json") {
+        console.error(JSON.stringify({ error: { message: msg } }));
+      } else {
+        console.error(`Error writing JUnit file: ${msg}`);
+      }
+    }
+  }
+
+  if (artifactError) return 1;
   return suitePassed ? 0 : 1;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #158 — shell command completions (bash, zsh)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const COMPLETION_COMMANDS = [
+  "list",
+  "validate",
+  "init",
+  "run",
+  "run-suite",
+  "completions",
+  "doctor",
+];
+
+const COMPLETION_OPTIONS = [
+  "--help",
+  "--version",
+  "--output",
+  "--ascii",
+  "--report-file",
+  "--junit",
+  "--overwrite",
+  "--fail-fast",
+];
+
+function generateCompletions(shell: "bash" | "zsh"): string {
+  const quotedCommands = COMPLETION_COMMANDS.map((c) => `"${c}"`).join(" ");
+  const quotedOptions = COMPLETION_OPTIONS.map((o) => `"${o}"`).join(" ");
+  const cmdList = COMPLETION_COMMANDS.join(" ");
+  const optList = COMPLETION_OPTIONS.join(" ");
+
+  if (shell === "zsh") {
+    return `#compdef esure
+# Esure CLI shell completion for zsh.
+# Source this file or add it to your fpath to enable completions.
+
+_esure() {
+  local -a commands=(${quotedCommands})
+  local -a options=(${quotedOptions})
+
+  if [[ \${words[1]} == "esure" ]]; then
+    if (( CURRENT == 2 )); then
+      _describe 'command' commands
+    elif (( CURRENT > 2 )); then
+      _describe 'option' options
+    fi
+  fi
+}
+
+_esure "$@"
+`;
+  }
+
+  return `_esure_complete() {
+  local cur prev opts cmds
+  COMPREPLY=()
+  cur="\${COMP_WORDS[COMP_CWORD]}"
+  prev="\${COMP_WORDS[COMP_CWORD-1]}"
+  cmds="${cmdList}"
+  opts="${optList}"
+
+  if [[ \${cur} == -* ]] ; then
+    COMPREPLY=( $(compgen -W "\${opts}" -- \${cur}) 2>/dev/null )
+    return 0
+  fi
+
+  case "\${prev}" in
+    esure)
+      COMPREPLY=( $(compgen -W "\${cmds}" -- \${cur}) 2>/dev/null )
+      ;;
+    run|validate|init)
+      COMPREPLY=( $(compgen -f \${cur}) 2>/dev/null )
+      ;;
+    *)
+      COMPREPLY=( $(compgen -W "\${opts}" -- \${cur}) 2>/dev/null )
+      ;;
+  esac
+}
+
+complete -F _esure_complete esure
+complete -F _esure_complete ./esure 2>/dev/null || true
+`;
+}
+
+async function completionsCommand(shell: string): Promise<number> {
+  const normalized = shell.toLowerCase();
+  if (normalized !== "bash" && normalized !== "zsh") {
+    console.error(`Error: Unsupported shell "${shell}". Use "bash" or "zsh".`);
+    console.error('Usage: esure completions <bash|zsh>');
+    return 1;
+  }
+  console.log(generateCompletions(normalized));
+  return 0;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #159 — local installation doctor
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function doctorCommand(options: CliOptions): Promise<number> {
+  const m = markers(options.ascii ?? false);
+  const pass = m.pass;
+  const fail = m.fail;
+
+  const checks: { name: string; ok: boolean; detail: string }[] = [];
+
+  // CLI build artifact
+  const cliDist = resolve("dist/cli.js");
+  let cliDistOk = false;
+  try {
+    await access(cliDist);
+    cliDistOk = true;
+  } catch {}
+  checks.push({
+    name: "CLI build artifact (dist/cli.js)",
+    ok: cliDistOk,
+    detail: cliDistOk
+      ? "present"
+      : "missing — run `npm run build` in esure-cli",
+  });
+
+  // Backend package
+  const backendPkg = resolve("../esure-backend/package.json");
+  let backendPkgOk = false;
+  try {
+    await access(backendPkg);
+    backendPkgOk = true;
+  } catch {}
+  checks.push({
+    name: "Backend package (@esure/backend)",
+    ok: backendPkgOk,
+    detail: backendPkgOk ? "present" : "missing — esure-backend not found",
+  });
+
+  // Node version
+  const nodeVersion = process.version;
+  const nodeOk = /^v(20|24)\./.test(nodeVersion);
+  checks.push({
+    name: "Node.js version",
+    ok: nodeOk,
+    detail: `${nodeVersion} (>=20 required)`,
+  });
+
+  let failed = 0;
+  console.log("esure installation doctor\n");
+  for (const check of checks) {
+    const mark = check.ok ? pass : fail;
+    console.log(`${mark} ${check.name}: ${check.detail}`);
+    if (!check.ok) failed += 1;
+  }
+
+  console.log(
+    `\n${failed === 0 ? "All checks passed." : `${failed} check(s) failed — installation may be incomplete.`}`,
+  );
+  return failed === 0 ? 0 : 1;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -847,6 +1096,11 @@ async function main(): Promise<number> {
 
   switch (command) {
     case "list":
+      if (args.length > 0) {
+        console.error("Error: Unexpected argument(s) for list command");
+        console.error("Usage: esure list");
+        return 1;
+      }
       return listCommand(options);
     case "validate":
       if (args.length === 0) {
@@ -857,8 +1111,39 @@ async function main(): Promise<number> {
         );
         return 1;
       }
+      if (args.length > 1) {
+        console.error("Error: Unexpected argument(s) for validate command");
+        console.error("Usage: esure validate <file>");
+        return 1;
+      }
       return validateCommand(args[0], options);
+    case "report":
+      if (args[0] !== "validate" || !args[1] || args.length > 2) {
+        console.error("Usage: esure report validate <file> [--output human|json]");
+        return 1;
+      }
+      return validateReportCommand(args[1], options);
+    case "init":
+      if (args.length === 0) {
+        console.error("Error: Missing file path argument");
+        console.error("Usage: esure init <file>");
+        return 1;
+      }
+      return initCommand(args[0], options);
     case "run":
+      if (options.file !== undefined && args.length > 0) {
+        console.error("Error: Cannot specify both --file and a positional target");
+        console.error("Usage: esure run <scenario-id> | esure run <file> | esure run --file <file>");
+        return 1;
+      }
+      if (options.file !== undefined) {
+        if (!options.file.trim()) {
+          console.error("Error: Missing file path for --file");
+          console.error("Usage: esure run --file <file>");
+          return 1;
+        }
+        return runCommand(options.file, options, true);
+      }
       if (args.length === 0) {
         reportArgumentError(
           "Missing scenario ID or file path",
@@ -867,7 +1152,12 @@ async function main(): Promise<number> {
         );
         return 1;
       }
-      return runCommand(args[0], options);
+      if (args.length > 1) {
+        console.error("Error: Unexpected argument(s) for run command");
+        console.error("Usage: esure run <scenario-id> or esure run <file>");
+        return 1;
+      }
+      return runCommand(args[0], options, false);
     case "run-suite":
       if (args.length === 0) {
         reportArgumentError(
@@ -878,6 +1168,15 @@ async function main(): Promise<number> {
         return 1;
       }
       return runSuiteCommand(args, options, failFast);
+    case "completions":
+      if (args.length === 0) {
+        console.error('Error: Missing shell argument');
+        console.error('Usage: esure completions <bash|zsh>');
+        return 1;
+      }
+      return completionsCommand(args[0]);
+    case "doctor":
+      return doctorCommand(options);
     default:
       reportArgumentError(
         `Unknown command "${command}"`,

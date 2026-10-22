@@ -27,7 +27,10 @@ npm run build      # compile TypeScript
 npm test           # run unit/API tests
 npm run typecheck  # check types without emitting files
 npm run check      # typecheck and test
+npm run bench:stores -- 833 20 # offline bounded-store latency benchmark
 ```
+
+Benchmark methodology and local results are in [benchmarks/README.md](benchmarks/README.md).
 
 The default runner limits each step to 30 seconds, each run to 120 seconds,
 and concurrent execution to two runs. Request rates, in-memory retention, body
@@ -38,6 +41,7 @@ size, and concurrency are configurable through the bounded values documented in
 
 - `GET /health`
 - `GET /ready`
+- `GET /metrics` (opt-in; disabled by default)
 - `GET /api/v1/scenarios`
 - `GET /api/v1/scenarios/:scenarioId`
 - `GET /api/v1/scenarios/:scenarioId/versions`
@@ -64,6 +68,20 @@ To persist sanitized run reports in PostgreSQL, set
 set `RUN_PERSISTENCE_ENABLED=true`. Run persistence defaults to disabled, and
 the API report format remains unchanged. Generated Testnet secret keys and
 account keys are never included in persisted reports.
+
+Process-local aggregate execution metrics are available at `GET /metrics` only
+when `METRICS_ENABLED=true`; the default is `false`. The endpoint reports active
+runs, terminal totals, rejected starts, and aggregate duration. It is not
+authenticated and exposes process-level operational data, so keep it on a
+private network or restrict it at the reverse proxy to trusted monitoring
+systems. Do not expose it publicly. Metrics reset when the process restarts and
+are not shared between backend instances.
+
+The backend logger emits structured `run.started`, `run.completed`, and
+`run.failed` events for accepted scenario runs. Events include the run ID,
+scenario ID and version, request ID, status, and duration; failures include
+only a safe error code. Request bodies, generated secrets, transaction
+envelopes, and raw upstream responses are not logged.
 
 P2.0-P2.2 optionally persist only the published scenario catalogue. The default
 `PERSISTENCE_MODE=disabled` preserves the P1 path. Published mode is fail-closed
@@ -94,6 +112,11 @@ Remove-Item Env:RUN_STELLAR_SMOKE
 
 The same smoke test runs on a daily GitHub Actions schedule. Normal pull-request
 tests remain deterministic and make no external network calls.
+
+The smoke suite includes `payment-with-memo` version 2, which attaches a bounded
+text memo and checks `transactionMemoEquals` against Horizon's confirmed
+transaction. To run just this scenario, set `RUN_STELLAR_SMOKE=1` as above and use
+`npm test -- test/testnet-smoke.test.ts -t payment-with-memo`.
 
 ## Safety
 

@@ -1,5 +1,6 @@
 import { Ajv, type ErrorObject } from "ajv";
 import type { ScenarioAssertion, ScenarioDefinition } from "./domain.js";
+import { isTextMemo, TEXT_MEMO_MAX_BYTES } from "./text-memo.js";
 
 export const SCENARIO_LIMITS = {
   accounts: 10,
@@ -12,9 +13,11 @@ export const SCENARIO_LIMITS = {
 const id = { type: "string", pattern: "^[a-z][a-z0-9-]{0,63}$", maxLength: 64 } as const;
 const amount = { type: "string", pattern: "^(?:0|[1-9][0-9]{0,11})(?:\\.[0-9]{1,7})?$", maxLength: 20 } as const;
 const positiveAmount = { ...amount, not: { pattern: "^0(?:\\.0+)?$" } } as const;
+const nonNegativeAmount = { ...amount } as const;
 const signedAmount = { type: "string", pattern: "^-?(?:0|[1-9][0-9]{0,11})(?:\\.[0-9]{1,7})?$", maxLength: 21 } as const;
 const code = { type: "string", pattern: "^[A-Z0-9]{1,12}$", maxLength: 12 } as const;
 const resultCode = { type: "string", pattern: "^[a-z][a-z0-9_]{0,63}$", maxLength: 64 } as const;
+const memo = { type: "string", maxLength: TEXT_MEMO_MAX_BYTES, description: "Text memo: at most 28 UTF-8 bytes (not characters), including empty text. The server also rejects malformed Unicode and enforces the byte limit." } as const;
 
 export const scenarioSchemaV1 = {
   $id: "https://esure.dev/schemas/scenario-v1.json",
@@ -42,8 +45,8 @@ export const scenarioSchemaV1 = {
     steps: {
       type: "array", minItems: 0, maxItems: SCENARIO_LIMITS.steps,
       items: { oneOf: [
-        { type: "object", additionalProperties: false, required: ["id", "type", "account", "asset"], properties: { id, type: { const: "changeTrust" }, account: id, asset: id, limit: positiveAmount } },
-        { type: "object", additionalProperties: false, required: ["id", "type", "from", "to", "asset", "amount"], properties: { id, type: { const: "payment" }, from: id, to: id, asset: id, amount: positiveAmount } },
+        { type: "object", additionalProperties: false, required: ["id", "type", "account", "asset"], properties: { id, type: { const: "changeTrust" }, account: id, asset: id, limit: nonNegativeAmount } },
+        { type: "object", additionalProperties: false, required: ["id", "type", "from", "to", "asset", "amount"], properties: { id, type: { const: "payment" }, from: id, to: id, asset: id, amount: positiveAmount, memo } },
         { type: "object", additionalProperties: false, required: ["id", "type", "account", "sellingAsset", "buyingAsset", "amount", "price"], properties: { id, type: { const: "manageSellOffer" }, account: id, sellingAsset: id, buyingAsset: id, amount: positiveAmount, price: positiveAmount } },
         { type: "object", additionalProperties: false, required: ["id", "type", "from", "to", "sendAsset", "sendMax", "destAsset", "destAmount", "path"], properties: { id, type: { const: "pathPaymentStrictReceive" }, from: id, to: id, sendAsset: id, sendMax: positiveAmount, destAsset: id, destAmount: positiveAmount, path: { type: "array", maxItems: 5, items: id } } },
         { type: "object", additionalProperties: false, required: ["id", "type", "from", "to", "sendAsset", "sendAmount", "destAsset", "destMin", "path"], properties: { id, type: { const: "pathPaymentStrictSend" }, from: id, to: id, sendAsset: id, sendAmount: positiveAmount, destAsset: id, destMin: positiveAmount, path: { type: "array", maxItems: 5, items: id } } },
@@ -52,12 +55,15 @@ export const scenarioSchemaV1 = {
     assertions: {
       type: "array", minItems: 1, maxItems: SCENARIO_LIMITS.assertions,
       items: { oneOf: [
+        { type: "object", additionalProperties: false, required: ["type", "step", "memo"], properties: { type: { const: "transactionMemoEquals" }, step: id, memo } },
         { type: "object", additionalProperties: false, required: ["type", "account", "asset", "amount"], properties: { type: { const: "balanceEquals" }, account: id, asset: id, amount } },
         { type: "object", additionalProperties: false, required: ["type", "account", "asset", "amount"], properties: { type: { const: "balanceChangedBy" }, account: id, asset: id, amount: signedAmount } },
         { type: "object", additionalProperties: false, required: ["type", "step"], properties: { type: { enum: ["stepSucceeded", "transactionConfirmed"] }, step: id } },
         { type: "object", additionalProperties: false, required: ["type", "step", "transactionCode", "operationCodes"], properties: { type: { const: "stepFailedWith" }, step: id, transactionCode: resultCode, operationCodes: { type: "array", minItems: 0, maxItems: 100, items: resultCode } } },
         { type: "object", additionalProperties: false, required: ["type", "account", "asset"], properties: { type: { enum: ["trustlineExists", "trustlineMissing"] }, account: id, asset: id } },
-        { type: "object", additionalProperties: false, required: ["type", "account"], properties: { type: { const: "accountExists" }, account: id } },
+        { type: "object", additionalProperties: false, required: ["type", "account", "asset", "limit"], properties: { type: { const: "trustlineLimitEquals" }, account: id, asset: id, limit: positiveAmount } },
+        { type: "object", additionalProperties: false, required: ["type", "account"], properties: { type: { enum: ["accountExists", "accountMissing"] }, account: id } },
+        { type: "object", additionalProperties: false, required: ["type", "account", "asset", "amount", "step"], properties: { type: { const: "feeAwareNativeBalanceDelta" }, account: id, asset: id, amount: signedAmount, step: id } },
       ] },
     },
   },
@@ -78,6 +84,14 @@ export function validateScenarioDefinition(value: unknown): ScenarioDefinition {
   if (!validateSchema(value)) throw new ScenarioValidationError(formatAjvErrors(validateSchema.errors));
   validateReferences(value);
   validateAmounts(value);
+  const memoIssues: string[] = [];
+  for (const step of value.steps) {
+    if (step.type === "payment" && step.memo !== undefined && !isTextMemo(step.memo)) memoIssues.push(`step ${step.id} memo must be valid Unicode and at most 28 UTF-8 bytes`);
+  }
+  for (const assertion of value.assertions) {
+    if (assertion.type === "transactionMemoEquals" && !isTextMemo(assertion.memo)) memoIssues.push("assertion transactionMemoEquals memo must be valid Unicode and at most 28 UTF-8 bytes");
+  }
+  if (memoIssues.length) throw new ScenarioValidationError(memoIssues);
   return structuredClone(value);
 }
 
@@ -112,7 +126,10 @@ function validateAmounts(scenario: ScenarioDefinition): void {
     if (step.type === "pathPaymentStrictReceive") values.push([`step ${step.id} sendMax`, step.sendMax], [`step ${step.id} destAmount`, step.destAmount]);
     if (step.type === "pathPaymentStrictSend") values.push([`step ${step.id} sendAmount`, step.sendAmount], [`step ${step.id} destMin`, step.destMin]);
   }
-  for (const assertion of scenario.assertions) if ("amount" in assertion) values.push([`assertion ${assertion.type} amount`, assertion.amount]);
+  for (const assertion of scenario.assertions) {
+    if ("amount" in assertion) values.push([`assertion ${assertion.type} amount`, assertion.amount]);
+    if (assertion.type === "trustlineLimitEquals") values.push([`assertion trustlineLimitEquals limit`, assertion.limit]);
+  }
   for (const [label, value] of values) {
     const absolute = value.startsWith("-") ? value.slice(1) : value;
     const [integer = "0", fraction = ""] = absolute.split(".");
@@ -170,8 +187,17 @@ function validateAssertionReferences(assertion: ScenarioAssertion, accounts: Set
   if ("account" in assertion && !accounts.has(assertion.account)) issues.push(`assertion ${assertion.type} references unknown account ${assertion.account}`);
   if ("asset" in assertion && !assets.has(assertion.asset)) issues.push(`assertion ${assertion.type} references unknown asset ${assertion.asset}`);
   if ("step" in assertion && !steps.has(assertion.step)) issues.push(`assertion ${assertion.type} references unknown step ${assertion.step}`);
+  if (assertion.type === "transactionMemoEquals" && steps.has(assertion.step) && scenario.steps.find((step) => step.id === assertion.step)?.type !== "payment") {
+    issues.push("assertion transactionMemoEquals must target a payment step");
+  }
   if ((assertion.type === "trustlineExists" || assertion.type === "trustlineMissing") && scenario.assets.find((asset) => asset.id === assertion.asset)?.type === "native") {
     issues.push(`assertion ${assertion.type} cannot target native XLM`);
+  }
+  if (assertion.type === "trustlineLimitEquals" && scenario.assets.find((asset) => asset.id === assertion.asset)?.type === "native") {
+    issues.push("assertion trustlineLimitEquals cannot target native XLM");
+  }
+  if (assertion.type === "feeAwareNativeBalanceDelta" && assets.has(assertion.asset) && scenario.assets.find((asset) => asset.id === assertion.asset)?.type !== "native") {
+    issues.push("assertion feeAwareNativeBalanceDelta must target the native XLM asset");
   }
 }
 
