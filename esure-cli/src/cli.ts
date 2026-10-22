@@ -1,18 +1,56 @@
 #!/usr/bin/env node
 
-import { readFile, stat } from "node:fs/promises";
-import { extname, resolve } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { SCENARIO_LIMITS, ScenarioValidationError } from "@esure/backend/src/scenario-schema.js";
 import { parseScenario } from "@esure/backend/src/scenario-loader.js";
 import { createScenarioRegistry } from "@esure/backend/src/scenarios.js";
 import { StellarTestnetGateway } from "@esure/backend/src/stellar-gateway.js";
+import { SafeRunError } from "@esure/backend/src/errors.js";
+import { parse as parseYaml } from "yaml";
 import type { ValidatedScenario } from "@esure/backend/src/domain.js";
 import type { LedgerExecution, LedgerExecutionOptions } from "@esure/backend/src/domain.js";
 
-const VERSION = "0.1.0";
+// ─────────────────────────────────────────────────────────────────────────────
+// Version resolution (#57)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export function resolveVersion(): string {
+  try {
+    let dir = dirname(fileURLToPath(import.meta.url));
+    for (let i = 0; i < 4; i++) {
+      const candidate = join(dir, "package.json");
+      if (existsSync(candidate)) {
+        try {
+          const pkg = JSON.parse(readFileSync(candidate, "utf8"));
+          if (pkg.name === "@esure/cli" && typeof pkg.version === "string") {
+            return pkg.version;
+          }
+        } catch {
+          // ignore JSON parse error and keep walking up
+        }
+      }
+      const parent = dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+  } catch {
+    // fallback if import.meta.url is unavailable
+  }
+  return "0.1.0";
+}
+
+const VERSION = resolveVersion();
 const BUNDLED_SCENARIO_DIR_TIMEOUT_MS = 30_000;
 const MAX_REPORT_FILE_BYTES = 5 * 1024 * 1024;
+
+/** Default overall run timeout in milliseconds (#55). */
+export const DEFAULT_CLI_TIMEOUT_MS = 120_000;
+export const MIN_CLI_TIMEOUT_MS = 1;
+export const MAX_CLI_TIMEOUT_MS = 600_000;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared types
@@ -24,8 +62,8 @@ interface CliOptions {
   version?: boolean;
   /** #68 — use ASCII status markers (PASS/FAIL) instead of Unicode glyphs */
   ascii?: boolean;
-  /** #53 — explicit local file path for run command */
-  file?: string;
+  /** #55 — overall run timeout in milliseconds */
+  timeoutMs?: number;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -43,6 +81,25 @@ function markers(ascii: boolean): Markers {
 
 function statusMarker(status: "passed" | "failed" | string, m: Markers): string {
   return status === "passed" ? m.pass : m.fail;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Output and error helpers (#54, #55, #56)
+// ─────────────────────────────────────────────────────────────────────────────
+
+function reportArgumentError(
+  message: string,
+  usageHint: string | undefined,
+  output: "human" | "json" | undefined,
+): void {
+  if (output === "json") {
+    console.error(JSON.stringify({ error: { code: "INVALID_ARGUMENT", message } }));
+  } else {
+    console.error(`Error: ${message}`);
+    if (usageHint) {
+      console.error(usageHint);
+    }
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -66,12 +123,12 @@ Usage:
   esure doctor                            Diagnose the local installation
 
 Options:
-  --file <path>       (run) Explicitly specify a local scenario file path
-  --output <format>   Output format: human (default) or json
-  --ascii             Use ASCII status markers (PASS/FAIL) instead of Unicode glyphs
-  --fail-fast         (run-suite) Stop after first failure
-  --help              Show this help message
-  --version           Show version information
+  --output, -o <format> Output format: human (default) or json
+  --timeout-ms <ms>     Overall run timeout in milliseconds (default: 120000)
+  --ascii               Use ASCII status markers (PASS/FAIL) instead of Unicode glyphs
+  --fail-fast           (run-suite) Stop after first failure
+  --help, -h            Show this help message
+  --version, -v         Show version information
 
 Examples:
   esure list
@@ -80,7 +137,7 @@ Examples:
   esure report validate ./report.json --output json
   esure run xlm-payment
   esure run ./my-scenario.yaml --output json
-  esure run --file ./my-scenario.yaml
+  esure run xlm-payment --timeout-ms 30000
   esure run-suite xlm-payment path-payment --fail-fast
 
 Documentation: https://github.com/Esureorg/Esure
@@ -100,68 +157,85 @@ function parseCliArgs(): {
   args: string[];
   options: CliOptions;
   failFast: boolean;
-  parseError?: string;
+  parseError?: { message: string; usage?: string };
 } {
-  let parsedValues: Record<string, string | boolean | undefined>;
-  let parsedPositionals: string[];
+  // Pre-scan for requested output mode so parse errors can be formatted as JSON (#54)
+  const argv = process.argv.slice(2);
+  let requestedOutput: "human" | "json" = "human";
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === "--output=json" || arg === "-o=json") {
+      requestedOutput = "json";
+    } else if ((arg === "--output" || arg === "-o") && argv[i + 1] === "json") {
+      requestedOutput = "json";
+    }
+  }
 
+  let parsed: ReturnType<typeof parseArgs>;
   try {
-    const parsed = parseArgs({
+    parsed = parseArgs({
       options: {
-        output: { type: "string" },
+        output: { type: "string", short: "o" },
         help: { type: "boolean", short: "h" },
         version: { type: "boolean", short: "v" },
         ascii: { type: "boolean" },
         "fail-fast": { type: "boolean" },
-        "report-file": { type: "string" },
-        junit: { type: "string" },
-        "junit-file": { type: "string" },
-        csv: { type: "string" },
-        overwrite: { type: "boolean" },
-        force: { type: "boolean" },
+        "timeout-ms": { type: "string" },
       },
       allowPositionals: true,
       strict: true,
     });
-    parsedValues = parsed.values;
-    parsedPositionals = parsed.positionals;
-  } catch (err: any) {
+  } catch (error) {
     return {
-      command: undefined,
       args: [],
-      options: { output: "human", help: false, version: false, ascii: false },
+      options: { output: requestedOutput },
       failFast: false,
-      parseError: err.message || "Invalid arguments",
+      parseError: {
+        message: error instanceof Error ? error.message : String(error),
+        usage: 'Run "esure --help" for usage information',
+      },
     };
   }
 
-  if (parsedValues.output !== undefined && parsedValues.output !== "human" && parsedValues.output !== "json") {
-    return {
-      command: parsedPositionals[0],
-      args: parsedPositionals.slice(1),
-      options: { output: "human", help: false, version: false, ascii: false },
-      failFast: false,
-      parseError: `Invalid output format "${parsedValues.output}". Supported formats: human, json`,
-    };
+  const { values, positionals } = parsed;
+
+  let output: "human" | "json" = "human";
+  if (values.output !== undefined) {
+    if (values.output === "json") {
+      output = "json";
+    } else if (values.output === "human") {
+      output = "human";
+    } else {
+      return {
+        args: [],
+        options: { output: requestedOutput },
+        failFast: false,
+        parseError: {
+          message: `Invalid output format "${values.output}". Supported formats are "human" and "json".`,
+        },
+      };
+    }
   }
-  const { values, positionals } = parseArgs({
-    options: {
-      output: { type: "string" },
-      help: { type: "boolean", short: "h" },
-      version: { type: "boolean", short: "v" },
-      ascii: { type: "boolean" },
-      file: { type: "string" },
-      "fail-fast": { type: "boolean" },
-      "report-file": { type: "string" },
-      junit: { type: "string" },
-      "junit-file": { type: "string" },
-      csv: { type: "string" },
-      overwrite: { type: "boolean" },
-      force: { type: "boolean" },
-    },
-    allowPositionals: true,
-    strict: false,
-  });
+
+  let timeoutMs: number | undefined;
+  if (values["timeout-ms"] !== undefined) {
+    const parsedTimeout = Number(values["timeout-ms"]);
+    if (
+      !Number.isInteger(parsedTimeout) ||
+      parsedTimeout < MIN_CLI_TIMEOUT_MS ||
+      parsedTimeout > MAX_CLI_TIMEOUT_MS
+    ) {
+      return {
+        args: [],
+        options: { output },
+        failFast: false,
+        parseError: {
+          message: `--timeout-ms must be an integer between ${MIN_CLI_TIMEOUT_MS} and ${MAX_CLI_TIMEOUT_MS}`,
+        },
+      };
+    }
+    timeoutMs = parsedTimeout;
+  }
 
   const rawJunit =
     typeof values.junit === "string"
@@ -174,11 +248,11 @@ function parseCliArgs(): {
     command: positionals[0],
     args: positionals.slice(1),
     options: {
-      output: (values.output as "human" | "json") || "human",
+      output,
       help: Boolean(values.help),
       version: Boolean(values.version),
       ascii: Boolean(values.ascii),
-      file: typeof values.file === "string" ? values.file : undefined,
+      timeoutMs,
     },
     failFast: Boolean(values["fail-fast"]),
   };
@@ -223,15 +297,23 @@ async function loadScenarioFile(filePath: string): Promise<ValidatedScenario> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** Build a LedgerExecutionOptions object that prints progress in human mode (#66). */
-function buildExecutionOptions(options: CliOptions): LedgerExecutionOptions {
-  const execOptions: LedgerExecutionOptions = { stepTimeoutMs: BUNDLED_SCENARIO_DIR_TIMEOUT_MS };
+function buildExecutionOptions(
+  options: CliOptions,
+  signal?: AbortSignal,
+): LedgerExecutionOptions {
+  const execOptions: LedgerExecutionOptions = {
+    stepTimeoutMs: BUNDLED_SCENARIO_DIR_TIMEOUT_MS,
+    signal,
+  };
   if (options.output === "human") {
     const m = markers(options.ascii ?? false);
     execOptions.onStep = (step) => {
       console.log(`  ${statusMarker(step.status, m)} step  ${step.id}: ${step.message}`);
     };
     execOptions.onAssertion = (assertion) => {
-      console.log(`  ${statusMarker(assertion.status, m)} check ${assertion.type}: ${assertion.message}`);
+      console.log(
+        `  ${statusMarker(assertion.status, m)} check ${assertion.type}: ${assertion.message}`,
+      );
     };
   }
   return execOptions;
@@ -274,249 +356,132 @@ function buildRunReport(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Artifact writing & JUnit export (#59, #60, #62)
+// Signal & timeout execution runner (#55, #56)
 // ─────────────────────────────────────────────────────────────────────────────
 
-function escapeCsv(value: unknown): string {
-  const str = String(value ?? "");
-  if (str.includes(",") || str.includes('"') || str.includes("\n")) {
-    return `"${str.replace(/"/g, '""')}"`;
-  }
-  return str;
+interface ExecutionRunnerResult<T> {
+  result?: T;
+  exitCode?: number;
 }
 
-export function generateCsv(runs: ScenarioRunResultForJunit[]): string {
-  const rows: string[] = [
-    ["Scenario", "Type", "Status", "Message"].map(escapeCsv).join(","),
-  ];
+async function runWithSignalsAndTimeout<T>(
+  timeoutMs: number,
+  options: CliOptions,
+  action: (signal: AbortSignal) => Promise<T>,
+): Promise<ExecutionRunnerResult<T>> {
+  const controller = new AbortController();
+  let timedOut = false;
+  let receivedSignal: "SIGINT" | "SIGTERM" | undefined;
+  let timer: NodeJS.Timeout | undefined;
 
-  for (const run of runs) {
-    if (run.execution) {
-      for (const assertion of run.execution.assertions) {
-        rows.push(
-          [run.scenarioId, assertion.type, assertion.status, assertion.message]
-            .map(escapeCsv)
-            .join(","),
+  const onSigint = () => {
+    if (receivedSignal === "SIGINT") {
+      process.exit(130);
+    }
+    receivedSignal = "SIGINT";
+    controller.abort();
+  };
+
+  const onSigterm = () => {
+    if (receivedSignal === "SIGTERM") {
+      process.exit(143);
+    }
+    receivedSignal = "SIGTERM";
+    controller.abort();
+  };
+
+  process.on("SIGINT", onSigint);
+  process.on("SIGTERM", onSigterm);
+
+  timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+  timer.unref?.();
+
+  try {
+    const result = await action(controller.signal);
+    return { result };
+  } catch (error) {
+    if (receivedSignal === "SIGINT") {
+      if (options.output === "json") {
+        console.error(
+          JSON.stringify({
+            status: "cancelled",
+            error: {
+              code: "SIGINT",
+              message: "Execution interrupted by SIGINT.",
+            },
+          }),
         );
+      } else {
+        const m = markers(options.ascii ?? false);
+        console.error(`\n${m.fail} Execution interrupted by SIGINT.`);
       }
-    }
-  }
-
-  return rows.join("\n") + "\n";
-}
-
-export function escapeXml(unsafe: string): string {
-  return String(unsafe)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&apos;");
-}
-
-export interface ScenarioRunResultForJunit {
-  scenarioId: string;
-  execution?: LedgerExecution;
-  error?: { message: string };
-}
-
-export function generateJunitXml(runs: ScenarioRunResultForJunit[]): string {
-  let totalTests = 0;
-  let totalFailures = 0;
-  let totalErrors = 0;
-
-  const testsuiteXmls: string[] = [];
-
-  for (const run of runs) {
-    let suiteTests = 0;
-    let suiteFailures = 0;
-    let suiteErrors = 0;
-    const testcaseXmls: string[] = [];
-
-    if (run.execution) {
-      for (const step of run.execution.steps) {
-        suiteTests += 1;
-        const name = `step ${step.id}: ${step.message || step.type}`;
-        if (step.status === "passed") {
-          testcaseXmls.push(
-            `    <testcase classname="${escapeXml(run.scenarioId)}" name="${escapeXml(name)}" time="0"/>`,
-          );
-        } else {
-          suiteFailures += 1;
-          testcaseXmls.push(
-            `    <testcase classname="${escapeXml(run.scenarioId)}" name="${escapeXml(name)}" time="0">\n      <failure message="${escapeXml(step.message)}" type="${escapeXml(step.type)}">${escapeXml(step.message)}</failure>\n    </testcase>`,
-          );
-        }
-      }
-
-      for (const assertion of run.execution.assertions) {
-        suiteTests += 1;
-        const name = `assertion ${assertion.type}: ${assertion.message}`;
-        if (assertion.status === "passed") {
-          testcaseXmls.push(
-            `    <testcase classname="${escapeXml(run.scenarioId)}" name="${escapeXml(name)}" time="0"/>`,
-          );
-        } else {
-          suiteFailures += 1;
-          testcaseXmls.push(
-            `    <testcase classname="${escapeXml(run.scenarioId)}" name="${escapeXml(name)}" time="0">\n      <failure message="${escapeXml(assertion.message)}" type="${escapeXml(assertion.type)}">${escapeXml(assertion.message)}</failure>\n    </testcase>`,
-          );
-        }
-      }
+      return { exitCode: 130 };
     }
 
-    if (run.error) {
-      suiteTests += 1;
-      suiteErrors += 1;
-      testcaseXmls.push(
-        `    <testcase classname="${escapeXml(run.scenarioId)}" name="execution" time="0">\n      <error message="${escapeXml(run.error.message)}" type="ExecutionError">${escapeXml(run.error.message)}</error>\n    </testcase>`,
+    if (receivedSignal === "SIGTERM") {
+      if (options.output === "json") {
+        console.error(
+          JSON.stringify({
+            status: "cancelled",
+            error: {
+              code: "SIGTERM",
+              message: "Execution terminated by SIGTERM.",
+            },
+          }),
+        );
+      } else {
+        const m = markers(options.ascii ?? false);
+        console.error(`\n${m.fail} Execution terminated by SIGTERM.`);
+      }
+      return { exitCode: 143 };
+    }
+
+    if (timedOut) {
+      const timeoutError = {
+        code: "RUN_TIMEOUT",
+        message: `The run exceeded its ${timeoutMs}ms execution limit.`,
+      };
+      if (options.output === "json") {
+        console.error(
+          JSON.stringify(
+            {
+              status: "error",
+              error: timeoutError,
+            },
+            null,
+            2,
+          ),
+        );
+      } else {
+        const m = markers(options.ascii ?? false);
+        console.error(`\n${m.fail} Run timed out: ${timeoutError.message}`);
+      }
+      return { exitCode: 1 };
+    }
+
+    // Normal execution error
+    if (options.output === "json") {
+      const errorObj: { message: string; report?: unknown } = {
+        message: error instanceof Error ? error.message : String(error),
+      };
+      if (error && typeof error === "object" && "report" in error) {
+        errorObj.report = (error as { report: unknown }).report;
+      }
+      console.error(JSON.stringify({ status: "error", error: errorObj }, null, 2));
+    } else {
+      const m = markers(options.ascii ?? false);
+      console.error(
+        `\n${m.fail} Run failed: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
-
-    totalTests += suiteTests;
-    totalFailures += suiteFailures;
-    totalErrors += suiteErrors;
-
-    const testcases = testcaseXmls.length > 0 ? `\n${testcaseXmls.join("\n")}\n  ` : "";
-    testsuiteXmls.push(
-      `  <testsuite name="${escapeXml(run.scenarioId)}" tests="${suiteTests}" failures="${suiteFailures}" errors="${suiteErrors}">${testcases}</testsuite>`,
-    );
-  }
-
-  const suites = testsuiteXmls.length > 0 ? `\n${testsuiteXmls.join("\n")}\n` : "\n";
-  return `<?xml version="1.0" encoding="UTF-8"?>\n<testsuites name="esure" tests="${totalTests}" failures="${totalFailures}" errors="${totalErrors}">${suites}</testsuites>\n`;
-}
-
-export async function writeArtifactFile(
-  filePath: string,
-  content: string,
-  overwrite: boolean,
-  artifactType: "report" | "JUnit" | "CSV" | "scaffold",
-): Promise<void> {
-  const absolutePath = resolve(filePath);
-
-  let exists = false;
-  try {
-    await access(absolutePath);
-    exists = true;
-  } catch {
-    exists = false;
-  }
-
-  if (exists && !overwrite) {
-    const typeLabel =
-      artifactType === "report" ? "Report" : artifactType === "JUnit" ? "JUnit" : artifactType === "CSV" ? "CSV" : "Scenario";
-    throw new Error(`${typeLabel} file "${filePath}" already exists. Use --overwrite to replace it.`);
-  }
-
-  const dir = dirname(absolutePath);
-  const base = basename(absolutePath);
-  const tempPath = resolve(dir, `.${base}.tmp-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-
-  try {
-    await writeFile(tempPath, content, "utf-8");
-    await rename(tempPath, absolutePath);
-  } catch (error) {
-    try {
-      await unlink(tempPath);
-    } catch {
-      // ignore unlink error
-    }
-    throw error;
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// #62 — init command
-// ─────────────────────────────────────────────────────────────────────────────
-
-async function initCommand(filePath: string, options: CliOptions): Promise<number> {
-  try {
-    const ext = extname(filePath).toLowerCase();
-    if (ext !== ".json" && ext !== ".yaml" && ext !== ".yml") {
-      throw new Error(
-        `Unsupported file extension "${ext}". Supported extensions are .json, .yaml, and .yml.`,
-      );
-    }
-
-    const baseName = basename(filePath);
-    const rawId = baseName.slice(0, baseName.length - ext.length);
-    let scenarioId = rawId
-      .toLowerCase()
-      .replace(/[^a-z0-9-]/g, "-")
-      .replace(/^-+|-+$/g, "");
-    if (!scenarioId || !/^[a-z]/.test(scenarioId)) {
-      scenarioId = "custom-scenario";
-    }
-    if (scenarioId.length > 64) {
-      scenarioId = scenarioId.slice(0, 64);
-    }
-
-    const definition = {
-      schemaVersion: 1,
-      id: scenarioId,
-      version: 1,
-      name: scenarioId.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()),
-      description: "Send XLM between two Testnet accounts and verify the balance update.",
-      network: "testnet",
-      accounts: [
-        { id: "sender", generate: true, fund: true },
-        { id: "receiver", generate: true, fund: true },
-      ],
-      assets: [{ id: "xlm", type: "native" }],
-      steps: [
-        {
-          id: "payment",
-          type: "payment",
-          from: "sender",
-          to: "receiver",
-          asset: "xlm",
-          amount: "10.0000000",
-        },
-      ],
-      assertions: [
-        {
-          type: "transactionConfirmed",
-          step: "payment",
-        },
-        {
-          type: "balanceChangedBy",
-          account: "receiver",
-          asset: "xlm",
-          amount: "10.0000000",
-        },
-      ],
-    };
-
-    // Canonical validator verification
-    validateScenarioDefinition(definition);
-
-    let content: string;
-    if (ext === ".json") {
-      content = JSON.stringify(definition, null, 2) + "\n";
-    } else {
-      content = stringifyYaml(definition);
-    }
-
-    await writeArtifactFile(filePath, content, Boolean(options.overwrite), "scaffold");
-
-    if (options.output === "json") {
-      console.log(JSON.stringify({ created: true, path: filePath, scenarioId }, null, 2));
-    } else {
-      console.log(`Scenario scaffolded: ${filePath}`);
-      console.log("\nNext steps:");
-      console.log(`  Validate: esure validate ${filePath}`);
-      console.log(`  Run:      esure run ${filePath}\n`);
-    }
-    return 0;
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    if (options.output === "json") {
-      console.error(JSON.stringify({ error: { message: msg } }));
-    } else {
-      console.error(`Error: ${msg}`);
-    }
-    return 1;
+    return { exitCode: 1 };
+  } finally {
+    if (timer) clearTimeout(timer);
+    process.removeListener("SIGINT", onSigint);
+    process.removeListener("SIGTERM", onSigterm);
   }
 }
 
@@ -617,88 +582,8 @@ async function validateCommand(filePath: string, options: CliOptions): Promise<n
   }
 }
 
-async function runCommand(target: string, options: CliOptions, isExplicitFile = false): Promise<number> {
-  try {
-    const { size } = await handle.stat();
-    if (size > MAX_REPORT_FILE_BYTES) {
-      throw new Error(`Report file exceeds the maximum size of ${MAX_REPORT_FILE_BYTES / (1024 * 1024)} MiB.`);
-    }
-
-    const buffer = Buffer.alloc(MAX_REPORT_FILE_BYTES + 1);
-    let totalBytes = 0;
-    while (totalBytes < buffer.length) {
-      const { bytesRead } = await handle.read(
-        buffer,
-        totalBytes,
-        Math.min(64 * 1024, buffer.length - totalBytes),
-        totalBytes,
-      );
-      if (bytesRead === 0) break;
-      totalBytes += bytesRead;
-    }
-    if (totalBytes > MAX_REPORT_FILE_BYTES) {
-      throw new Error(`Report file exceeds the maximum size of ${MAX_REPORT_FILE_BYTES / (1024 * 1024)} MiB.`);
-    }
-
-    try {
-      return new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, totalBytes));
-    } catch {
-      throw new Error("Report file is not valid UTF-8.");
-    }
-  } finally {
-    await handle.close();
-  }
-}
-
-async function validateReportCommand(filePath: string, options: CliOptions): Promise<number> {
-  try {
-    if (extname(filePath).toLowerCase() !== ".json") {
-      throw new Error("Report file must have a .json extension.");
-    }
-
-    const content = await readBoundedReportFile(filePath);
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(content);
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : "invalid JSON";
-      throw new Error(`Report file contains invalid JSON: ${detail}`);
-    }
-
-    const report = validateRunReport(parsed);
-    if (options.output === "json") {
-      console.log(JSON.stringify({
-        valid: true,
-        reportId: report.id,
-        scenarioId: report.scenarioId,
-        status: report.status,
-      }, null, 2));
-    } else {
-      console.log("✓ Report is valid");
-      console.log(`  ID: ${report.id}`);
-      console.log(`  Scenario: ${report.scenarioId}`);
-      console.log(`  Status: ${report.status}`);
-    }
-    return 0;
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    const issues = error instanceof RunReportValidationError ? error.issues : undefined;
-    if (options.output === "json") {
-      console.error(JSON.stringify({ valid: false, error: { message, ...(issues ? { issues } : {}) } }, null, 2));
-    } else {
-      console.error(`✗ Report validation failed: ${message}`);
-      for (const issue of issues ?? []) console.error(`  - ${issue}`);
-    }
-    return 1;
-  }
-}
-
 async function runCommand(target: string, options: CliOptions): Promise<number> {
-  let scenario: ValidatedScenario | undefined;
-  let execution: LedgerExecution | undefined;
-  let report: ReturnType<typeof buildRunReport> | undefined;
-  let executionError: Error | undefined;
-
+  let scenario: ValidatedScenario;
   try {
     // Determine if target is a bundled scenario ID or file path
     if (isExplicitFile || target.includes("/") || target.includes("\\") || target.includes(".")) {
@@ -713,41 +598,6 @@ async function runCommand(target: string, options: CliOptions): Promise<number> 
       }
       scenario = found;
     }
-
-    // Execute scenario on Stellar Testnet
-    const gateway = new StellarTestnetGateway(
-      "https://horizon-testnet.stellar.org",
-      "https://friendbot.stellar.org",
-    );
-
-    if (options.output === "human") {
-      console.log(`Running scenario: ${scenario.name}`);
-      console.log(`ID: ${scenario.id} (v${scenario.version})\n`);
-    }
-
-    // #66 — attach onStep / onAssertion for real-time progress in human mode
-    const execOptions = buildExecutionOptions(options);
-    execution = await gateway.execute(scenario, execOptions);
-    report = buildRunReport(scenario, execution);
-
-    if (options.output === "json") {
-      console.log(JSON.stringify(report, null, 2));
-    } else {
-      // In human mode the steps/assertions were already printed via callbacks.
-      // Only print the final summary — do not reprint the full step list.
-      const m = markers(options.ascii ?? false);
-      const passed = report.status === "passed";
-      console.log(`\nResult: ${passed ? "PASSED" : "FAILED"}`);
-      console.log(
-        `  Steps: ${report.summary.stepsPassed}/${execution.steps.length} passed`,
-      );
-      console.log(
-        `  Assertions: ${report.summary.assertionsPassed}/${execution.assertions.length} passed`,
-      );
-      if (!passed) {
-        console.log(`\n${m.fail} One or more checks failed.`);
-      }
-    }
   } catch (error) {
     executionError = error instanceof Error ? error : new Error(String(error));
     if (error && typeof error === "object" && "report" in error) {
@@ -760,16 +610,9 @@ async function runCommand(target: string, options: CliOptions): Promise<number> 
     }
 
     if (options.output === "json") {
-      const errorObj: { message: string; report?: unknown; issues?: string[] } = {
-        message: error instanceof Error ? error.message : String(error),
-      };
-      if (error && typeof error === "object" && "report" in error) {
-        errorObj.report = (error as { report: unknown }).report;
-      }
-      if (error && typeof error === "object" && "issues" in error && Array.isArray(error.issues)) {
-        errorObj.issues = error.issues as string[];
-      }
-      console.error(JSON.stringify({ status: "error", error: errorObj }, null, 2));
+      console.error(
+        JSON.stringify({ error: { message: error instanceof Error ? error.message : String(error) } }),
+      );
     } else {
       const m = markers(options.ascii ?? false);
       console.error(
@@ -783,91 +626,55 @@ async function runCommand(target: string, options: CliOptions): Promise<number> 
     }
   }
 
-  // Handle artifact exports (#59, #60, #157)
-  const scenarioId = scenario?.id ?? target;
-  let artifactError = false;
+  const effectiveTimeout = options.timeoutMs ?? DEFAULT_CLI_TIMEOUT_MS;
 
-  if (options.reportFile) {
-    try {
-      const reportPayload = report ?? {
-        scenarioId,
-        status: "error",
-        error: { message: executionError?.message ?? "Execution failed" },
-        steps: execution?.steps ?? [],
-        assertions: execution?.assertions ?? [],
-      };
-      await writeArtifactFile(
-        options.reportFile,
-        JSON.stringify(reportPayload, null, 2) + "\n",
-        Boolean(options.overwrite),
-        "report",
+  const executionResult = await runWithSignalsAndTimeout(
+    effectiveTimeout,
+    options,
+    async (signal) => {
+      // Execute scenario on Stellar Testnet
+      const gateway = new StellarTestnetGateway(
+        "https://horizon-testnet.stellar.org",
+        "https://friendbot.stellar.org",
       );
-    } catch (err: unknown) {
-      artifactError = true;
-      const msg = err instanceof Error ? err.message : String(err);
-      if (options.output === "json") {
-        console.error(JSON.stringify({ error: { message: msg } }));
-      } else {
-        console.error(`Error writing report file: ${msg}`);
+
+      if (options.output === "human") {
+        console.log(`Running scenario: ${scenario.name}`);
+        console.log(`ID: ${scenario.id} (v${scenario.version})\n`);
       }
+
+      const execOptions = buildExecutionOptions(options, signal);
+      return gateway.execute(scenario, execOptions);
+    },
+  );
+
+  if (executionResult.exitCode !== undefined) {
+    return executionResult.exitCode;
+  }
+
+  const execution = executionResult.result!;
+  const report = buildRunReport(scenario, execution);
+
+  if (options.output === "json") {
+    console.log(JSON.stringify(report, null, 2));
+  } else {
+    // In human mode the steps/assertions were already printed via callbacks.
+    // Only print the final summary — do not reprint the full step list.
+    const m = markers(options.ascii ?? false);
+    const passed = report.status === "passed";
+    console.log(`\nResult: ${passed ? "PASSED" : "FAILED"}`);
+    console.log(
+      `  Steps: ${report.summary.stepsPassed}/${execution.steps.length} passed`,
+    );
+    console.log(
+      `  Assertions: ${report.summary.assertionsPassed}/${execution.assertions.length} passed`,
+    );
+    if (!passed) {
+      console.log(`\n${m.fail} One or more checks failed.`);
     }
   }
 
-  if (options.junit) {
-    try {
-      const xml = generateJunitXml([
-        {
-          scenarioId,
-          execution,
-          error: executionError ? { message: executionError.message } : undefined,
-        },
-      ]);
-      await writeArtifactFile(
-        options.junit,
-        xml,
-        Boolean(options.overwrite),
-        "JUnit",
-      );
-    } catch (err: unknown) {
-      artifactError = true;
-      const msg = err instanceof Error ? err.message : String(err);
-      if (options.output === "json") {
-        console.error(JSON.stringify({ error: { message: msg } }));
-      } else {
-        console.error(`Error writing JUnit file: ${msg}`);
-      }
-    }
-  }
-
-  if (options.csv) {
-    try {
-      const csv = generateCsv([
-        {
-          scenarioId,
-          execution,
-          error: executionError ? { message: executionError.message } : undefined,
-        },
-      ]);
-      await writeArtifactFile(
-        options.csv,
-        csv,
-        Boolean(options.overwrite),
-        "CSV",
-      );
-    } catch (err: unknown) {
-      artifactError = true;
-      const msg = err instanceof Error ? err.message : String(err);
-      if (options.output === "json") {
-        console.error(JSON.stringify({ error: { message: msg } }));
-      } else {
-        console.error(`Error writing CSV file: ${msg}`);
-      }
-    }
-  }
-
-  if (artifactError) return 1;
-  if (executionError) return 1;
-  return report?.status === "passed" ? 0 : 1;
+  return report.status === "passed" ? 0 : 1;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -944,71 +751,88 @@ async function runSuiteCommand(
     return 1;
   }
 
-  // 2. Execute sequentially with isolated gateway per scenario
-  const results: SuiteScenarioResult[] = [];
-  const suiteJunitRuns: ScenarioRunResultForJunit[] = [];
-  let suitePassed = true;
+  // 2. Execute sequentially with isolated gateway per scenario and overall signal/timeout wiring
+  const effectiveTimeout = options.timeoutMs ?? DEFAULT_CLI_TIMEOUT_MS;
 
-  if (options.output === "human") {
-    console.log(`\nRun suite: ${ids.length} scenario(s)\n`);
-  }
+  const suiteRun = await runWithSignalsAndTimeout(
+    effectiveTimeout,
+    options,
+    async (signal) => {
+      const results: SuiteScenarioResult[] = [];
+      let suitePassed = true;
 
-  for (const scenario of scenarios) {
-    if (options.output === "human") {
-      console.log(`Running: ${scenario.id} — ${scenario.name}`);
-    }
-
-    let result: SuiteScenarioResult;
-    let execution: LedgerExecution | undefined;
-    try {
-      const gateway = new StellarTestnetGateway(
-        "https://horizon-testnet.stellar.org",
-        "https://friendbot.stellar.org",
-      );
-      // Per-scenario isolated execution with progress callbacks in human mode
-      const execOptions = buildExecutionOptions(options);
-      execution = await gateway.execute(scenario, execOptions);
-      const report = buildRunReport(scenario, execution);
-      result = {
-        scenarioId: scenario.id,
-        status: report.status,
-        summary: report.summary,
-      };
-      suiteJunitRuns.push({
-        scenarioId: scenario.id,
-        execution,
-      });
-    } catch (error) {
-      const errObj = { message: error instanceof Error ? error.message : String(error) };
-      result = {
-        scenarioId: scenario.id,
-        status: "error",
-        error: errObj,
-      };
-      suiteJunitRuns.push({
-        scenarioId: scenario.id,
-        error: errObj,
-      });
-    }
-
-    results.push(result);
-    if (result.status !== "passed") suitePassed = false;
-
-    if (options.output === "human") {
-      const m = markers(options.ascii ?? false);
-      const marker = result.status === "passed" ? m.pass : m.fail;
-      if (result.status === "error") {
-        console.log(`  ${marker} ${scenario.id}: error — ${result.error?.message ?? "unknown"}\n`);
-      } else {
-        const s = result.summary!;
-        console.log(
-          `  ${marker} ${scenario.id}: ${result.status} (steps ${s.stepsPassed}/${s.stepsPassed + s.stepsFailed}, checks ${s.assertionsPassed}/${s.assertionsPassed + s.assertionsFailed})\n`,
-        );
+      if (options.output === "human") {
+        console.log(`\nRun suite: ${ids.length} scenario(s)\n`);
       }
-    }
 
-    if (!suitePassed && failFast) break;
+      for (const scenario of scenarios) {
+        if (signal.aborted) {
+          throw new SafeRunError({
+            code: "RUN_TIMEOUT",
+            message: "The run was cancelled after reaching its execution limit.",
+            category: "timeout",
+            retryable: true,
+          });
+        }
+
+        if (options.output === "human") {
+          console.log(`Running: ${scenario.id} — ${scenario.name}`);
+        }
+
+        let result: SuiteScenarioResult;
+        try {
+          const gateway = new StellarTestnetGateway(
+            "https://horizon-testnet.stellar.org",
+            "https://friendbot.stellar.org",
+          );
+          // Per-scenario isolated execution with progress callbacks in human mode
+          const execOptions = buildExecutionOptions(options, signal);
+          const execution = await gateway.execute(scenario, execOptions);
+          const report = buildRunReport(scenario, execution);
+          result = {
+            scenarioId: scenario.id,
+            status: report.status,
+            summary: report.summary,
+          };
+        } catch (error) {
+          if (signal.aborted) {
+            throw error;
+          }
+          result = {
+            scenarioId: scenario.id,
+            status: "error",
+            error: { message: error instanceof Error ? error.message : String(error) },
+          };
+        }
+
+        results.push(result);
+        if (result.status !== "passed") suitePassed = false;
+
+        if (options.output === "human") {
+          const m = markers(options.ascii ?? false);
+          const marker = result.status === "passed" ? m.pass : m.fail;
+          if (result.status === "error") {
+            console.log(`  ${marker} ${scenario.id}: error — ${result.error?.message ?? "unknown"}\n`);
+          } else {
+            const s = result.summary!;
+            console.log(
+              `  ${marker} ${scenario.id}: ${result.status} (steps ${s.stepsPassed}/${s.stepsPassed + s.stepsFailed}, checks ${s.assertionsPassed}/${s.assertionsPassed + s.assertionsFailed})\n`,
+            );
+          }
+        }
+
+        if (!suitePassed && failFast) break;
+      }
+
+      return { results, suitePassed };
+    },
+  );
+
+  if (suiteRun.exitCode !== undefined) {
+    return suiteRun.exitCode;
   }
+
+  const { results, suitePassed } = suiteRun.result!;
 
   // 3. Output final summary
   const passedCount = results.filter((r) => r.status === "passed").length;
@@ -1256,7 +1080,7 @@ async function main(): Promise<number> {
   const { command, args, options, failFast, parseError } = parseCliArgs();
 
   if (parseError) {
-    console.error(`Error: ${parseError}`);
+    reportArgumentError(parseError.message, parseError.usage, options.output);
     return 1;
   }
 
@@ -1280,8 +1104,11 @@ async function main(): Promise<number> {
       return listCommand(options);
     case "validate":
       if (args.length === 0) {
-        console.error("Error: Missing file path argument");
-        console.error("Usage: esure validate <file>");
+        reportArgumentError(
+          "Missing file path argument",
+          "Usage: esure validate <file>",
+          options.output,
+        );
         return 1;
       }
       if (args.length > 1) {
@@ -1318,8 +1145,11 @@ async function main(): Promise<number> {
         return runCommand(options.file, options, true);
       }
       if (args.length === 0) {
-        console.error("Error: Missing scenario ID or file path");
-        console.error("Usage: esure run <scenario-id> or esure run <file>");
+        reportArgumentError(
+          "Missing scenario ID or file path",
+          "Usage: esure run <scenario-id> or esure run <file>",
+          options.output,
+        );
         return 1;
       }
       if (args.length > 1) {
@@ -1330,8 +1160,11 @@ async function main(): Promise<number> {
       return runCommand(args[0], options, false);
     case "run-suite":
       if (args.length === 0) {
-        console.error("Error: Missing scenario IDs");
-        console.error("Usage: esure run-suite <id> [<id>...]");
+        reportArgumentError(
+          "Missing scenario IDs",
+          "Usage: esure run-suite <id> [<id>...]",
+          options.output,
+        );
         return 1;
       }
       return runSuiteCommand(args, options, failFast);
@@ -1345,8 +1178,11 @@ async function main(): Promise<number> {
     case "doctor":
       return doctorCommand(options);
     default:
-      console.error(`Error: Unknown command "${command}"`);
-      console.error('Run "esure --help" for usage information');
+      reportArgumentError(
+        `Unknown command "${command}"`,
+        'Run "esure --help" for usage information',
+        options.output,
+      );
       return 1;
   }
 }

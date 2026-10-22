@@ -267,13 +267,18 @@ Executes a scenario on Stellar Testnet.
 - `<target>`: Bundled scenario ID (e.g., `xlm-payment`) or path to scenario file
 
 **Options:**
-
-- `--output json`: Output execution report in JSON format
+- `--output, -o json`: Output execution report in JSON format
+- `--timeout-ms <ms>`: Overall run timeout in milliseconds (default: 120000)
+- `--ascii`: Use ASCII status markers (PASS/FAIL) instead of Unicode glyphs
 
 **Exit codes:**
 
 - `0`: All steps and assertions passed
-- `1`: One or more steps or assertions failed, or execution error
+- `1`: One or more steps or assertions failed, execution error, or run timeout
+- `130`: Interrupted by SIGINT
+- `143`: Terminated by SIGTERM
+
+When `--output json` is requested, argument errors and cancellation responses are emitted to `stderr` in a structured JSON error envelope (`{"error": {"code": "...", "message": "..."}}`).
 
 ### `esure run-suite <id> [<id>...]`
 
