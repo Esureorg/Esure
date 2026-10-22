@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApp } from "../src/app.js";
-import type { AppInstance } from "../src/app.js";
-import type { LedgerExecution, LedgerGateway, Scenario } from "../src/domain.js";
+import { closeAfterDrain, type AppInstance } from "../src/app.js";
+import type { LedgerExecution, LedgerExecutionOptions, LedgerGateway, Scenario } from "../src/domain.js";
 import type { AppConfig } from "../src/config.js";
 import { SafeRunError } from "../src/errors.js";
 import { DatabaseUnavailableError } from "../src/database.js";
+import type { RunLifecycleLog } from "../src/run-service.js";
 import { completeScenario } from "./fixtures.js";
 
 const config: AppConfig = {
@@ -16,6 +17,7 @@ const config: AppConfig = {
   runTimeoutMs: 5_000,
   stepTimeoutMs: 1_000,
   maxConcurrentRuns: 2,
+  metricsEnabled: false,
   maxConcurrentFriendbotRequests: 5,
   maxStoredRuns: 100,
   runRetentionMs: 60_000,
@@ -40,8 +42,18 @@ const ledger: LedgerGateway = {
 
 const apps: AppInstance[] = [];
 
-function createApp(options: { config?: AppConfig; ledger?: LedgerGateway; clock?: () => number } = {}) {
-  const app = buildApp({ config: options.config ?? config, ledger: options.ledger ?? ledger, ...(options.clock ? { clock: options.clock } : {}) });
+function createApp(options: {
+  config?: AppConfig;
+  ledger?: LedgerGateway;
+  clock?: () => number;
+  runLogger?: { info(fields: RunLifecycleLog): void };
+} = {}) {
+  const app = buildApp({
+    config: options.config ?? config,
+    ledger: options.ledger ?? ledger,
+    ...(options.clock ? { clock: options.clock } : {}),
+    ...(options.runLogger ? { runLogger: options.runLogger } : {}),
+  });
   apps.push(app);
   return app;
 }
@@ -56,6 +68,68 @@ describe("Esure API", () => {
     const response = await createApp().inject({ method: "GET", url: "/health" });
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual({ status: "ok", network: "testnet" });
+  });
+
+  it("disables process metrics unless explicitly enabled", async () => {
+    const response = await createApp().inject({ method: "GET", url: "/metrics" });
+    expect(response.statusCode).toBe(404);
+  });
+
+  it("exposes only bounded aggregate metrics when enabled", async () => {
+    const app = createApp({ config: { ...config, metricsEnabled: true } });
+    const response = await app.inject({ method: "GET", url: "/metrics" });
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["content-type"]).toContain("text/plain");
+    expect(response.body).toContain('esure_terminal_runs_total{outcome="passed"} 0');
+    expect(response.body).toContain('esure_rejected_run_starts_total{reason="capacity"} 0');
+    expect(response.body).toContain("esure_run_duration_seconds_count 0");
+    expect([...response.body.matchAll(/\{([^}]+)\}/g)].map((match) => match[1])).toEqual([
+      'outcome="passed"',
+      'outcome="failed"',
+      'reason="capacity"',
+      'reason="draining"',
+    ]);
+    expect(response.body).not.toContain("test-scenario");
+    expect(response.body).not.toContain("account");
+    expect(response.body).not.toContain("scenario=");
+  });
+
+  it("correlates structured run lifecycle logs with the request without logging its body", async () => {
+    const events: RunLifecycleLog[] = [];
+    const app = createApp({ runLogger: { info: (event) => events.push(event) } });
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/v1/runs",
+      headers: { "request-id": "request-correlation-1" },
+      payload: { scenarioId: "xlm-payment", inputs: {} },
+    });
+    const runId = response.json().id as string;
+    await vi.waitFor(() => expect(events).toHaveLength(2));
+
+    expect(events[0]).toMatchObject({
+      event: "run.started",
+      runId,
+      scenarioId: "xlm-payment",
+      scenarioVersion: 1,
+      requestId: expect.any(String),
+      status: "requested",
+    });
+    expect(events[1]).toMatchObject({
+      event: "run.completed",
+      runId,
+      requestId: events[0]!.requestId,
+      status: "passed",
+    });
+    expect(JSON.stringify(events)).not.toContain("inputs");
+    expect(Object.keys(events[0]!).sort()).toEqual([
+      "durationMs",
+      "event",
+      "requestId",
+      "runId",
+      "scenarioId",
+      "scenarioVersion",
+      "status",
+    ]);
   });
 
   it("reports explicitly disabled persistence readiness on the unchanged P1 path", async () => {
@@ -367,11 +441,102 @@ describe("Esure API", () => {
       const first = await app.inject({ method: "POST", url: "/api/v1/runs", payload: { scenarioId: "xlm-payment" } });
       const firstId = first.json().id as string;
       await vi.waitFor(async () => expect((await app.inject({ method: "GET", url: `/api/v1/runs/${firstId}` })).json().status).toBe("passed"));
+      const firstRead = await app.inject({ method: "GET", url: `/api/v1/runs/${firstId}` });
       // Starting a second run evicts the first terminal run once the store is at capacity.
       await app.inject({ method: "POST", url: "/api/v1/runs", payload: { scenarioId: "xlm-payment" } });
-      const evicted = await app.inject({ method: "GET", url: `/api/v1/runs/${firstId}` });
+      const evicted = await app.inject({
+        method: "GET",
+        url: `/api/v1/runs/${firstId}`,
+        headers: { "if-none-match": firstRead.headers.etag as string },
+      });
       expect(evicted.statusCode).toBe(404);
       expect(evicted.json().error.code).toBe("RUN_NOT_FOUND");
+    });
+  });
+
+  describe("conditional run report reads (#163)", () => {
+    it("returns a revalidation ETag and an empty 304 for an unchanged existing report", async () => {
+      const app = createApp();
+      const started = await app.inject({ method: "POST", url: "/api/v1/runs", payload: { scenarioId: "xlm-payment" } });
+      const id = started.json().id as string;
+      await vi.waitFor(async () => {
+        const response = await app.inject({ method: "GET", url: `/api/v1/runs/${id}` });
+        expect(response.json().status).toBe("passed");
+      });
+
+      const first = await app.inject({ method: "GET", url: `/api/v1/runs/${id}` });
+      const etag = first.headers.etag as string;
+      expect(etag).toMatch(/^"[a-f0-9]{64}"$/);
+      expect(first.headers["cache-control"]).toBe("no-cache");
+      expect(first.statusCode).toBe(200);
+
+      const unchanged = await app.inject({
+        method: "GET",
+        url: `/api/v1/runs/${id}`,
+        headers: { "if-none-match": `"stale", W/${etag}` },
+      });
+      expect(unchanged.statusCode).toBe(304);
+      expect(unchanged.body).toBe("");
+
+      const downloaded = await app.inject({ method: "GET", url: `/api/v1/runs/${id}/report` });
+      const downloadEtag = downloaded.headers.etag as string;
+      expect(downloaded.statusCode).toBe(200);
+      const unchangedDownload = await app.inject({
+        method: "GET",
+        url: `/api/v1/runs/${id}/report`,
+        headers: { "if-none-match": downloadEtag },
+      });
+      expect(unchangedDownload.statusCode).toBe(304);
+      expect(unchangedDownload.body).toBe("");
+    });
+
+    it("changes the ETag when evidence or terminal status changes", async () => {
+      let resolveExecution!: (execution: LedgerExecution) => void;
+      let executionOptions: LedgerExecutionOptions | undefined;
+      const activeLedger: LedgerGateway = {
+        execute: vi.fn((_scenario, options) => {
+          executionOptions = options;
+          return new Promise<LedgerExecution>((resolve) => { resolveExecution = resolve; });
+        }),
+      };
+      const app = createApp({ ledger: activeLedger });
+      const started = await app.inject({ method: "POST", url: "/api/v1/runs", payload: { scenarioId: "xlm-payment" } });
+      const id = started.json().id as string;
+      await vi.waitFor(() => expect(activeLedger.execute).toHaveBeenCalled());
+
+      const initial = await app.inject({ method: "GET", url: `/api/v1/runs/${id}` });
+      const initialTag = initial.headers.etag as string;
+      expect(initial.json().steps).toEqual([]);
+
+      const step = { id: "send-xlm", type: "payment", status: "passed" as const, message: "Confirmed." };
+      executionOptions?.onStep?.(step);
+      let evidenceRead = initial;
+      await vi.waitFor(async () => {
+        evidenceRead = await app.inject({ method: "GET", url: `/api/v1/runs/${id}` });
+        expect(evidenceRead.json().steps).toEqual([step]);
+      });
+      const evidenceTag = evidenceRead.headers.etag as string;
+      expect(evidenceTag).not.toBe(initialTag);
+      expect((await app.inject({
+        method: "GET",
+        url: `/api/v1/runs/${id}`,
+        headers: { "if-none-match": initialTag },
+      })).statusCode).toBe(200);
+
+      resolveExecution({ steps: [step], assertions: [] });
+      let terminalRead = evidenceRead;
+      await vi.waitFor(async () => {
+        terminalRead = await app.inject({ method: "GET", url: `/api/v1/runs/${id}` });
+        expect(terminalRead.json().status).toBe("passed");
+      });
+      expect(terminalRead.headers.etag).not.toBe(evidenceTag);
+      const terminalTag = terminalRead.headers.etag as string;
+      const unchangedTerminal = await app.inject({
+        method: "GET",
+        url: `/api/v1/runs/${id}`,
+        headers: { "if-none-match": terminalTag },
+      });
+      expect(unchangedTerminal.statusCode).toBe(304);
     });
   });
 
@@ -460,5 +625,62 @@ describe("Esure API", () => {
         expect(response.statusCode).toBe(503);
       }
     });
+  });
+});
+
+describe("graceful shutdown", () => {
+  it("keeps persistence open until an active run stores its final evidence", async () => {
+    let resolveExecution!: (execution: LedgerExecution) => void;
+    const execution = new Promise<LedgerExecution>((resolve) => { resolveExecution = resolve; });
+    const activeLedger: LedgerGateway = { execute: vi.fn(() => execution) };
+    const closeEvents: string[] = [];
+    const runs = new RunService(new InMemoryRunStore(), activeLedger, {
+      maxConcurrentRuns: 1,
+      runTimeoutMs: 5_000,
+      stepTimeoutMs: 1_000,
+    });
+    const persistenceClose = vi.fn(async () => {
+      closeEvents.push("persistence.close");
+    });
+    const app = { runs, close: async () => { await persistenceClose(); } };
+    const scenario = createScenarioRegistry().find("xlm-payment")!;
+    const run = await runs.start(scenario);
+    await vi.waitFor(() => expect(activeLedger.execute).toHaveBeenCalledTimes(1));
+
+    const closing = closeAfterDrain(app, 1_000);
+
+    expect(runs.draining).toBe(true);
+    expect(persistenceClose).not.toHaveBeenCalled();
+    await expect(runs.start(scenario)).rejects.toThrow("server is shutting down");
+    resolveExecution({
+      steps: [{ id: "send-xlm", type: "payment", status: "passed", message: "Confirmed." }],
+      assertions: [{ type: "balanceEquals", status: "passed", expected: "5", actual: "5", message: "Balance matched." }],
+    });
+
+    await closing;
+
+    expect(closeEvents).toEqual(["persistence.close"]);
+  expect(await runs.get(run.id)).toMatchObject({ status: "passed", completedAt: expect.any(String) });
+  });
+
+  it("closes persistence when the bounded drain deadline expires and clears its timer", async () => {
+    vi.useFakeTimers();
+    try {
+      const pendingDrain = new Promise<void>(() => {});
+      const persistenceClose = vi.fn(async () => {});
+      const app = {
+        runs: { drain: () => pendingDrain },
+        close: async () => { await persistenceClose(); },
+      };
+      const closing = closeAfterDrain(app, 100);
+
+      await vi.advanceTimersByTimeAsync(100);
+      await closing;
+
+      expect(persistenceClose).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

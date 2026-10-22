@@ -61,7 +61,9 @@ export const scenarioSchemaV1 = {
         { type: "object", additionalProperties: false, required: ["type", "step"], properties: { type: { enum: ["stepSucceeded", "transactionConfirmed"] }, step: id } },
         { type: "object", additionalProperties: false, required: ["type", "step", "transactionCode", "operationCodes"], properties: { type: { const: "stepFailedWith" }, step: id, transactionCode: resultCode, operationCodes: { type: "array", minItems: 0, maxItems: 100, items: resultCode } } },
         { type: "object", additionalProperties: false, required: ["type", "account", "asset"], properties: { type: { enum: ["trustlineExists", "trustlineMissing"] }, account: id, asset: id } },
-        { type: "object", additionalProperties: false, required: ["type", "account"], properties: { type: { const: "accountExists" }, account: id } },
+        { type: "object", additionalProperties: false, required: ["type", "account", "asset", "limit"], properties: { type: { const: "trustlineLimitEquals" }, account: id, asset: id, limit: positiveAmount } },
+        { type: "object", additionalProperties: false, required: ["type", "account"], properties: { type: { enum: ["accountExists", "accountMissing"] }, account: id } },
+        { type: "object", additionalProperties: false, required: ["type", "account", "asset", "amount", "step"], properties: { type: { const: "feeAwareNativeBalanceDelta" }, account: id, asset: id, amount: signedAmount, step: id } },
       ] },
     },
   },
@@ -124,7 +126,10 @@ function validateAmounts(scenario: ScenarioDefinition): void {
     if (step.type === "pathPaymentStrictReceive") values.push([`step ${step.id} sendMax`, step.sendMax], [`step ${step.id} destAmount`, step.destAmount]);
     if (step.type === "pathPaymentStrictSend") values.push([`step ${step.id} sendAmount`, step.sendAmount], [`step ${step.id} destMin`, step.destMin]);
   }
-  for (const assertion of scenario.assertions) if ("amount" in assertion) values.push([`assertion ${assertion.type} amount`, assertion.amount]);
+  for (const assertion of scenario.assertions) {
+    if ("amount" in assertion) values.push([`assertion ${assertion.type} amount`, assertion.amount]);
+    if (assertion.type === "trustlineLimitEquals") values.push([`assertion trustlineLimitEquals limit`, assertion.limit]);
+  }
   for (const [label, value] of values) {
     const absolute = value.startsWith("-") ? value.slice(1) : value;
     const [integer = "0", fraction = ""] = absolute.split(".");
@@ -196,6 +201,12 @@ function validateAssertionReferences(assertion: ScenarioAssertion, accounts: Set
   }
   if ((assertion.type === "trustlineExists" || assertion.type === "trustlineMissing") && scenario.assets.find((asset) => asset.id === assertion.asset)?.type === "native") {
     issues.push(`assertion ${assertion.type} cannot target native XLM`);
+  }
+  if (assertion.type === "trustlineLimitEquals" && scenario.assets.find((asset) => asset.id === assertion.asset)?.type === "native") {
+    issues.push("assertion trustlineLimitEquals cannot target native XLM");
+  }
+  if (assertion.type === "feeAwareNativeBalanceDelta" && assets.has(assertion.asset) && scenario.assets.find((asset) => asset.id === assertion.asset)?.type !== "native") {
+    issues.push("assertion feeAwareNativeBalanceDelta must target the native XLM asset");
   }
 }
 

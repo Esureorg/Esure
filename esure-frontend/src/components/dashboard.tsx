@@ -106,6 +106,7 @@ export function Dashboard() {
   const [pollingError, setPollingError] = useState<string | null>(null);
   const [consecutiveFailures, setConsecutiveFailures] = useState(0);
   const [isOffline, setIsOffline] = useState(false);
+  const [isBrowserOffline, setIsBrowserOffline] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<"report" | "compare">("report");
   const [reportFilter, setReportFilter] = useState<ReportFilter>("all");
@@ -133,6 +134,8 @@ export function Dashboard() {
 
   // Favorites state (#154)
   const [favorites, setFavorites] = useState<Set<string>>(() => getFavorites());
+  const reconnectedRef = useRef(false);
+  const browserOfflineRef = useRef(false);
 
   // Idempotency key for run creation (#151)
   const [runIdempotencyKey, setRunIdempotencyKey] = useState<string>(() => crypto.randomUUID());
@@ -142,10 +145,34 @@ export function Dashboard() {
   const searchParams = useSearchParams();
   const runIdParam = searchParams?.get("runId");
 
+  useEffect(() => {
+    function handleOffline() {
+      browserOfflineRef.current = true;
+      setIsBrowserOffline(true);
+    }
+
+    function handleOnline() {
+      if (browserOfflineRef.current) reconnectedRef.current = true;
+      browserOfflineRef.current = false;
+      setIsBrowserOffline(false);
+    }
+
+    browserOfflineRef.current = !navigator.onLine;
+    setIsBrowserOffline(browserOfflineRef.current);
+    window.addEventListener("offline", handleOffline);
+    window.addEventListener("online", handleOnline);
+
+    return () => {
+      window.removeEventListener("offline", handleOffline);
+      window.removeEventListener("online", handleOnline);
+    };
+  }, []);
+
   // --- #31: read category from URL on first render ---
   const [filter, setFilter] = useState<ScenarioFilter>(() =>
     parseCategory(searchParams?.get("category") ?? null),
   );
+  const categoryTabRefs = useRef<Partial<Record<ScenarioFilter, HTMLButtonElement>>>({});
 
   // Sync filter, search, and sort with URL (#31, #153)
   const prevStateRef = useRef<{ filter: ScenarioFilter; search: string; sort: SortOrder }>({
@@ -346,8 +373,9 @@ export function Dashboard() {
   }, [filteredScenarios, selectedId]);
 
   useEffect(() => {
-    if (!run || isOffline || terminalStatuses.has(run.status)) return;
-    if (consecutiveFailures >= 5) return; // Exhausted retries
+    if (!run || isOffline || isBrowserOffline || !navigator.onLine || terminalStatuses.has(run.status)) return;
+    const reconnectRead = reconnectedRef.current;
+    if (consecutiveFailures >= 5 && !reconnectRead) return; // Exhausted retries
 
     const activeRunId = run.id;
     let active = true;
@@ -420,7 +448,12 @@ export function Dashboard() {
 
     const delay = consecutiveFailures === 0 ? 1000 : Math.pow(2, consecutiveFailures - 1) * 1000;
     document.addEventListener("visibilitychange", handleVisibilityChange);
-    schedule(delay);
+    if (reconnectRead) {
+      reconnectedRef.current = false;
+      void poll();
+    } else {
+      schedule(delay);
+    }
 
     return () => {
       active = false;
@@ -429,7 +462,7 @@ export function Dashboard() {
       inFlightController?.abort();
       if (timerId !== null) window.clearTimeout(timerId);
     };
-  }, [run, isOffline, consecutiveFailures]);
+  }, [run, isOffline, isBrowserOffline, consecutiveFailures]);
 
   const selected = useMemo(() => scenarios.find((scenario) => scenario.id === selectedId), [scenarios, selectedId]);
 
@@ -553,21 +586,55 @@ export function Dashboard() {
         </div>
 
         {/* Filters row */}
-        <div className="scenario-filters" role="tablist" aria-label="Scenario filter options">
+        <div
+          className="scenario-filters"
+          role="tablist"
+          aria-label="Scenario filter options"
+          aria-describedby="scenario-filter-instructions"
+        >
           {FILTER_OPTIONS.map((option) => (
             <button
               key={option.key}
+              id={`scenario-tab-${option.key}`}
+              ref={(element) => {
+                categoryTabRefs.current[option.key] = element ?? undefined;
+              }}
               type="button"
               role="tab"
               aria-selected={filter === option.key}
+              tabIndex={filter === option.key ? 0 : -1}
               aria-controls="scenario-grid"
               className={`filter-pill ${filter === option.key ? "active" : ""}`}
               onClick={() => setFilter(option.key)}
+              onKeyDown={(event) => {
+                const currentIndex = FILTER_OPTIONS.findIndex((item) => item.key === option.key);
+                let nextIndex: number | null = null;
+                if (event.key === "ArrowRight") {
+                  nextIndex = (currentIndex + 1) % FILTER_OPTIONS.length;
+                } else if (event.key === "ArrowLeft") {
+                  nextIndex = (currentIndex - 1 + FILTER_OPTIONS.length) % FILTER_OPTIONS.length;
+                } else if (event.key === "Home") {
+                  nextIndex = 0;
+                } else if (event.key === "End") {
+                  nextIndex = FILTER_OPTIONS.length - 1;
+                }
+
+                if (nextIndex !== null) {
+                  event.preventDefault();
+                  categoryTabRefs.current[FILTER_OPTIONS[nextIndex].key]?.focus();
+                } else if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  setFilter(option.key);
+                }
+              }}
             >
               {option.label}
             </button>
           ))}
         </div>
+        <p id="scenario-filter-instructions" className="sr-only">
+          Use the Left and Right Arrow keys or Home and End to move between filters. Press Enter or Space to apply the focused filter.
+        </p>
 
         {/* Search + Sort toolbar (#29 #30) */}
         <div className="catalogue-toolbar">
@@ -632,7 +699,14 @@ export function Dashboard() {
           </div>
         )}
 
-        <div className="scenario-grid" id="scenario-grid" aria-busy={loading}>
+        <div
+          className="scenario-grid"
+          id="scenario-grid"
+          role="tabpanel"
+          aria-labelledby={`scenario-tab-${filter}`}
+          tabIndex={0}
+          aria-busy={loading}
+        >
           {loading ? (
             [1, 2, 3].map((item) => <div className="scenario-card skeleton" key={item} />)
           ) : catalogueError ? (
@@ -748,6 +822,11 @@ export function Dashboard() {
       </section>
 
       <section className="results shell">
+        {isBrowserOffline && (
+          <p className="browser-offline-banner" role="status" aria-live="polite">
+            You are offline. Run updates are paused and will resume when your connection returns.
+          </p>
+        )}
         <div className="section-heading">
           <div><p className="eyebrow">02 / INSPECT THE RUN</p><h2>{viewMode === "compare" ? "Report comparison" : "Execution report"}</h2></div>
           <div className="report-controls">
@@ -882,6 +961,10 @@ function RunView({ run, reportFilter, scenarioName }: { run: RunReport; reportFi
 
   const createdLabel = formatLocaleDateTime(run.createdAt);
   const completedLabel = run.completedAt ? formatLocaleDateTime(run.completedAt) : null;
+  const expiryTimestamp = typeof run.expiresAt === "string" ? Date.parse(run.expiresAt) : NaN;
+  const expiryDate = Number.isFinite(expiryTimestamp) ? new Date(expiryTimestamp) : null;
+  const expiryIso = expiryDate?.toISOString();
+  const expiryLabel = expiryIso ? formatLocaleDateTime(expiryIso) : null;
   const durationLabel = run.completedAt
     ? computeDuration(run.createdAt, run.completedAt)
     : isTerminal
@@ -954,6 +1037,12 @@ function RunView({ run, reportFilter, scenarioName }: { run: RunReport; reportFi
           {completedLabel ? <><span>COMPLETED</span><code title={run.completedAt}>{completedLabel}</code></> : null}
           {durationLabel ? <><span>DURATION</span><code aria-live="off" data-testid="run-duration">{durationLabel}</code></> : null}
         </div>
+        {expiryIso && expiryLabel && (
+          <p className="report-expiration-hint">
+            Best-effort report retention deadline: <time dateTime={expiryIso}>{expiryLabel}</time> (local time).
+            Retention is not guaranteed; a report already loaded stays visible here.
+          </p>
+        )}
         {!isTerminal && <div className="running-row"><span className="spinner" /><div><strong>{titleCase(run.status)}</strong><span>Esure is executing this flow on Stellar Testnet.</span></div></div>}
         {reportFilter === "failed" && visibleSteps.length === 0 && visibleAssertions.length === 0 && (
           <div className="empty-checks" role="status">

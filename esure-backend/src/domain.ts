@@ -32,7 +32,9 @@ export type ScenarioAssertion =
   | { type: "stepSucceeded" | "transactionConfirmed"; step: string }
   | { type: "stepFailedWith"; step: string; transactionCode: string; operationCodes: string[] }
   | { type: "trustlineExists" | "trustlineMissing"; account: string; asset: string }
-  | { type: "accountExists"; account: string };
+  | { type: "trustlineLimitEquals"; account: string; asset: string; limit: string }
+  | { type: "accountExists" | "accountMissing"; account: string }
+  | { type: "feeAwareNativeBalanceDelta"; account: string; asset: string; amount: string; step: string };
 
 export interface ScenarioDefinition {
   schemaVersion: 1;
@@ -60,6 +62,8 @@ export interface StepResult {
   status: StepStatus;
   transactionHash?: string;
   ledger?: number;
+  /** Actual fee charged for this transaction in stroops (integer string). Present only when fee evidence is available from the confirmed transaction. */
+  feeCharged?: string;
   stellarTransactionCode?: string;
   stellarOperationCodes?: string[];
   message: string;
@@ -123,6 +127,7 @@ export interface RunReport {
   status: RunStatus;
   createdAt: string;
   completedAt?: string;
+  expiresAt?: string;
   steps: StepResult[];
   assertions: AssertionResult[];
   summary: RunSummary;

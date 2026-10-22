@@ -37,6 +37,10 @@ assertions:
     step: fill-trustline
   - type: transactionConfirmed
     step: fill-trustline
+  - type: trustlineLimitEquals
+    account: recipient
+    asset: limited-asset
+    limit: "100.1234567"
   - type: balanceEquals
     account: recipient
     asset: limited-asset

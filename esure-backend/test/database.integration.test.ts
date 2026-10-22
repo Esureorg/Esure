@@ -40,7 +40,7 @@ const postgresAvailable = process.platform !== "win32" || existsSync("C:/Windows
     await runMigrations(database, undefined, "esure_migrations");
     await runMigrations(database, undefined, "esure_migrations");
     const result = await database.query<{ count: string }>("SELECT count(*)::text AS count FROM schema_migrations");
-    expect(result.rows[0]?.count).toBe("3");
+    expect(result.rows[0]?.count).toBe("4");
   });
 
   it("detects a modified migration checksum", async () => {
@@ -275,7 +275,7 @@ const postgresAvailable = process.platform !== "win32" || existsSync("C:/Windows
 function databaseConfig(databaseUrl: string): AppConfig {
   return {
     host: "127.0.0.1", port: 3001, logLevel: "silent", horizonUrl: "https://horizon-testnet.stellar.org", friendbotUrl: "https://friendbot.stellar.org",
-    runTimeoutMs: 5_000, stepTimeoutMs: 1_000, maxConcurrentRuns: 2, maxConcurrentFriendbotRequests: 5, maxStoredRuns: 100, runRetentionMs: 60_000,
+    runTimeoutMs: 5_000, stepTimeoutMs: 1_000, maxConcurrentRuns: 2, metricsEnabled: false, maxConcurrentFriendbotRequests: 5, maxStoredRuns: 100, runRetentionMs: 60_000,
     rateLimitMax: 100, runRateLimitMax: 50, rateLimitWindowMs: 60_000, bodyLimitBytes: 16_384,
     persistenceMode: "published", databaseUrl, databasePoolMax: 5, databaseConnectionTimeoutMs: 5_000, databaseQueryTimeoutMs: 5_000, databaseIdleTimeoutMs: 10_000,
     runPersistenceEnabled: false,

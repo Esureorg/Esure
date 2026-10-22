@@ -121,6 +121,15 @@ describe("frontend API response validation", () => {
     await expect(startRun("xlm-payment")).resolves.toEqual(run);
   });
 
+  it("accepts optional expiry metadata without rejecting a report with malformed metadata", async () => {
+    const expiresAt = "2026-10-16T00:15:00.000Z";
+    mockResponse(JSON.stringify({ ...run, expiresAt }));
+    await expect(getRun("run-123")).resolves.toMatchObject({ ...run, expiresAt });
+
+    mockResponse(JSON.stringify({ ...run, expiresAt: { invalid: true } }));
+    await expect(getRun("run-123")).resolves.toMatchObject({ ...run, expiresAt: { invalid: true } });
+  });
+
   it("does not expose malformed upstream bodies for unsuccessful responses", async () => {
     mockResponse("<html>private upstream diagnostic</html>", 502);
 
