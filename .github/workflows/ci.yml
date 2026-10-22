@@ -73,6 +73,9 @@ jobs:
       - name: Typecheck CLI
         working-directory: esure-cli
         run: npm run typecheck
+      - name: Test CLI
+        working-directory: esure-cli
+        run: npm run test
       - name: Build CLI
         working-directory: esure-cli
         run: npm run build
