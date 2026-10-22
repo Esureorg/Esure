@@ -139,8 +139,17 @@ function validateAmounts(scenario: ScenarioDefinition): void {
   if (issues.length) throw new ScenarioValidationError(issues);
 }
 
+/**
+ * Issue #86: step identifiers that the runner generates internally and that
+ * must not be used in user-authored scenario definitions.
+ */
+const RESERVED_STEP_IDS = new Set(["fund-accounts"]);
+
 function validateReferences(scenario: ScenarioDefinition): void {
   const issues: string[] = [];
+  for (const step of scenario.steps) {
+    if (RESERVED_STEP_IDS.has(step.id)) issues.push(`step id ${step.id} is reserved and cannot be used in a scenario definition`);
+  }
   const accounts = uniqueIds(scenario.accounts, "accounts", issues);
   const assets = uniqueIds(scenario.assets, "assets", issues);
   const steps = uniqueIds(scenario.steps, "steps", issues);

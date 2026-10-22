@@ -192,7 +192,7 @@ export class StellarTestnetGateway implements LedgerGateway {
 
     for (const definition of scenario.assertions) {
       try {
-        const result = await this.evaluateAssertion(definition, accounts, assets, outcomes, initialBalances, steps, options);
+        const result = withSubjectRefs(await this.evaluateAssertion(definition, accounts, assets, outcomes, initialBalances, options), definition);
         recordAssertion(assertions, result, options);
       } catch (error) {
         throw normalizeStellarError(error, `assert-${definition.type}`);
@@ -607,6 +607,18 @@ function failureStep(definition: Pick<ScenarioStep, "id" | "type">, safe: SafeRu
 function comparison(type: AssertionResult["type"], expected: AssertionResult["expected"], actual: AssertionResult["actual"], success: string): AssertionResult {
   const passed = JSON.stringify(actual) === JSON.stringify(expected);
   return { type, status: passed ? "passed" : "failed", expected, actual, message: passed ? success : `Expected ${JSON.stringify(expected)}, received ${JSON.stringify(actual)}.` };
+}
+
+/**
+ * Issue #84: attach bounded optional subject references from the assertion
+ * definition onto the result so clients can identify what was tested.
+ */
+function withSubjectRefs(result: AssertionResult, definition: ScenarioAssertion): AssertionResult {
+  const refs: { account?: string; asset?: string; step?: string } = {};
+  if ("account" in definition) refs.account = definition.account;
+  if ("asset" in definition) refs.asset = definition.asset;
+  if ("step" in definition) refs.step = definition.step;
+  return Object.keys(refs).length ? { ...result, ...refs } : result;
 }
 
 export function balanceDeltaAssertion(before: string, after: string, expectedDelta: string, success: string): AssertionResult {
