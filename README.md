@@ -229,8 +229,20 @@ npm run build
 # List bundled scenarios
 node dist/cli.js list
 
+# Filter and sort scenarios
+node dist/cli.js list --search payment --sort id
+
+# Show a bundled scenario definition
+node dist/cli.js show xlm-payment
+
 # Validate a scenario file
 node dist/cli.js validate ./my-scenario.yaml
+
+# Validate a scenario from standard input
+cat ./my-scenario.json | node dist/cli.js validate --stdin --format json
+
+# Validate a directory of scenario files
+node dist/cli.js validate-directory ./scenarios
 
 # Run a bundled scenario
 node dist/cli.js run xlm-payment
