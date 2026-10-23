@@ -633,6 +633,15 @@ export function matchesFailure(error: unknown, transactionCode: string, operatio
 
 export function isExpectedMissingTrustlineError(error: unknown): boolean { return matchesFailure(error, "tx_failed", ["op_no_trust"]); }
 
+export function isExpectedMissingTrustlineErrorFor(
+  error: unknown,
+  asset: Asset,
+  expectedIssuer: string,
+): boolean {
+  if (!isExpectedMissingTrustlineError(error)) return false;
+  return asset.getIssuer() === expectedIssuer;
+}
+
 export function normalizeStellarError(error: unknown, failedStepId: string): SafeRunError {
   if (error instanceof SafeRunError) { if (!error.report.failedStepId) error.report.failedStepId = failedStepId; return error; }
   const codes = extractStellarResultCodes(error);

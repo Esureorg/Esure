@@ -2,10 +2,20 @@ schemaVersion: 1
 id: missing-trustline
 version: 1
 name: Missing trustline
-description: Verify that an asset payment fails when the recipient has no trustline.
+description: >-
+  Verify that an asset payment fails when the recipient has no trustline.
+  Two issued assets share the same code TESTUSD but are issued by distinct
+  issuer accounts. The recipient trusts only the first issuer, so a payment
+  using the second issuer's asset must fail with a missing-trustline
+  operation code. This exercises issuer-aware failure matching: a matching
+  asset code alone must not satisfy the trustline requirement, because the
+  recipient's trustline is bound to a different issuer identity.
 network: testnet
 accounts:
-  - id: issuer
+  - id: issuer-a
+    generate: true
+    fund: true
+  - id: issuer-b
     generate: true
     fund: true
   - id: recipient
@@ -14,20 +24,35 @@ accounts:
 assets:
   - id: xlm
     type: native
-  - id: test-usd
+  - id: test-usd-a
     type: issued
     code: TESTUSD
-    issuer: issuer
+    issuer: issuer-a
+  - id: test-usd-b
+    type: issued
+    code: TESTUSD
+    issuer: issuer-b
 steps:
-  - id: send-testusd
+  - id: trust-testusd-a
+    type: changeTrust
+    account: recipient
+    asset: test-usd-a
+    limit: "1000"
+  - id: send-testusd-b
     type: payment
-    from: issuer
+    from: issuer-b
     to: recipient
-    asset: test-usd
+    asset: test-usd-b
     amount: "100"
 assertions:
   - type: stepFailedWith
-    step: send-testusd
+    step: send-testusd-b
     transactionCode: tx_failed
     operationCodes:
       - op_no_trust
+  - type: trustlineExists
+    account: recipient
+    asset: test-usd-a
+  - type: trustlineBalanceUnchanged
+    account: recipient
+    asset: test-usd-a
