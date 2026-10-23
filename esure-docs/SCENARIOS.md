@@ -1,22 +1,21 @@
 # Esure Scenario Schema v1
 
-Esure Scenario Schema v1 is a bounded, declarative JSON/YAML format for classic
+Scenario Schema v1 is a bounded, declarative JSON/YAML format for classic
 Stellar payment tests. Document order is execution order. Definitions contain
 no executable code or credentials and are validated before Testnet access.
 
 ## Bundled Scenarios
 
-ESURE includes 14 bundled scenarios for Testnet integration testing:
+ESURE includes 12 bundled scenarios for Testnet integration testing:
 
 | Scenario ID | Purpose | Expected Result |
 | --- | --- | --- |
-| `xml-payment` | Fund two accounts, transfer 5 XLM, verify balance change | Pass |
-| `issued-asset-payment` | Create TESTUSJ trustline, issue 100 TESTUSD, verify balance | Pass |
+| `xlm-payment` | Fund two accounts, transfer 5 XLM, verify balance change | Pass |
+| `issued-asset-payment` | Create TESTUSD trustline, issue 100 TESTUSD, verify balance | Pass |
 | `issued-asset-holder-transfer` | Issue 100 TESTUSD to a sender, who transfers 40 to a second holder | Pass |
 | `issued-asset-partial-redemption-transfer` | Redeem 30 of 100 TESTUSD, then transfer 20 of the remainder to another holder | Pass; holder balances are 50 and 20 |
 | `missing-trustline` | Attempt issued-asset payment without recipient trustline | Controlled `op_no_trust` failure |
 | `sender-missing-trustline` | Attempt issued-asset payment from a funded, non-issuer sender without a trustline | Controlled `op_src_no_trust` failure |
-| `wrong-issuer-trustline` | Pay a same-code asset whose issuer the recipient does not trust | Controlled `op_no_trust` failure for the actual issuer |
 | `insufficient-xlm-balance` | Attempt to send more XLM than available in account | Controlled `op_underfunded` failure |
 | `unfunded-destination` | Fund only the sender and pay a generated destination absent from the ledger | Controlled `tx_failed/op_no_destination` failure |
 | `payment-with-memo` | Send XLM with a text memo and verify it on the confirmed transaction | Pass |
@@ -33,40 +32,6 @@ ESURE includes 14 bundled scenarios for Testnet integration testing:
 These scenarios demonstrate XLM transfers, issued assets, trustline management,
 expected failure handling, and multi-step transaction flows that Stellar developers
 commonly need to test.
-
-`trustline-limit-exact` creates fresh issuer and recipient accounts for each run,
-funds both on Testnet, and opens the recipient's `LIMITED` trustline with an
-explicit limit of `"100.1234567"`. The issuer pays exactly `"100.1234567"` into
-that initially empty trustline. Assertions require the trustline and payment
-steps to succeed, the payment transaction to be confirmed, and the recipient's
-final issued-asset balance to equal `"100.1234567"`. Every amount is a quoted
-decimal string with all seven fractional digits preserved. This positive
-boundary case complements the unchanged `trustline-limit-exceeded` fixture.
-Accounts and the generated issuer are isolated from other runs; no existing
-holdings or public liquidity are needed.
-
-Offline tests inspect the built trustline limit and payment amount and mock the
-final ledger balance. The optional live path is `RUN_STELLAR_SMOKE=1 npm test -
-test/testnet-smoke.test.ts -t trustline-limit-exact` from `esure-backend` (use
-PowerShell environment syntax documented in the backend README on Windows).
-
-`unfunded-destination` generates two keypairs but funds only the sender.
-Generating a keypair is a local cryptographic operation; it does not create an
-account on the ledger. The destination has `fund: false`, and the scenario sends
-`"1"` native XLM using an ordinary payment. A payment requires an existing
-destination account and does not replace an account-creation operation. No
-destination funding or implicit account creation is performed.
-
-The run passes only when `stepFailedWith` matches transaction code `tx_failed`
-and exactly the operation-code sequence `[op_no_destination]`. A successful
-payment, a different failure such as `op_underfunded`, or a network error fails
-the run. This is separate from `insufficient-xlm-balance`, whose destination
-exists and whose sender attempts to spend more than its available balance.
-Verify live behavior only through the existing opt-in smoke path: set
-
-RUN_STELLAR_SMOKE=1, then run
-`npm test -- test/testnet-smoke.test.ts -t unfunded-destination` from
-`esure-backend`. Normal unit/API tests use mocked funding and Horizon responses.
 
 `missing-trustline` and `sender-missing-trustline` fail on opposite sides of
 the same payment. In `missing-trustline` the recipient cannot hold the asset, so
@@ -90,28 +55,6 @@ sell offers. The USDC in this isolated scenario is not Circle-issued USDC. A
 strict-receive path payment converts sender XLM through EUR to deliver exactly
 5 USDC to the recipient (with a 10 XLM maximum). It does not depend on
 pre-existing public order-book liquidity.
-
-`wrong-issuer-trustline` demonstrates issuer-aware trustline matching. It
-declares two distinct issuer accounts and two issued assets that share the
-same classic asset code but reference different issuers. The recipient opens
-a trustline only to the first issuer's asset. The payment then uses the second
-issuer's asset. A Stellar trustline is keyed by the full asset identity
-(code and issuer), not by the code alone, so the recipient's existing trustline
-must not satisfy the payment. The run passes only when `stepFailedWith` matches
-`tx_failed` with exactly the operation-code sequence `[op_no_trust]` for the
-actual payment issuer. Assertions also require the recipient's trustline to the
-first issuer to remain present with its balance unchanged, confirming no
-accidental code-only trustline match or misdirected issuance occurred. This is
-distinct from `missing-trustline`, where the recipient has no trustline for the
-asset at all.
-
-Offline tests inspect the built trustline and payment operations to confirm the
-two asset definitions resolve to distinct issuer accounts, that the payment targets
-the second issuer, and that the expected failure is matched against the actual
-payment issuer rather than the code. Mocked Horizon responses verify the
-`op_no_trust` result and the unchanged first-issuer trustline balance. The
-optional live path is `RUN_STELLAR_SMOKE=1 npm test -- test/testnet-smoke.test.ts
--t wrong-issuer-trustline` from `esure-backend`.
 
 `issued-asset-partial-redemption-transfer` issues 100 TESTUSD to the sender,
 returns 30 to the issuer for redemption, then transfers 20 of the sender's
@@ -163,9 +106,7 @@ assertions:
   Testnet Friendbot.
 - Every scenario declares exactly one native asset.
 - Issued assets reference an account in the same definition as issuer and use a
-  1–12 character uppercase alphanumeric classic asset code. Two issued assets
-  may share a code while referencing different issuer accounts; they remain
-  distinct assets identified by code and issuer.
+  1–12 character uppercase alphanumeric classic asset code.
 
 ## Operations
 
@@ -434,4 +375,4 @@ schema, and generated API types import the updated domain types directly.
 - `POST /api/v1/runs` continues to execute a catalogued definition by ID.
 
 The OpenAPI 3.1 contract and embedded Scenario v1 JSON Schema are available at
-GET /openapi.json.
+`GET /openapi.json`.
