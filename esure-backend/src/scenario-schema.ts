@@ -100,7 +100,7 @@ function validateSafeValues(value: unknown): void {
   const visit = (item: unknown, path: string): void => {
     if (typeof item === "string") {
       if (/S[A-Z2-7]{55}/.test(item)) issues.push(`${path} must not contain a Stellar secret seed`);
-      if (/\b(?:https|ftp|file):\/\//i.test(item)) issues.push(`${path} must not contain a URL`);
+      if (/\b(?:https?|ftp|file):\/\//i.test(item)) issues.push(`${path} must not contain a URL`);
       return;
     }
     if (Array.isArray(item)) { item.forEach((child, index) => visit(child, `${path}/${index}`)); return; }
@@ -184,19 +184,11 @@ function validateReferences(scenario: ScenarioDefinition): void {
       if (new Set(step.path).size !== step.path.length) issues.push(`step ${step.id} path contains duplicate assets`);
       for (const assetId of step.path) {
         if (!assets.has(assetId)) issues.push(`step ${step.id} references unknown path asset ${assetId}`);
+        if (assetId === step.sendAsset || assetId === step.destAsset) issues.push(`step ${step.id} path must contain only intermediate assets`);
       }
     }
   }
-  for (const assertion of scenario.assertions) {
-    if (assertion.type === "transactionMemoEquals" || assertion.type === "stepSucceeded" || assertion.type === "transactionConfirmed" || assertion.type === "stepFailedWith") {
-      if (!steps.has(assertion.step)) issues.push(`assertion ${assertion.type} references unknown step ${assertion.step}`);
-    } else if (assertion.type === "accountExists") {
-      if (!accounts.has(assertion.account)) issues.push(`assertion accountExists references unknown account ${assertion.account}`);
-    } else {
-      if (!accounts.has(assertion.account)) issues.push(`assertion ${assertion.type} references unknown account ${assertion.account}`);
-      if (!assets.has(assertion.asset)) issues.push(`assertion ${assertion.type} references unknown asset ${assertion.asset}`);
-    }
-  }
+  for (const assertion of scenario.assertions) validateAssertionReferences(assertion, accounts, assets, steps, scenario, issues);
   if (issues.length) throw new ScenarioValidationError(issues);
 }
 
@@ -219,18 +211,14 @@ function validateAssertionReferences(assertion: ScenarioAssertion, accounts: Set
 }
 
 function uniqueIds(items: readonly { id: string }[], label: string, issues: string[]): Set<string> {
-  const seen = new Set<string>();
+  const ids = new Set<string>();
   for (const item of items) {
-    if (seen.has(item.id)) issues.push(`${label} contains duplicate id ${item.id}`);
-    seen.add(item.id);
+    if (ids.has(item.id)) issues.push(`${label} contains duplicate id ${item.id}`);
+    ids.add(item.id);
   }
-  return seen;
+  return ids;
 }
 
-function formatAjvErrors(errors: ErrorObject[] | null): string[] {
-  if (!errors) return [];
-  return errors.map((error) => {
-    const path = error.instancePath || "/";
-    return `${path} ${error.message ?? "is invalid"}`;
-  });
+function formatAjvErrors(errors: ErrorObject[] | null | undefined): string[] {
+  return (errors ?? []).slice(0, 50).map((error) => `${error.instancePath || "/"} ${error.message ?? "is invalid"}`);
 }

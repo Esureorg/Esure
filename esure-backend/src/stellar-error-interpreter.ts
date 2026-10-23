@@ -1,4 +1,4 @@
-/*
+/**
  * Developer-friendly interpretation of Stellar transaction and operation result codes.
  *
  * This module maps low-level Stellar result codes to actionable error messages
@@ -198,13 +198,11 @@ const OPERATION_CODE_INTERPRETATIONS: Record<string, StellarErrorInterpretation>
     causes: [
       "Recipient never created trustline",
       "Trustline was removed",
-      "Wrong asset code or issuer",
-      "Recipient holds a trustline for the same asset code but a different issuer"
+      "Wrong asset code or issuer"
     ],
     suggestions: [
       "Recipient must create trustline before receiving asset",
       "Verify asset code and issuer are correct",
-      "Confirm the trustline issuer matches the payment issuer, not just the asset code",
       "Check trustline still exists"
     ],
     retryable: true,
@@ -321,31 +319,93 @@ const OPERATION_CODE_INTERPRETATIONS: Record<string, StellarErrorInterpretation>
       "Authorization flags not set correctly"
     ],
     suggestions: [
-      "Source account must request authorization from the issuer",
-      "Check the asset's authorization required flag",
-      "Verify the issuer matches the asset trustline"
+      "Source account must request authorization from issuer",
+      "Check asset authorization requirements"
     ],
+    retryable: true,
+  },
+  op_src_no_trust: {
+    summary: "Source has no trustline",
+    explanation: "The operation's source account has not established a trustline for this asset.",
+    causes: ["Source account never created required trustline"],
+    suggestions: ["Source account must create trustline first"],
     retryable: true,
   },
 };
 
 /**
- * Interpret a transaction-level result code.
+ * Get developer-friendly interpretation for a Stellar transaction result code.
  */
-export function interpretTransactionCode(code: string): StellarErrorInterpretation | undefined {
-  return TRANSACTION_CODE_INTERPRETATIONS[code];
+export function interpretTransactionCode(code: string): StellarErrorInterpretation {
+  return TRANSACTION_CODE_INTERPRETATIONS[code] ?? {
+    summary: `Unknown transaction error: ${code}`,
+    explanation: "This transaction error code is not recognized. It may be from a newer protocol version.",
+    causes: ["Unknown error code"],
+    suggestions: ["Check Stellar documentation for this code", "Verify you're using the latest SDK version"],
+    retryable: false,
+  };
 }
 
 /**
- * Interpret an operation-level result code.
+ * Get developer-friendly interpretation for a Stellar operation result code.
  */
-export function interpretOperationCode(code: string): StellarErrorInterpretation | undefined {
-  return OPERATION_CODE_INTERPRETATIONS[code];
+export function interpretOperationCode(code: string): StellarErrorInterpretation {
+  return OPERATION_CODE_INTERPRETATIONS[code] ?? {
+    summary: `Unknown operation error: ${code}`,
+    explanation: "This operation error code is not recognized. It may be from a newer protocol version.",
+    causes: ["Unknown error code"],
+    suggestions: ["Check Stellar documentation for this code", "Verify you're using the latest SDK version"],
+    retryable: false,
+  };
 }
 
 /**
- * Interpret any Stellar result code, preferring operation-level matches.
+ * Generate a comprehensive human-readable error message from Stellar result codes.
  */
-export function interpretStellarError(code: string): StellarErrorInterpretation | undefined {
-  return interpretOperationCode(code) ?? interpretTransactionCode(code);
+export function explainStellarError(
+  transactionCode: string,
+  operationCodes: string[],
+): string {
+  const txInterpretation = interpretTransactionCode(transactionCode);
+  const parts: string[] = [];
+
+  parts.push(`Transaction failed: ${txInterpretation.summary}`);
+  parts.push(`\nExplanation: ${txInterpretation.explanation}`);
+
+  if (operationCodes.length > 0) {
+    parts.push("\n\nOperation errors:");
+    for (const [index, opCode] of operationCodes.entries()) {
+      const opInterpretation = interpretOperationCode(opCode);
+      parts.push(`\n  Operation ${index + 1}: ${opInterpretation.summary}`);
+      parts.push(`  ${opInterpretation.explanation}`);
+      if (opInterpretation.suggestions && opInterpretation.suggestions.length > 0) {
+        parts.push(`  Suggestions: ${opInterpretation.suggestions.join("; ")}`);
+      }
+    }
+  }
+
+  if (txInterpretation.suggestions && txInterpretation.suggestions.length > 0) {
+    parts.push(`\n\nSuggestions: ${txInterpretation.suggestions.join("; ")}`);
+  }
+
+  return parts.join("");
+}
+
+/**
+ * Determine if a Stellar error is potentially retryable.
+ */
+export function isStellarErrorRetryable(
+  transactionCode: string,
+  operationCodes: string[],
+): boolean {
+  const txInterpretation = interpretTransactionCode(transactionCode);
+  if (!txInterpretation.retryable) return false;
+
+  // If transaction is retryable but any operation is not, consider non-retryable
+  for (const opCode of operationCodes) {
+    const opInterpretation = interpretOperationCode(opCode);
+    if (!opInterpretation.retryable) return false;
+  }
+
+  return true;
 }
