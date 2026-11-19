@@ -1110,3 +1110,57 @@ describe("Dashboard Report Download Feedback (#45)", () => {
     expect(screen.getByText("Backend service is temporarily unavailable. Please try again shortly.")).toBeDefined();
   });
 });
+
+describe("Dashboard favorite button accessible labels (#191)", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    vi.spyOn(api, "listScenarios").mockResolvedValue(mockScenarios);
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+    localStorage.clear();
+  });
+
+  it("gives each card's favorite button a distinct name that includes the scenario", async () => {
+    render(<Dashboard />);
+    const xlm = await screen.findByRole("button", { name: "Add XLM payment to favorites" });
+    const issued = screen.getByRole("button", { name: "Add Issued asset payment to favorites" });
+    screen.getByRole("button", { name: "Add Missing trustline to favorites" });
+
+    expect(xlm).not.toBe(issued);
+    expect(xlm.getAttribute("aria-label")).not.toBe(issued.getAttribute("aria-label"));
+    // No generic, indistinguishable label is left behind.
+    expect(screen.queryByRole("button", { name: "Add to favorites" })).toBeNull();
+  });
+
+  it("switches to a named remove label and keeps aria-pressed when toggled", async () => {
+    const user = userEvent.setup();
+    render(<Dashboard />);
+    const button = await screen.findByRole("button", { name: "Add XLM payment to favorites" });
+    expect(button.getAttribute("aria-pressed")).toBe("false");
+
+    await user.click(button);
+
+    const pressed = screen.getByRole("button", { name: "Remove XLM payment from favorites" });
+    expect(pressed.getAttribute("aria-pressed")).toBe("true");
+    // The other card is unaffected.
+    const other = screen.getByRole("button", { name: "Add Issued asset payment to favorites" });
+    expect(other.getAttribute("aria-pressed")).toBe("false");
+
+    await user.click(pressed);
+    expect(
+      screen.getByRole("button", { name: "Add XLM payment to favorites" }).getAttribute("aria-pressed"),
+    ).toBe("false");
+  });
+
+  it("uses the remove label for favorites restored from storage", async () => {
+    localStorage.setItem("esure:favorite-scenarios", JSON.stringify(["missing-trustline"]));
+    render(<Dashboard />);
+
+    const restored = await screen.findByRole("button", { name: "Remove Missing trustline from favorites" });
+    expect(restored.getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("button", { name: "Add XLM payment to favorites" })).toBeDefined();
+  });
+});
