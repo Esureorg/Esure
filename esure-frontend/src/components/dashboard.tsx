@@ -5,6 +5,8 @@ import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { ApiError, downloadReport, getRun, listScenarios, startRun, type JsonValue, type RunReport, type ScenarioSummary } from "@/lib/api";
 import { ApiError, RateLimitError, getRun, getScenario, listScenarios, startRun, type JsonValue, type RunReport, type ScenarioDetail, type ScenarioSummary } from "@/lib/api";
 
+import { parseFavorites } from "@/lib/favorites";
+
 const terminalStatuses = new Set(["passed", "failed"]);
 
 export type ScenarioFilter = "all" | "xlm" | "issued-asset" | "expected-failure";
@@ -15,8 +17,8 @@ const FAVORITES_STORAGE_KEY = "esure:favorite-scenarios";
 
 function getFavorites(): Set<string> {
   try {
-    const stored = localStorage.getItem(FAVORITES_STORAGE_KEY);
-    return new Set(stored ? JSON.parse(stored) : []);
+    // Validated: valid JSON of the wrong shape must not become favorites (#188).
+    return parseFavorites(localStorage.getItem(FAVORITES_STORAGE_KEY));
   } catch {
     return new Set();
   }
