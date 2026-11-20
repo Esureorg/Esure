@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { ApiError, downloadReport, getRun, listScenarios, startRun, type JsonValue, type RunReport, type ScenarioSummary } from "@/lib/api";
-import { ApiError, RateLimitError, getRun, getScenario, listScenarios, startRun, type JsonValue, type RunReport, type ScenarioDetail, type ScenarioSummary } from "@/lib/api";
+import { ApiError, RateLimitError, downloadScenarioDefinition, getRun, getScenario, listScenarios, startRun, type JsonValue, type RunReport, type ScenarioDetail, type ScenarioSummary } from "@/lib/api";
 
 const terminalStatuses = new Set(["passed", "failed"]);
 
@@ -12,6 +12,34 @@ export type SortOrder = "name-asc" | "name-desc" | "id-asc";
 export type ReportFilter = "all" | "failed";
 
 const FAVORITES_STORAGE_KEY = "esure:favorite-scenarios";
+
+const RECENT_RUNS_STORAGE_KEY = "esure:recent-runs";
+const RECENT_RUNS_MAX = 20;
+
+interface RecentRunEntry { id: string; scenarioId: string; timestamp: number; }
+
+function getRecentRuns(): RecentRunEntry[] {
+  try {
+    const stored = localStorage.getItem(RECENT_RUNS_STORAGE_KEY);
+    return stored ? JSON.parse(stored) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveRecentRun(entry: RecentRunEntry): void {
+  try {
+    const existing = getRecentRuns().filter((r) => r.id !== entry.id);
+    const updated = [entry, ...existing].slice(0, RECENT_RUNS_MAX);
+    localStorage.setItem(RECENT_RUNS_STORAGE_KEY, JSON.stringify(updated));
+  } catch {
+    // ignore storage errors
+  }
+}
+
+function clearRecentRuns(): void {
+  try { localStorage.removeItem(RECENT_RUNS_STORAGE_KEY); } catch { /* ignore */ }
+}
 
 function getFavorites(): Set<string> {
   try {
@@ -117,6 +145,9 @@ export function Dashboard() {
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const previewAbortRef = useRef<AbortController | null>(null);
+  // #198 — Scenario definition download
+  const [defDownloading, setDefDownloading] = useState(false);
+  const [defDownloadError, setDefDownloadError] = useState<string | null>(null);
 
   // #39 — Rate-limit countdown (seconds remaining before retry is allowed)
   const [rateLimitCountdown, setRateLimitCountdown] = useState<number | null>(null);
@@ -134,6 +165,8 @@ export function Dashboard() {
 
   // Favorites state (#154)
   const [favorites, setFavorites] = useState<Set<string>>(() => getFavorites());
+  // Recent runs state (#201)
+  const [recentRuns, setRecentRuns] = useState<RecentRunEntry[]>(() => getRecentRuns());
   const reconnectedRef = useRef(false);
   const browserOfflineRef = useRef(false);
 
@@ -463,6 +496,17 @@ export function Dashboard() {
       if (timerId !== null) window.clearTimeout(timerId);
     };
   }, [run, isOffline, isBrowserOffline, consecutiveFailures]);
+
+  // #201 — Save terminal runs to recent-run history
+  const prevRunIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!run || !terminalStatuses.has(run.status)) return;
+    if (prevRunIdRef.current === run.id) return;
+    prevRunIdRef.current = run.id;
+    const entry: RecentRunEntry = { id: run.id, scenarioId: run.scenarioId, timestamp: Date.now() };
+    saveRecentRun(entry);
+    setRecentRuns(getRecentRuns());
+  }, [run]);
 
   const selected = useMemo(() => scenarios.find((scenario) => scenario.id === selectedId), [scenarios, selectedId]);
 
@@ -797,6 +841,41 @@ export function Dashboard() {
                   <div><dt>Assertions</dt><dd>{previewScenario.assertions.length}</dd></div>
                 </dl>
                 <p className="preview-description">{previewScenario.description}</p>
+                <button
+                  type="button"
+                  className="run-button run-button--secondary"
+                  style={{ marginTop: "12px", minWidth: "auto", padding: "8px 14px", fontSize: "13px" }}
+                  disabled={defDownloading}
+                  aria-busy={defDownloading}
+                  onClick={async () => {
+                    if (defDownloading) return;
+                    setDefDownloading(true);
+                    setDefDownloadError(null);
+                    try {
+                      const text = await downloadScenarioDefinition(previewScenario.id, previewScenario.version);
+                      let parsed: Record<string, unknown>;
+                      try { parsed = JSON.parse(text); } catch { parsed = {}; }
+                      const { contentHash: _ch, ...exportable } = parsed;
+                      void _ch;
+                      const blob = new Blob([JSON.stringify(exportable, null, 2)], { type: "application/json" });
+                      const url = URL.createObjectURL(blob);
+                      const anchor = document.createElement("a");
+                      anchor.href = url;
+                      anchor.download = `${previewScenario.id}-v${previewScenario.version}.json`;
+                      document.body.appendChild(anchor);
+                      anchor.click();
+                      document.body.removeChild(anchor);
+                      URL.revokeObjectURL(url);
+                    } catch (err) {
+                      setDefDownloadError(err instanceof Error ? err.message : "Download failed.");
+                    } finally {
+                      setDefDownloading(false);
+                    }
+                  }}
+                >
+                  {defDownloading ? "Downloading…" : "Download definition"}
+                </button>
+                {defDownloadError && <p className="download-error" role="alert" style={{ marginTop: "8px", fontSize: "12px" }}>{defDownloadError}</p>}
               </div>
             )}
           </div>
@@ -820,6 +899,41 @@ export function Dashboard() {
           )}
         </div>
       </section>
+
+      {recentRuns.length > 0 && (
+        <section className="workspace shell" style={{ paddingTop: "0" }}>
+          <div className="section-heading" style={{ marginBottom: "12px" }}>
+            <div><p className="eyebrow">RECENT RUNS</p></div>
+            <button
+              type="button"
+              className="run-button run-button--secondary"
+              style={{ minWidth: "auto", padding: "6px 12px", fontSize: "12px" }}
+              onClick={() => { clearRecentRuns(); setRecentRuns([]); }}
+            >
+              Clear history
+            </button>
+          </div>
+          <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexWrap: "wrap", gap: "8px" }}>
+            {recentRuns.map((entry) => (
+              <li key={entry.id}>
+                <button
+                  type="button"
+                  className="run-button run-button--secondary"
+                  style={{ minWidth: "auto", padding: "6px 12px", fontSize: "12px", fontFamily: "monospace" }}
+                  title={`${entry.scenarioId} — ${new Date(entry.timestamp).toLocaleString()}`}
+                  onClick={() => {
+                    const newParams = new URLSearchParams(searchParams?.toString() ?? "");
+                    newParams.set("runId", entry.id);
+                    router.replace(pathname + "?" + newParams.toString(), { scroll: false });
+                  }}
+                >
+                  {entry.id.slice(0, 8)}…
+                </button>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
 
       <section className="results shell">
         {isBrowserOffline && (

@@ -506,6 +506,15 @@ export function getScenario(scenarioId: string, signal?: AbortSignal): Promise<S
   return request(`/api/backend/api/v1/scenarios/${encodeURIComponent(scenarioId)}`, { signal }, isScenarioDetail);
 }
 
+export async function downloadScenarioDefinition(scenarioId: string, version: number, signal?: AbortSignal): Promise<string> {
+  const url = `/api/backend/api/v1/scenarios/${encodeURIComponent(scenarioId)}/versions/${encodeURIComponent(String(version))}/export?format=json`;
+  const response = await fetch(url, { signal, headers: { accept: "application/json" } });
+  if (!response.ok) {
+    throw new ApiError("Failed to download scenario definition.", "DOWNLOAD_FAILED", response.status);
+  }
+  return response.text();
+}
+
 export function parseRetryAfter(value: string | null, maxSeconds = 60): number | null {
   if (!value) return null;
   const numeric = Number(value.trim());

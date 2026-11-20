@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 export type AppInstance = FastifyInstance & { runs: RunService };
 
-export async function closeAfterDrain(app: { close: () => Promise<void>; runs: Pick<AppInstance["runs"], "drain"> }, timeoutMs: number): Promise<void> {
+export async function closeAfterDrain(app: { close: () => Promise<void>; runs: Pick<AppInstance["runs"], "drain" | "cancelActive"> }, timeoutMs: number): Promise<void> {
   const draining = app.runs.drain();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<void>((resolve) => {
@@ -14,6 +14,7 @@ export async function closeAfterDrain(app: { close: () => Promise<void>; runs: P
   } finally {
     if (timer) clearTimeout(timer);
   }
+  app.runs.cancelActive();
   await app.close();
 }
 import type { AppConfig } from "./config.js";
@@ -163,6 +164,7 @@ export function buildApp(options: BuildAppOptions): AppInstance {
     });
   }
   app.get("/ready", async (_request, reply) => {
+    if (runs.draining) return reply.code(503).send({ status: "unavailable", network: "testnet", reason: "draining" });
     const ready = await persistence.check();
     if (!ready) return reply.code(503).send({ status: "unavailable", network: "testnet", database: "unavailable" });
     return { status: "ready", network: "testnet", database: persistence.state === "disabled" ? "disabled" : "ready" };
