@@ -61,10 +61,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     throw new Error("RUN_PERSISTENCE_ENABLED=true requires PERSISTENCE_MODE=published");
   }
 
+  const logLevel = env.LOG_LEVEL ?? "info";
+  validateLogLevel(logLevel);
+
   return {
     host: env.HOST ?? "127.0.0.1",
     port,
-    logLevel: env.LOG_LEVEL ?? "info",
+    logLevel,
     horizonUrl,
     friendbotUrl,
     runTimeoutMs: integerEnv(env, "RUN_TIMEOUT_MS", 120_000, 1_000, 600_000),
@@ -87,6 +90,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     ...(env.DATABASE_URL && { databaseUrl: env.DATABASE_URL }),
     ...(env.SCENARIO_DIRECTORY && { scenarioDirectory: env.SCENARIO_DIRECTORY }),
   };
+}
+
+function validateLogLevel(level: string): void {
+  const validLevels = ["fatal", "error", "warn", "info", "debug", "trace", "silent"];
+  if (!validLevels.includes(level)) {
+    throw new Error(`LOG_LEVEL must be one of: ${validLevels.join(", ")}`);
+  }
 }
 
 function booleanEnv(env: NodeJS.ProcessEnv, name: string, fallback: boolean): boolean {
