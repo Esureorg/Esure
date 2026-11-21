@@ -23,6 +23,60 @@ describe("InMemoryRunStore resource bounds", () => {
   });
 });
 
+describe("InMemoryRunStore get() snapshot isolation (#218)", () => {
+  it("two concurrent callers each receive independent snapshots", () => {
+    const store = new InMemoryRunStore();
+    store.create(run("r1", "running"));
+    const snap1 = store.get("r1")!;
+    const snap2 = store.get("r1")!;
+    // Mutating a snapshot must not affect the store or other snapshots
+    (snap1 as RunReport).status = "failed";
+    expect(store.get("r1")!.status).toBe("running");
+    expect(snap2.status).toBe("running");
+  });
+});
+
+describe("InMemoryRunStore markOrphaned (#219)", () => {
+  it("marks non-terminal runs older than the age threshold as failed", () => {
+    let now = Date.parse("2026-08-09T01:00:00.000Z");
+    const store = new InMemoryRunStore(500, 3_600_000, () => now);
+    store.create(run("old-run", "running"));
+    now += 60_001;
+    const count = store.markOrphaned({ ageThresholdMs: 60_000 });
+    expect(count).toBe(1);
+    expect(store.get("old-run")!.status).toBe("failed");
+    expect(store.get("old-run")!.error?.code).toBe("SERVER_SHUTDOWN");
+  });
+
+  it("does not mark runs in the activeRunIds set", () => {
+    let now = Date.parse("2026-08-09T01:00:00.000Z");
+    const store = new InMemoryRunStore(500, 3_600_000, () => now);
+    store.create(run("active", "running"));
+    now += 60_001;
+    const count = store.markOrphaned({ ageThresholdMs: 60_000, activeRunIds: new Set(["active"]) });
+    expect(count).toBe(0);
+    expect(store.get("active")!.status).toBe("running");
+  });
+
+  it("is idempotent: second pass marks zero additional runs", () => {
+    let now = Date.parse("2026-08-09T01:00:00.000Z");
+    const store = new InMemoryRunStore(500, 3_600_000, () => now);
+    store.create(run("orphan", "running"));
+    now += 60_001;
+    expect(store.markOrphaned({ ageThresholdMs: 60_000 })).toBe(1);
+    expect(store.markOrphaned({ ageThresholdMs: 60_000 })).toBe(0);
+  });
+
+  it("dry-run reports eligible count without mutating", () => {
+    let now = Date.parse("2026-08-09T01:00:00.000Z");
+    const store = new InMemoryRunStore(500, 3_600_000, () => now);
+    store.create(run("r", "running"));
+    now += 60_001;
+    expect(store.markOrphaned({ ageThresholdMs: 60_000, dryRun: true })).toBe(1);
+    expect(store.get("r")!.status).toBe("running");
+  });
+});
+
 function run(id: string, status: RunReport["status"], completedAt?: string): RunReport {
   return {
     id,
