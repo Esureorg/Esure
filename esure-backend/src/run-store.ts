@@ -7,7 +7,8 @@ import type { Database } from "./database.js";
 export interface RunStore {
   create(run: RunReport): void | Promise<void>;
   get(id: string): RunReport | undefined | Promise<RunReport | undefined>;
-  update(id: string, update: Partial<RunReport>): RunReport | Promise<RunReport>;
+  update(id: string, update: Partial<RunReport>, expectedVersion?: number): RunReport | Promise<RunReport>;
+  markOrphaned(opts: { ageThresholdMs: number; activeRunIds?: ReadonlySet<string>; dryRun?: boolean }): number | Promise<number>;
 }
 
 export class InMemoryRunStore implements RunStore {
@@ -40,13 +41,30 @@ export class InMemoryRunStore implements RunStore {
     return run ? structuredClone(run) : undefined;
   }
 
-  update(id: string, update: Partial<RunReport>): RunReport {
+  update(id: string, update: Partial<RunReport>, _expectedVersion?: number): RunReport {
     this.removeExpired();
     const current = this.#runs.get(id);
     if (!current) throw new Error(`Run ${id} does not exist`);
     const updated = { ...current, ...structuredClone(update) };
     this.#runs.set(id, updated);
     return structuredClone(updated);
+  }
+
+  markOrphaned({ ageThresholdMs, activeRunIds = new Set(), dryRun = false }: { ageThresholdMs: number; activeRunIds?: ReadonlySet<string>; dryRun?: boolean } = { ageThresholdMs: 0 }): number {
+    const cutoff = this.now() - ageThresholdMs;
+    let count = 0;
+    for (const [, run] of this.#runs) {
+      if (isTerminal(run)) continue;
+      if (activeRunIds.has(run.id)) continue;
+      if (Date.parse(run.createdAt) > cutoff) continue;
+      if (!dryRun) {
+        run.status = "failed";
+        run.completedAt = new Date(this.now()).toISOString();
+        run.error = { code: "SERVER_SHUTDOWN", message: "Run marked failed by orphan cleanup.", category: "internal", retryable: false };
+      }
+      count++;
+    }
+    return count;
   }
 
   private removeExpired(): void {
@@ -111,11 +129,28 @@ export class PostgresRunStore implements RunStore {
     return row ? reportFromRow(row) : undefined;
   }
 
-  async update(id: string, update: Partial<RunReport>): Promise<RunReport> {
-    // Capture the version observed by the caller's preceding `get()` before this
-    // update's own `get()` refreshes the cache. The conditional UPDATE below
-    // rejects the write if another writer changed the version in between.
-    const expectedVersion = this.#versions.get(id) ?? 0;
+  async getWithVersion(id: string): Promise<{ report: RunReport; version: number } | undefined> {
+    const result = await this.database.query<PersistedRunRow>(
+      `SELECT run_id, scenario_id, scenario_version, scenario_schema_version,
+        scenario_content_hash, network, status, version, created_at, completed_at,
+        steps, assertions, summary, error
+      FROM runs
+      WHERE run_id = $1
+        AND scenario_id IS NOT NULL
+        AND (completed_at IS NULL OR completed_at > clock_timestamp() - ($2 * interval '1 millisecond'))`,
+      [id, this.retentionMs],
+    );
+    const row = result.rows[0];
+    if (!row) return undefined;
+    this.#versions.set(id, row.version);
+    return { report: reportFromRow(row), version: row.version };
+  }
+
+  async update(id: string, update: Partial<RunReport>, expectedVersion?: number): Promise<RunReport> {
+    // The caller may pass an explicit revision token observed from getWithVersion(),
+    // making the concurrency token caller-owned rather than shared-mutable state.
+    // Falls back to the shared #versions map for callers that use get() instead.
+    const resolvedVersion = expectedVersion ?? this.#versions.get(id) ?? 0;
     const current = await this.get(id);
     if (!current) throw new Error(`Run ${id} does not exist`);
     const updated = sanitizeRunReport({ ...current, ...structuredClone(update) });
@@ -138,10 +173,10 @@ export class PostgresRunStore implements RunStore {
       WHERE run_id = $1
         AND version = $2
         AND (completed_at IS NULL OR completed_at > clock_timestamp() - ($16 * interval '1 millisecond'))`,
-      [id, expectedVersion, ...runValues(updated).slice(1), this.retentionMs],
+      [id, resolvedVersion, ...runValues(updated).slice(1), this.retentionMs],
     );
     if (result.rowCount !== 1) throw new OptimisticConcurrencyError(id);
-    this.#versions.set(id, expectedVersion + 1);
+    this.#versions.set(id, resolvedVersion + 1);
     return structuredClone(updated);
   }
 
@@ -197,6 +232,29 @@ export class PostgresRunStore implements RunStore {
       if (deleted < limit) break;
     }
     return totalDeleted;
+  }
+
+  async markOrphaned({ ageThresholdMs, activeRunIds = new Set(), dryRun = false }: { ageThresholdMs: number; activeRunIds?: ReadonlySet<string>; dryRun?: boolean } = { ageThresholdMs: 0 }): Promise<number> {
+    const excludeIds = [...activeRunIds];
+    const excludeClause = excludeIds.length ? ` AND run_id <> ALL($2::uuid[])` : "";
+    if (dryRun) {
+      const params: unknown[] = [ageThresholdMs];
+      if (excludeIds.length) params.push(excludeIds);
+      const result = await this.database.query<{ count: string }>(
+        `SELECT count(*)::text AS count FROM runs WHERE status NOT IN ('passed','failed') AND created_at < clock_timestamp() - ($1 * interval '1 millisecond')${excludeClause}`,
+        params,
+      );
+      return Number(result.rows[0]?.count ?? 0);
+    }
+    const orphanError = JSON.stringify({ code: "SERVER_SHUTDOWN", message: "Run marked failed by orphan cleanup.", category: "internal", retryable: false });
+    const params: unknown[] = [ageThresholdMs, orphanError];
+    const updateExcludeClause = excludeIds.length ? ` AND run_id <> ALL($3::uuid[])` : "";
+    if (excludeIds.length) params.push(excludeIds);
+    const result = await this.database.query(
+      `UPDATE runs SET status = 'failed', completed_at = clock_timestamp(), error = $2::jsonb, version = version + 1 WHERE status NOT IN ('passed','failed') AND created_at < clock_timestamp() - ($1 * interval '1 millisecond')${updateExcludeClause}`,
+      params,
+    );
+    return result.rowCount ?? 0;
   }
 }
 
