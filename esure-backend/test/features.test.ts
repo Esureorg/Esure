@@ -27,6 +27,7 @@ const config: AppConfig = {
   friendbotUrl: "https://friendbot.stellar.org",
   runTimeoutMs: 5_000,
   stepTimeoutMs: 1_000,
+  shutdownTimeoutMs: 30_000,
   maxConcurrentRuns: 5,
   metricsEnabled: false,
   maxConcurrentFriendbotRequests: 5,

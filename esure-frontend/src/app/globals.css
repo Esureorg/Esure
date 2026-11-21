@@ -359,6 +359,18 @@ button.download:focus-visible {
 .preview-meta dd { font:400 11px var(--font-mono); margin:0; }
 .hash-cell code { word-break:break-all; }
 .preview-description { font:400 13px var(--font-sans),sans-serif; color:var(--muted); line-height:1.5; margin:0; }
+.preview-history { margin-top:18px; border-top:1px solid var(--line); padding-top:14px; }
+.preview-history h3 { margin:0 0 10px; font:700 10px var(--font-mono); letter-spacing:.1em; text-transform:uppercase; }
+.preview-version-list,.preview-history-controls { display:flex; flex-wrap:wrap; gap:8px; }
+.preview-version-list button,.preview-history-controls button { border:1px solid var(--line); background:transparent; color:var(--deep); padding:6px 9px; font:500 10px var(--font-mono); cursor:pointer; }
+.preview-version-list button[aria-pressed="true"] { background:#edf3df; border-color:var(--deep); }
+.preview-version-list button:disabled,.preview-history-controls button:disabled { opacity:.5; cursor:not-allowed; }
+.preview-history-controls { margin-top:10px; }
+.preview-history-note,.preview-history p { color:var(--muted); font-size:12px; }
+.preview-definition-list { margin:16px 0 0; }
+.preview-definition-list h3 { margin:12px 0 6px; font:700 10px var(--font-mono); letter-spacing:.1em; text-transform:uppercase; }
+.preview-definition-list li { margin:8px 0; font-size:12px; }
+.preview-definition-list pre { overflow:auto; padding:8px; background:#f4f4ef; font:400 10px var(--font-mono); }
 
 /* ── Run button rate-limit note (#39) ───────────────────────────────────── */
 .rate-limit-note { font:400 12px var(--font-mono); color:var(--muted); margin:6px 0 0; }
