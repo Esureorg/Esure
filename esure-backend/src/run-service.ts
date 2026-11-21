@@ -62,6 +62,11 @@ export class RunService {
     private readonly options: { maxConcurrentRuns: number; runTimeoutMs: number; stepTimeoutMs: number },
     private readonly now: () => number = Date.now,
     private readonly logger?: RunLifecycleLogger,
+    // Monotonic clock for duration measurement (#213). Defaults to
+    // performance.now() so wall-clock adjustments (NTP, DST, leap seconds)
+    // cannot make a duration appear negative or artificially large. The
+    // existing `now` parameter continues to supply wall-clock timestamps.
+    private readonly hrNow: () => number = () => performance.now(),
   ) {}
 
   /** True once drain() has been called; new starts are rejected after this point. */
@@ -127,7 +132,7 @@ export class RunService {
       resolveExecution();
       throw error;
     }
-    const startedAt = this.now();
+    const startedAt = this.hrNow();
     this.logger?.info({
       event: "run.started",
       runId: run.id,
@@ -145,7 +150,7 @@ export class RunService {
     return Promise.resolve(this.store.get(id));
   }
 
-  async execute(id: string, scenario: ValidatedScenario, startedAt = this.now(), requestId?: string): Promise<void> {
+  async execute(id: string, scenario: ValidatedScenario, startedAt = this.hrNow(), requestId?: string): Promise<void> {
     const controller = new AbortController();
     let progressUpdates = Promise.resolve();
     let outcome: "passed" | "failed" = "failed";
