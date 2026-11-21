@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
-import { ApiError, downloadReport, getRun, listScenarios, startRun, type JsonValue, type RunReport, type ScenarioSummary } from "@/lib/api";
+import { ApiError, downloadReport, getRun, listScenarios, startRun, type JsonValue, type ReportComparison, type RunReport, type ScenarioSummary } from "@/lib/api";
 import { ApiError, RateLimitError, getRun, getScenario, listScenarios, startRun, type JsonValue, type RunReport, type ScenarioDetail, type ScenarioSummary } from "@/lib/api";
 
 const terminalStatuses = new Set(["passed", "failed"]);
@@ -1325,8 +1325,64 @@ function ReportComparisonView({ currentRun }: { currentRun: RunReport | null }) 
               </div>
             ))}
           </div>
+
+          {/* Download comparison as a versioned JSON artifact (#202) */}
+          <ComparisonDownloadButton reportA={reportA} reportB={reportB} comparison={comparison} />
         </div>
       ) : null}
+/** Download a comparison as a versioned JSON artifact (#202). */
+function ComparisonDownloadButton({
+  reportA,
+  reportB,
+  comparison,
+}: {
+  reportA: RunReport | null;
+  reportB: RunReport | null;
+  comparison: ReportComparison | null;
+}) {
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+
+  if (!reportA || !reportB || !comparison) return null;
+
+  function handleDownload() {
+    setDownloadError(null);
+    try {
+      const artifact = {
+        /** Comparison format version — bump when the shape changes. */
+        version: 1,
+        generatedAt: new Date().toISOString(),
+        reportA: { id: reportA!.id, scenarioId: reportA!.scenarioId, scenarioVersion: reportA!.scenarioVersion, status: reportA!.status, durationMs: reportA!.durationMs ?? null },
+        reportB: { id: reportB!.id, scenarioId: reportB!.scenarioId, scenarioVersion: reportB!.scenarioVersion, status: reportB!.status, durationMs: reportB!.durationMs ?? null },
+        comparison: comparison!,
+      };
+      const blob = new Blob([JSON.stringify(artifact, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `esure-comparison-${reportA!.id.slice(0, 8)}-vs-${reportB!.id.slice(0, 8)}.json`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+    } catch {
+      setDownloadError("Failed to generate comparison download.");
+    }
+  }
+
+  return (
+    <div style={{ padding: "16px 0 0" }}>
+      <button type="button" className="run-button run-button--secondary" onClick={handleDownload} style={{ padding: "8px 14px", minWidth: "auto" }}>
+        Download comparison as JSON
+      </button>
+      {downloadError && (
+        <p className="download-error" role="alert" data-testid="comparison-download-error" style={{ marginTop: "8px" }}>
+          {downloadError}
+        </p>
+      )}
+    </div>
+  );
+}
+
 // #34 — Expandable assertion row with expected / actual values
 function AssertionRow({ assertion, hidden }: { assertion: import("@/lib/api").AssertionResult; hidden?: boolean }) {
 function AssertionRow({ assertion, reportFilter }: { assertion: import("@/lib/api").AssertionResult; reportFilter?: ReportFilter }) {
