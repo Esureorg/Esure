@@ -16,11 +16,9 @@ try {
 //
 // SIGTERM and SIGINT each trigger shutdown exactly once.  The sequence is:
 //   1. Mark the RunService as draining — new run POSTs get 503 immediately.
-//   2. Wait for active executions, capped at DRAIN_TIMEOUT_MS.
+//   2. Wait for active executions, capped at SHUTDOWN_TIMEOUT_MS.
 //   3. Close Fastify (which fires onClose hooks, releasing DB pools / timers).
 //   4. Exit.  If anything throws we still exit, just with code 1.
-
-const DRAIN_TIMEOUT_MS = 30_000;
 
 let shuttingDown = false;
 
@@ -32,7 +30,7 @@ async function shutdown(signal: string): Promise<void> {
 
   // Drain runs before Fastify's onClose hooks release persistence resources.
   try {
-    await closeAfterDrain(app, DRAIN_TIMEOUT_MS);
+    await closeAfterDrain(app, config.shutdownTimeoutMs);
   } catch (closeError) {
     app.log.error(closeError, "Error while draining or closing the server");
   }

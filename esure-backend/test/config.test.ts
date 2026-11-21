@@ -7,6 +7,7 @@ describe("loadConfig", () => {
     expect(config.horizonUrl).toContain("testnet");
     expect(config.friendbotUrl).toBe("https://friendbot.stellar.org");
     expect(config.metricsEnabled).toBe(false);
+    expect(config.shutdownTimeoutMs).toBe(30_000);
   });
 
   it("enables metrics only for an explicit boolean setting", () => {
@@ -22,6 +23,9 @@ describe("loadConfig", () => {
   it("rejects unsafe resource-limit configuration", () => {
     expect(() => loadConfig({ MAX_CONCURRENT_RUNS: "0" })).toThrow(/MAX_CONCURRENT_RUNS/);
     expect(() => loadConfig({ BODY_LIMIT_BYTES: "99999999" })).toThrow(/BODY_LIMIT_BYTES/);
+    expect(() => loadConfig({ SHUTDOWN_TIMEOUT_MS: "999" })).toThrow(/SHUTDOWN_TIMEOUT_MS/);
+    expect(() => loadConfig({ SHUTDOWN_TIMEOUT_MS: "120001" })).toThrow(/SHUTDOWN_TIMEOUT_MS/);
+    expect(() => loadConfig({ SHUTDOWN_TIMEOUT_MS: "30s" })).toThrow(/SHUTDOWN_TIMEOUT_MS/);
   });
 
   it("keeps persistence explicitly disabled unless configured", () => {

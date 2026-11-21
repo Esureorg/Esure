@@ -6,6 +6,7 @@ export interface AppConfig {
   friendbotUrl: string;
   runTimeoutMs: number;
   stepTimeoutMs: number;
+  shutdownTimeoutMs: number;
   maxConcurrentRuns: number;
   metricsEnabled: boolean;
   /**
@@ -69,6 +70,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     friendbotUrl,
     runTimeoutMs: integerEnv(env, "RUN_TIMEOUT_MS", 120_000, 1_000, 600_000),
     stepTimeoutMs: integerEnv(env, "STEP_TIMEOUT_MS", 30_000, 500, 120_000),
+    shutdownTimeoutMs: integerEnv(env, "SHUTDOWN_TIMEOUT_MS", 30_000, 1_000, 120_000),
     maxConcurrentRuns: integerEnv(env, "MAX_CONCURRENT_RUNS", 2, 1, 20),
     metricsEnabled: booleanEnv(env, "METRICS_ENABLED", false),
     maxConcurrentFriendbotRequests: integerEnv(env, "MAX_CONCURRENT_FRIENDBOT_REQUESTS", 5, 1, 50),
