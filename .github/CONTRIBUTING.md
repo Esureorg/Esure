@@ -41,6 +41,23 @@ work during time-boxed contribution campaigns.
 - New dependencies require a clear need and must pass the repository audit.
 - Accessibility and reduced-motion behavior are required for frontend changes.
 
+## Migration and text files
+
+Text files use UTF-8 with LF line endings, a final newline, and two-space
+indentation, as set in `.editorconfig`.
+
+Migration hashes are SHA-256 digests of each file's exact contents
+(`esure-backend/src/database.ts`). A changed byte in an applied migration
+therefore fails the checksum check, and a CRLF conversion or a trailing-newline
+edit counts as a change. For that reason:
+
+- Never edit a migration that has been applied to any environment. Add a new,
+  higher-numbered migration instead.
+- Do not reformat or re-save existing migration files. The EditorConfig
+  section for `esure-backend/migrations/*.sql` turns off final-newline and
+  trailing-whitespace edits for them.
+- Do not change line endings of existing files in a formatting-only commit.
+
 ## Continuous integration
 
 The `Monorepo CI` workflow (`.github/workflows/ci.yml`) runs the backend,
