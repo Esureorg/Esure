@@ -473,6 +473,73 @@ export function compareReports(a: RunReport, b: RunReport): ReportComparison {
   };
 }
 
+/** Versioned comparison artifact format (issue #202). */
+export interface ComparisonArtifact {
+  /** Format version — bump when the shape changes. */
+  comparisonFormatVersion: 1;
+  exportedAt: string;
+  reportA: {
+    id: string;
+    scenarioId: string;
+    scenarioVersion: number;
+    scenarioContentHash: string;
+    network: string;
+    status: RunStatus;
+    createdAt: string;
+    completedAt?: string;
+  };
+  reportB: {
+    id: string;
+    scenarioId: string;
+    scenarioVersion: number;
+    scenarioContentHash: string;
+    network: string;
+    status: RunStatus;
+    createdAt: string;
+    completedAt?: string;
+  };
+  comparison: ReportComparison;
+}
+
+/**
+ * Build a versioned JSON artifact capturing all comparison data (issue #202).
+ * The returned value is deterministic: same two reports always produce the
+ * same artifact (modulo `exportedAt`), so callers can compare artifacts for
+ * test purposes by stripping that field.
+ */
+export function buildComparisonArtifact(
+  reportA: RunReport,
+  reportB: RunReport,
+  comparison: ReportComparison,
+  now: () => string = () => new Date().toISOString(),
+): ComparisonArtifact {
+  return {
+    comparisonFormatVersion: 1,
+    exportedAt: now(),
+    reportA: {
+      id: reportA.id,
+      scenarioId: reportA.scenarioId,
+      scenarioVersion: reportA.scenarioVersion,
+      scenarioContentHash: reportA.scenarioContentHash,
+      network: reportA.network,
+      status: reportA.status,
+      createdAt: reportA.createdAt,
+      ...(reportA.completedAt !== undefined && { completedAt: reportA.completedAt }),
+    },
+    reportB: {
+      id: reportB.id,
+      scenarioId: reportB.scenarioId,
+      scenarioVersion: reportB.scenarioVersion,
+      scenarioContentHash: reportB.scenarioContentHash,
+      network: reportB.network,
+      status: reportB.status,
+      createdAt: reportB.createdAt,
+      ...(reportB.completedAt !== undefined && { completedAt: reportB.completedAt }),
+    },
+    comparison,
+  };
+}
+
 export interface ScenarioDetail {
   id: string;
   version: number;
