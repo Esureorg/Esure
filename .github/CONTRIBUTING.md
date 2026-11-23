@@ -58,6 +58,29 @@ edit counts as a change. For that reason:
   trailing-whitespace edits for them.
 - Do not change line endings of existing files in a formatting-only commit.
 
+## Scenario inventory
+
+The bundled scenarios in `esure-backend/scenarios` are the source of truth. The
+ID table in `esure-docs/SCENARIOS.md` and the scenario counts in `README.md`
+must match them. Check both from the backend package:
+
+```bash
+cd esure-backend
+npm run check:scenarios
+```
+
+The command prints the sorted scenario IDs and exits with status 1 when a
+definition is invalid or a document drifts, for example:
+
+```text
+inventory drift: esure-docs/SCENARIOS.md: account-missing is missing from the table
+inventory drift: README.md: states 13 bundled scenarios, found 23
+Scenario inventory check failed with 2 finding(s).
+```
+
+When you add or remove a bundled scenario, update the table and both counts in
+the same pull request.
+
 ## Continuous integration
 
 The `Monorepo CI` workflow (`.github/workflows/ci.yml`) runs the backend,
