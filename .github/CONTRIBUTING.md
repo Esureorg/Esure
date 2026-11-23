@@ -41,6 +41,27 @@ work during time-boxed contribution campaigns.
 - New dependencies require a clear need and must pass the repository audit.
 - Accessibility and reduced-motion behavior are required for frontend changes.
 
+## Continuous integration
+
+The `Monorepo CI` workflow (`.github/workflows/ci.yml`) runs the backend,
+frontend, and CLI checks on pull requests and on pushes to `main`.
+
+Runs share one concurrency group per workflow and Git ref. When new commits
+are pushed to a pull request, the superseded run is cancelled. Pushes to `main`
+are never cancelled, so every merged commit keeps its own result. Runs for
+different branches use different refs and never cancel each other.
+
+## Dependency updates
+
+Dependabot (`.github/dependabot.yml`) proposes updates weekly for the npm
+packages in `esure-backend`, `esure-frontend`, and `esure-cli`, and for the
+GitHub Actions in the workflows. Minor and patch updates are grouped per
+package, and each package keeps at most five open update pull requests. Major
+updates arrive as separate pull requests.
+
+Dependabot pull requests are not merged automatically. They must pass the
+required CI checks and a maintainer review.
+
 ## Issue labels and sizing
 
 Issue forms apply a type label: `bug` or `enhancement`. Maintainers add one or
