@@ -1,39 +1,32 @@
-import { mkdtemp, cp, appendFile, rm } from "node:fs/promises";
-import { existsSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { appendFile, cp, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import EmbeddedPostgres from "embedded-postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { Database, runMigrations } from "../src/database.js";
+import { runMigrations, type Database } from "../src/database.js";
 import { createScenarioRegistry } from "../src/scenarios.js";
 import { PublishedScenarioRepository, reconcileFixture } from "../src/published-scenarios.js";
 import { prepareScenario } from "../src/scenario-loader.js";
 import type { AppConfig } from "../src/config.js";
 import { buildApp } from "../src/app.js";
+import { embeddedPostgresAvailable, startEmbeddedPostgres, type EmbeddedPostgresContext } from "./embedded-postgres.js";
 
-const port = 55_432;
-let postgres: EmbeddedPostgres;
+let context: EmbeddedPostgresContext;
 let database: Database;
-let directory: string;
 
-const postgresAvailable = process.platform !== "win32" || existsSync("C:/Windows/System32/VCRUNTIME140.dll") ||
-  existsSync("node_modules/@embedded-postgres/windows-x64/native/bin/VCRUNTIME140.dll");
-
-(postgresAvailable ? describe.sequential : describe.skip)("PostgreSQL persistence foundation", () => {
+(embeddedPostgresAvailable ? describe.sequential : describe.skip)("PostgreSQL persistence foundation", () => {
   beforeAll(async () => {
-    directory = await mkdtemp(join(tmpdir(), "esure-postgres-"));
-    postgres = new EmbeddedPostgres({ databaseDir: directory, user: "postgres", password: "test-password", port, persistent: true, onLog: () => undefined, onError: () => undefined });
-    await postgres.initialise();
-    await postgres.start();
-    database = new Database(databaseConfig(`postgresql://postgres:test-password@127.0.0.1:${port}/postgres`));
-    const roles = await import("node:fs/promises").then(({ readFile }) => readFile(resolve("database/bootstrap-roles.sql"), "utf8"));
-    await database.query(roles);
+    context = await startEmbeddedPostgres({
+      prefix: "esure-postgres-",
+      setup: async ({ database: db }) => {
+        database = db;
+        const roles = await readFile(resolve("database/bootstrap-roles.sql"), "utf8");
+        await database.query(roles);
+      },
+    });
+    database = context.database;
   }, 60_000);
 
   afterAll(async () => {
-    await database?.close();
-    await postgres?.stop();
-    await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    await context?.stop();
   }, 30_000);
 
   it("migrates a clean database and safely re-runs migrations", async () => {
@@ -44,7 +37,7 @@ const postgresAvailable = process.platform !== "win32" || existsSync("C:/Windows
   });
 
   it("detects a modified migration checksum", async () => {
-    const migrationCopy = join(directory, "modified-migrations");
+    const migrationCopy = join(context.directory, "modified-migrations");
     await cp(resolve("migrations"), migrationCopy, { recursive: true });
     await appendFile(join(migrationCopy, "001_persistence_foundation.sql"), "\n-- modified\n");
     await expect(runMigrations(database, migrationCopy)).rejects.toThrow("checksum mismatch");
@@ -131,7 +124,7 @@ const postgresAvailable = process.platform !== "win32" || existsSync("C:/Windows
   });
 
   it("serves the read-only catalogue, exact versions, history, and exports through the API", async () => {
-    const app = buildApp({ config: databaseConfig(`postgresql://postgres:test-password@127.0.0.1:${port}/postgres`) });
+    const app = buildApp({ config: databaseConfig(context.databaseUrl) });
     try {
       await app.ready();
       const items = (await app.inject({ method: "GET", url: "/api/v1/scenarios" })).json().items;

@@ -353,9 +353,12 @@ The Render free tier sleeps after 15 minutes of inactivity. To keep the backend 
 | Monorepo CI | Implemented |
 | Published scenario PostgreSQL catalogue | Optional foundation implemented |
 | Persistent run execution and evidence | Planned |
-| Automated primary browser journey | Planned |
+| Automated primary browser journey | Implemented in frontend checks (`npm run test:e2e` with Playwright) |
 
 Active work is tracked in [GitHub Issues](https://github.com/Esureorg/Esure/issues).
+Maintained backlog/status pages with retained historical snapshots are
+[CONTRIBUTOR_BACKLOG.md](CONTRIBUTOR_BACKLOG.md) and
+[esure-docs/BACKLOG.md](esure-docs/BACKLOG.md).
 
 ## Troubleshooting
 

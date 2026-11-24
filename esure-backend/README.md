@@ -29,6 +29,13 @@ npm run typecheck  # check types without emitting files
 npm run check      # typecheck and test
 ```
 
+On Windows, embedded PostgreSQL integration tests (including the Postgres
+run-store integration suite) are skipped when the required Visual C++ runtime
+library is unavailable. See
+[Embedded PostgreSQL integration tests on Windows](../esure-docs/EMBEDDED_POSTGRES_WINDOWS.md)
+for the skip condition, how to identify it in Vitest output, supported runtime
+setup without bundling binaries, and the command to rerun the integration test.
+
 The default runner limits each step to 30 seconds, each run to 120 seconds,
 and concurrent execution to two runs. Request rates, in-memory retention, body
 size, and concurrency are configurable through the bounded values documented in

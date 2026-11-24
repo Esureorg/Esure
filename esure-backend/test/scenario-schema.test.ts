@@ -106,6 +106,37 @@ assertions:
     expect(scenario?.accounts).toHaveLength(4);
   });
 
+  it("loads the bundled path payment fixture that fails without a destination trustline", () => {
+    const scenario = createScenarioRegistry().find("path-payment-missing-trustline");
+    expect(scenario).toMatchObject({
+      id: "path-payment-missing-trustline",
+      steps: expect.arrayContaining([
+        expect.objectContaining({ type: "manageSellOffer", sellingAsset: "eur", buyingAsset: "xlm" }),
+        expect.objectContaining({ type: "manageSellOffer", sellingAsset: "usdc", buyingAsset: "eur" }),
+        expect.objectContaining({
+          id: "pay-usdc-without-trustline",
+          type: "pathPaymentStrictReceive",
+          from: "sender",
+          to: "recipient",
+          sendAsset: "xlm",
+          destAsset: "usdc",
+          path: ["eur"],
+        }),
+      ]),
+      assertions: expect.arrayContaining([
+        {
+          type: "stepFailedWith",
+          step: "pay-usdc-without-trustline",
+          transactionCode: "tx_failed",
+          operationCodes: ["op_no_trust"],
+        },
+        { type: "trustlineMissing", account: "recipient", asset: "usdc" },
+      ]),
+    });
+
+    expect(scenario?.steps.some((step) => step.type === "changeTrust" && step.account === "recipient" && step.asset === "usdc")).toBe(false);
+  });
+
   it("rejects unresolved or endpoint assets in path payment paths", () => {
     const scenario = createScenarioRegistry().find("path-payment")!;
     const { contentHash: _invalidHash, ...invalidReference } = structuredClone(scenario);

@@ -1,42 +1,35 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { existsSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
-import EmbeddedPostgres from "embedded-postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { RunReport } from "../src/domain.js";
-import { Database, runMigrations } from "../src/database.js";
+import { runMigrations, type Database } from "../src/database.js";
 import type { AppConfig } from "../src/config.js";
 import { PostgresRunStore } from "../src/run-store.js";
 import { buildApp } from "../src/app.js";
+import { embeddedPostgresAvailable, startEmbeddedPostgres, type EmbeddedPostgresContext } from "./embedded-postgres.js";
 
-const port = 55_433;
-const postgresAvailable = process.platform !== "win32" || existsSync("C:/Windows/System32/VCRUNTIME140.dll") ||
-  existsSync("node_modules/@embedded-postgres/windows-x64/native/bin/VCRUNTIME140.dll");
-
-(postgresAvailable ? describe.sequential : describe.skip)("PostgresRunStore", () => {
-  let postgres: EmbeddedPostgres;
+(embeddedPostgresAvailable ? describe.sequential : describe.skip)("PostgresRunStore", () => {
+  let context: EmbeddedPostgresContext;
   let database: Database;
-  let directory: string;
   let store: PostgresRunStore;
 
   beforeAll(async () => {
-    directory = await mkdtemp(join(tmpdir(), "esure-run-history-"));
-    postgres = new EmbeddedPostgres({ databaseDir: directory, user: "postgres", password: "test-password", port, persistent: true, onLog: () => undefined, onError: () => undefined });
-    await postgres.initialise();
-    await postgres.start();
-    database = new Database(databaseConfig(`postgres://postgres:test-password@127.0.0.1:${port}/postgres`));
-    const roles = await readFile(resolve("database/bootstrap-roles.sql"), "utf8");
-    await database.query(roles);
-    await runMigrations(database);
-    store = new PostgresRunStore(database, 60_000);
+    context = await startEmbeddedPostgres({
+      prefix: "esure-run-history-",
+      setup: async ({ database: db }) => {
+        database = db;
+        const roles = await readFile(resolve("database/bootstrap-roles.sql"), "utf8");
+        await database.query(roles);
+        await runMigrations(database);
+        store = new PostgresRunStore(database, 60_000);
+      },
+    });
+    database = context.database;
   }, 60_000);
 
   afterAll(async () => {
-    await database?.close();
-    await postgres?.stop();
-    await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    await context?.stop();
   }, 30_000);
 
   it("persists, reloads, and updates API-compatible reports", async () => {
@@ -96,7 +89,7 @@ const postgresAvailable = process.platform !== "win32" || existsSync("C:/Windows
 
   it("serves persisted run history after rebuilding the API app", async () => {
     const app = buildApp({
-      config: databaseConfig(`postgres://postgres:test-password@127.0.0.1:${port}/postgres`),
+      config: databaseConfig(context.databaseUrl),
       ledger: { execute: async () => ({ steps: [], assertions: [] }) },
     });
     let runId: string;
@@ -116,7 +109,7 @@ const postgresAvailable = process.platform !== "win32" || existsSync("C:/Windows
     }
 
     const restartedApp = buildApp({
-      config: databaseConfig(`postgres://postgres:test-password@127.0.0.1:${port}/postgres`),
+      config: databaseConfig(context.databaseUrl),
       ledger: { execute: async () => ({ steps: [], assertions: [] }) },
     });
     try {
@@ -127,7 +120,7 @@ const postgresAvailable = process.platform !== "win32" || existsSync("C:/Windows
     } finally {
       await restartedApp.close();
     }
-  });
+  }, 30_000);
 
   it("applies and reverses the run history migration", async () => {
     const down = await readFile(resolve("migrations/003_persistent_run_history.down.sql"), "utf8");

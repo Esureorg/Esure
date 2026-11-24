@@ -9,7 +9,8 @@ The documentation source for the Esure project.
 - [Backend API contract](./API.md)
 - [Scenario format](./SCENARIOS.md)
 - [Issued asset payment lifecycle](./LIFECYCLE_ISSUED_ASSET_PAYMENT.md)
-- [Contributor backlog](./BACKLOG.md)
+- [Backlog and issue status](./BACKLOG.md)
+- [Embedded PostgreSQL integration tests on Windows](./EMBEDDED_POSTGRES_WINDOWS.md)
 
 ## Planned content
 
