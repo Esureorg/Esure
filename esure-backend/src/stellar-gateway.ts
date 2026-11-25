@@ -14,6 +14,7 @@ import type {
   LedgerExecutionOptions,
   LedgerGateway,
   ScenarioAssertion,
+  ScenarioAccount,
   ScenarioAsset,
   ScenarioStep,
   StepResult,
@@ -25,6 +26,7 @@ import { interpretOperationCode, interpretTransactionCode, isStellarErrorRetryab
 export type { FriendbotRetryConfig };
 
 export interface StellarGatewayOptions {
+  maxConcurrentFriendbotRequests?: number;
   friendbotRetry?: FriendbotRetryConfig;
   horizonRetry?: HorizonRetryConfig;
   fetch?: typeof fetch;
@@ -52,6 +54,8 @@ export const DEFAULT_HORIZON_RETRY_CONFIG = {
   maxDelayMs: 4_000,
   factor: 2,
 } as const;
+
+const DEFAULT_MAX_CONCURRENT_FRIENDBOT_REQUESTS = 5;
 
 export function calculateRetryDelay(
   attempt: number,
@@ -108,8 +112,12 @@ export class StellarTestnetGateway implements LedgerGateway {
     private readonly friendbotUrl: string,
     options: StellarGatewayOptions = {},
   ) {
+    const maxConcurrentFriendbotRequests = options.maxConcurrentFriendbotRequests ?? DEFAULT_MAX_CONCURRENT_FRIENDBOT_REQUESTS;
+    if (!Number.isInteger(maxConcurrentFriendbotRequests) || maxConcurrentFriendbotRequests < 1 || maxConcurrentFriendbotRequests > 50) {
+      throw new Error("MAX_CONCURRENT_FRIENDBOT_REQUESTS must be an integer between 1 and 50");
+    }
     this.#server = new Horizon.Server(horizonUrl);
-    this.#options = options;
+    this.#options = { ...options, maxConcurrentFriendbotRequests };
   }
 
   async execute(scenario: ValidatedScenario, options: LedgerExecutionOptions = {}): Promise<LedgerExecution> {
@@ -122,7 +130,7 @@ export class StellarTestnetGateway implements LedgerGateway {
     const funded = scenario.accounts.filter((account) => account.fund);
     if (funded.length) {
       await this.performRequiredStep("fund-accounts", "fundAccounts", options, steps, async (signal) => {
-        await Promise.all(funded.map((account) => this.fund(required(accounts, account.id), signal, options.friendbotRetry)));
+        await this.fundAccounts(funded, accounts, signal, options.friendbotRetry);
         return basicStep("fund-accounts", "fundAccounts", "Test accounts funded.");
       });
     }
@@ -274,6 +282,41 @@ export class StellarTestnetGateway implements LedgerGateway {
       recordStep(steps, failureStep({ id, type } as ScenarioStep, safe, false), options);
       throw safe;
     }
+  }
+
+  private async fundAccounts(
+    funded: ScenarioAccount[],
+    accounts: Map<string, Keypair>,
+    signal: AbortSignal,
+    retryOverrides?: FriendbotRetryConfig,
+  ): Promise<void> {
+    const controller = new AbortController();
+    const fundingSignal = AbortSignal.any([signal, controller.signal]);
+    const concurrency = this.#options.maxConcurrentFriendbotRequests ?? DEFAULT_MAX_CONCURRENT_FRIENDBOT_REQUESTS;
+    let nextAccount = 0;
+    let firstError: unknown;
+    let failed = false;
+
+    const worker = async () => {
+      while (!fundingSignal.aborted) {
+        const account = funded[nextAccount++];
+        if (!account) return;
+        try {
+          await this.fund(required(accounts, account.id), fundingSignal, retryOverrides);
+        } catch (error) {
+          if (!failed) {
+            failed = true;
+            firstError = error;
+            controller.abort(error);
+          }
+          return;
+        }
+      }
+    };
+
+    await Promise.all(Array.from({ length: Math.min(concurrency, funded.length) }, () => worker()));
+    if (failed) throw firstError;
+    if (signal.aborted) throw signal.reason ?? new Error("The operation was aborted.");
   }
 
   async fundAccount(

@@ -6,6 +6,7 @@ describe("loadConfig", () => {
     const config = loadConfig({});
     expect(config.horizonUrl).toContain("testnet");
     expect(config.friendbotUrl).toBe("https://friendbot.stellar.org");
+    expect(config.maxConcurrentFriendbotRequests).toBe(5);
   });
 
   it("rejects Mainnet configuration", () => {
@@ -14,6 +15,11 @@ describe("loadConfig", () => {
 
   it("rejects unsafe resource-limit configuration", () => {
     expect(() => loadConfig({ MAX_CONCURRENT_RUNS: "0" })).toThrow(/MAX_CONCURRENT_RUNS/);
+    expect(loadConfig({ MAX_CONCURRENT_FRIENDBOT_REQUESTS: "1" }).maxConcurrentFriendbotRequests).toBe(1);
+    expect(loadConfig({ MAX_CONCURRENT_FRIENDBOT_REQUESTS: "50" }).maxConcurrentFriendbotRequests).toBe(50);
+    expect(() => loadConfig({ MAX_CONCURRENT_FRIENDBOT_REQUESTS: "0" })).toThrow(/MAX_CONCURRENT_FRIENDBOT_REQUESTS/);
+    expect(() => loadConfig({ MAX_CONCURRENT_FRIENDBOT_REQUESTS: "51" })).toThrow(/MAX_CONCURRENT_FRIENDBOT_REQUESTS/);
+    expect(() => loadConfig({ MAX_CONCURRENT_FRIENDBOT_REQUESTS: "1.5" })).toThrow(/MAX_CONCURRENT_FRIENDBOT_REQUESTS/);
     expect(() => loadConfig({ BODY_LIMIT_BYTES: "99999999" })).toThrow(/BODY_LIMIT_BYTES/);
   });
 

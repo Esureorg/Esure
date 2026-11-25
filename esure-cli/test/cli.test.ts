@@ -267,4 +267,17 @@ describe("CLI commands", () => {
     expect(await invokeCli("--version")).toBe(0);
     expect(stdout.join("\n")).toContain("esure v0.1.0");
   });
+
+  it("requires a supported format for validation from standard input", async () => {
+    expect(await invokeCli("validate", "--stdin")).toBe(1);
+    expect(stderr.join("\n")).toContain("--stdin requires --format json or --format yaml");
+
+    stderr = [];
+    expect(await invokeCli("validate", "--stdin", "--format", "csv")).toBe(1);
+    expect(stderr.join("\n")).toContain("--stdin requires --format json or --format yaml");
+
+    stderr = [];
+    expect(await invokeCli("run", scenario.id, "--stdin", "--format", "json")).toBe(1);
+    expect(stderr.join("\n")).toContain("only supported by validate");
+  });
 });

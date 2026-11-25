@@ -27,7 +27,9 @@ failure explanations.
 The Render free service may sleep after inactivity, so its first response can
 take longer than subsequent requests.
 
-<!-- TODO: Add dashboard screenshot or demo GIF here -->
+![Illustrative Esure execution report showing a passed Stellar Testnet XLM payment, two completed steps, one successful balance assertion, and a three-check summary.](esure-frontend/public/dashboard-report.png)
+
+*Illustrative sample report rendered with local mock data; it does not show a live run or transaction identifier.*
 
 ## Capabilities
 
@@ -292,6 +294,7 @@ The complete contract is available from the deployed
 | `RUN_TIMEOUT_MS` | `120000` | Maximum duration of a complete run |
 | `STEP_TIMEOUT_MS` | `30000` | Maximum duration of one scenario step |
 | `MAX_CONCURRENT_RUNS` | `2` | Maximum simultaneous executions |
+| `MAX_CONCURRENT_FRIENDBOT_REQUESTS` | `5` | Maximum concurrent Friendbot funding requests per run (1-50); across concurrent runs, the global peak can reach `MAX_CONCURRENT_RUNS` * this value |
 | `MAX_STORED_RUNS` | `500` | Hard limit for retained in-memory runs |
 | `RUN_RETENTION_MS` | `3600000` | Retention time for terminal in-memory runs |
 | `RATE_LIMIT_MAX` | `120` | General request limit per rate-limit window |

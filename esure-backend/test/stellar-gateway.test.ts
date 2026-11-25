@@ -684,6 +684,77 @@ describe("StellarTestnetGateway Friendbot bounded retry", () => {
     ]);
   });
 
+  it("limits simultaneous Friendbot requests per run", async () => {
+    let active = 0;
+    let peak = 0;
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async () => {
+      active += 1;
+      peak = Math.max(peak, active);
+      await Promise.resolve();
+      active -= 1;
+      return new Response(null, { status: 200 });
+    });
+    const gateway = new StellarTestnetGateway(
+      "https://horizon-testnet.stellar.org",
+      "https://friendbot.stellar.org",
+      { fetch: fetchMock, maxConcurrentFriendbotRequests: 2 },
+    );
+    const scenario: ValidatedScenario = {
+      schemaVersion: 1,
+      id: "funding-concurrency-scenario",
+      version: 1,
+      name: "Funding concurrency scenario",
+      description: "Verifies a per-run Friendbot request limit",
+      network: "testnet",
+      contentHash: "sha256:concurrency",
+      accounts: ["alice", "bob", "carol", "dave"].map((id) => ({ id, generate: true as const, fund: true })),
+      assets: [{ id: "xlm", type: "native" }],
+      steps: [],
+      assertions: [],
+    };
+
+    const result = await gateway.execute(scenario);
+
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(peak).toBe(2);
+    expect(result.steps.at(0)?.status).toBe("passed");
+  });
+
+  it("cancels active funding and stops dequeuing when a Friendbot request fails", async () => {
+    let calls = 0;
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation((_input, init) => {
+      calls += 1;
+      if (calls === 1) return Promise.resolve(new Response(null, { status: 400 }));
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+      });
+    });
+    const gateway = new StellarTestnetGateway(
+      "https://horizon-testnet.stellar.org",
+      "https://friendbot.stellar.org",
+      { fetch: fetchMock, maxConcurrentFriendbotRequests: 2, friendbotRetry: { maxAttempts: 1 } },
+    );
+    const scenario: ValidatedScenario = {
+      schemaVersion: 1,
+      id: "funding-failure-scenario",
+      version: 1,
+      name: "Funding failure scenario",
+      description: "Verifies a funding failure stops the queue",
+      network: "testnet",
+      contentHash: "sha256:funding-failure",
+      accounts: ["alice", "bob", "carol"].map((id) => ({ id, generate: true as const, fund: true })),
+      assets: [{ id: "xlm", type: "native" }],
+      steps: [],
+      assertions: [],
+    };
+
+    const error = await gateway.execute(scenario).catch((cause: unknown) => cause);
+
+    expect(calls).toBe(2);
+    expect(error).toBeInstanceOf(SafeRunError);
+    expect((error as SafeRunError).report.code).toBe("FRIENDBOT_UNAVAILABLE");
+  });
+
   it("fails the funding step and throws sanitized error when retries are exhausted during execution", async () => {
     const fetchMock = vi
       .fn<typeof fetch>()

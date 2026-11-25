@@ -3,17 +3,17 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { validateScenarioDefinition } from "@esure/backend/src/scenario-schema.js";
-import { prepareScenario } from "@esure/backend/src/scenario-loader.js";
 import { createScenarioRegistry } from "@esure/backend/src/scenarios.js";
 import { StellarTestnetGateway } from "@esure/backend/src/stellar-gateway.js";
-import { parse as parseYaml } from "yaml";
 import type { ValidatedScenario } from "@esure/backend/src/domain.js";
+import { loadScenarioStdin, parseScenarioContent, type ScenarioInputFormat } from "./scenario-input.js";
 
 const VERSION = "0.1.0";
 
 interface CliOptions {
   output?: "human" | "json";
+  stdin?: boolean;
+  format?: string;
   help?: boolean;
   version?: boolean;
 }
@@ -25,17 +25,21 @@ esure - Stellar Testnet scenario testing toolkit
 Usage:
   esure list                              List bundled scenarios
   esure validate <file>                   Validate a scenario file
+  esure validate --stdin --format <format> Validate a scenario from standard input
   esure run <scenario-id>                 Run a bundled scenario
   esure run <file>                        Run a scenario from file
 
 Options:
   --output <format>   Output format: human (default) or json
+  --stdin             Read a scenario from standard input (validate only)
+  --format <format>   Standard input format: json or yaml
   --help              Show this help message
   --version           Show version information
 
 Examples:
   esure list
   esure validate ./my-scenario.yaml
+  esure validate --stdin --format yaml
   esure run xlm-payment
   esure run ./my-scenario.yaml --output json
 
@@ -51,6 +55,8 @@ function parseCliArgs(): { command?: string; args: string[]; options: CliOptions
   const { values, positionals } = parseArgs({
     options: {
       output: { type: "string" },
+      stdin: { type: "boolean" },
+      format: { type: "string" },
       help: { type: "boolean", short: "h" },
       version: { type: "boolean", short: "v" },
     },
@@ -63,6 +69,8 @@ function parseCliArgs(): { command?: string; args: string[]; options: CliOptions
     args: positionals.slice(1),
     options: {
       output: values.output === "json" ? "json" : "human",
+      stdin: Boolean(values.stdin),
+      format: typeof values.format === "string" ? values.format : undefined,
       help: Boolean(values.help),
       version: Boolean(values.version),
     },
@@ -73,17 +81,15 @@ async function loadScenarioFile(filePath: string): Promise<ValidatedScenario> {
   const absolutePath = resolve(filePath);
   const content = await readFile(absolutePath, "utf-8");
 
-  let parsed: unknown;
+  let format: ScenarioInputFormat;
   if (filePath.endsWith(".json")) {
-    parsed = JSON.parse(content);
+    format = "json";
   } else if (filePath.endsWith(".yaml") || filePath.endsWith(".yml")) {
-    parsed = parseYaml(content);
+    format = "yaml";
   } else {
     throw new Error("Scenario file must be .json, .yaml, or .yml");
   }
-
-  const validated = validateScenarioDefinition(parsed);
-  return prepareScenario(validated);
+  return parseScenarioContent(content, format);
 }
 
 async function listCommand(options: CliOptions): Promise<number> {
@@ -112,9 +118,9 @@ async function listCommand(options: CliOptions): Promise<number> {
   }
 }
 
-async function validateCommand(filePath: string, options: CliOptions): Promise<number> {
+async function validateCommand(loadScenario: () => Promise<ValidatedScenario>, options: CliOptions): Promise<number> {
   try {
-    const scenario = await loadScenarioFile(filePath);
+    const scenario = await loadScenario();
 
     if (options.output === "json") {
       console.log(JSON.stringify({
@@ -260,16 +266,42 @@ async function main(): Promise<number> {
     return command ? 0 : 1;
   }
 
+  if ((options.stdin || options.format !== undefined) && command !== "validate") {
+    console.error("Error: --stdin and --format are only supported by validate");
+    return 1;
+  }
+
   switch (command) {
     case "list":
       return listCommand(options);
     case "validate":
+      if (options.stdin) {
+        if (args.length > 0) {
+          console.error("Error: Do not provide a file path when using --stdin");
+          console.error("Usage: esure validate --stdin --format <json|yaml>");
+          return 1;
+        }
+        const format = options.format;
+        if (format !== "json" && format !== "yaml") {
+          console.error("Error: --stdin requires --format json or --format yaml");
+          return 1;
+        }
+        return validateCommand(() => loadScenarioStdin(format), options);
+      }
+      if (options.format !== undefined) {
+        console.error("Error: --format can only be used with --stdin");
+        return 1;
+      }
       if (args.length === 0) {
         console.error("Error: Missing file path argument");
         console.error("Usage: esure validate <file>");
         return 1;
       }
-      return validateCommand(args[0], options);
+      if (args.length > 1) {
+        console.error("Error: Provide only one scenario file");
+        return 1;
+      }
+      return validateCommand(() => loadScenarioFile(args[0]), options);
     case "run":
       if (args.length === 0) {
         console.error("Error: Missing scenario ID or file path");
