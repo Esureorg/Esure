@@ -66,6 +66,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            esure-backend/package-lock.json
+            esure-cli/package-lock.json
       - name: Install backend dependencies
         working-directory: esure-backend
         run: npm ci --no-workspaces
