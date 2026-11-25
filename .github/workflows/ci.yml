@@ -51,7 +51,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: playwright-report-${{ matrix.node-version || 'default' }}
-          path: esure-frontend/playwright-report/
+          path: |
+            esure-frontend/playwright-report/
+            esure-frontend/test-results/
           retention-days: 7
           if-no-files-found: ignore
 
