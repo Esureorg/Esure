@@ -1275,6 +1275,103 @@ describe("Issue #94 — trustlineLimitEquals assertion", () => {
   });
 });
 
+// Issue #288 — strict-receive path payment that exceeds sendMax
+describe("Issue #288 — path payment sendMax exceeded", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  const recipientUsdcBalance = "0";
+
+  function sendMaxScenario(): ValidatedScenario {
+    return {
+      schemaVersion: 1,
+      id: "path-payment-sendmax-exceeded",
+      version: 1,
+      name: "Path payment sendMax exceeded",
+      description: "Strict-receive path payment whose sendMax is insufficient.",
+      network: "testnet",
+      contentHash: "sha256:" + "0".repeat(64),
+      accounts: [
+        { id: "sender", generate: true, fund: false },
+        { id: "recipient", generate: true, fund: false },
+        { id: "issuer", generate: true, fund: false },
+      ],
+      assets: [
+        { id: "xlm", type: "native" },
+        { id: "usdc", type: "issued", code: "USDC", issuer: "issuer" },
+        { id: "eur", type: "issued", code: "EUR", issuer: "issuer" },
+      ],
+      steps: [
+        { id: "trust-usdc", type: "changeTrust", account: "recipient", asset: "usdc" },
+        { id: "trust-eur", type: "changeTrust", account: "sender", asset: "eur" },
+        { id: "fund-sender", type: "payment", from: "issuer", to: "sender", asset: "eur", amount: "100" },
+        { id: "make-market", type: "manageSellOffer", account: "issuer", selling: "eur", buying: "usdc", amount: "100", price: "1" },
+        {
+          id: "pay-usdc-through-eur",
+          type: "pathPaymentStrictReceive",
+          from: "sender",
+          to: "recipient",
+          sendAsset: "eur",
+          sendMax: "0.5",
+          destAsset: "usdc",
+          destAmount: "10",
+          path: [],
+        },
+      ],
+      assertions: [
+        { type: "stepFailedWith", step: "pay-usdc-through-eur", transactionCode: "tx_failed", operationCodes: ["op_too_few_offers"] },
+        { type: "balanceEquals", account: "recipient", asset: "usdc", amount: recipientUsdcBalance },
+      ],
+    };
+  }
+
+  function setupSendMaxMocks(resultCodes: { transaction: string; operations: string[] }) {
+    vi.spyOn(Horizon.Server.prototype, "loadAccount").mockImplementation(async (key) =>
+      Object.assign(new Account(key, "1"), {
+        balances: [{ asset_type: "credit_alphanum4", asset_code: "USDC", asset_issuer: STUB_PUBKEY, balance: recipientUsdcBalance, limit: "1000" }],
+      }) as unknown as Awaited<ReturnType<Horizon.Server["loadAccount"]>>,
+    );
+    vi.spyOn(Horizon.Server.prototype, "fetchTimebounds").mockResolvedValue({ minTime: 0, maxTime: 2_000_000_000 });
+    return vi.spyOn(Horizon.Server.prototype, "submitTransaction").mockImplementation(async (transaction) => {
+      const types = transaction.operations.map((operation) => operation.type);
+      if (types.includes("pathPaymentStrictReceive")) {
+        throw horizonError(resultCodes.transaction, resultCodes.operations);
+      }
+      return { hash: "a".repeat(64), ledger: 100 } as Horizon.HorizonApi.SubmitTransactionResponse;
+    });
+  }
+
+  it("fails the strict-receive step with the expected result codes and leaves the destination balance unchanged", async () => {
+    const submit = setupSendMaxMocks({ transaction: "tx_failed", operations: ["op_too_few_offers"] });
+    const gateway = new StellarTestnetGateway("https://horizon.example", "https://friendbot.example");
+
+    const { steps, assertions } = await gateway.execute(sendMaxScenario());
+
+    const pathStep = steps.find((step) => step.id === "pay-usdc-through-eur");
+    expect(pathStep).toMatchObject({
+      status: "failed",
+      stellarTransactionCode: "tx_failed",
+      stellarOperationCodes: ["op_too_few_offers"],
+    });
+    expect(submit).toHaveBeenCalledTimes(5);
+
+    const failureAssertion = assertions.find((assertion) => assertion.type === "stepFailedWith");
+    expect(failureAssertion).toMatchObject({ status: "passed" });
+
+    const balanceAssertion = assertions.find((assertion) => assertion.type === "balanceEquals");
+    expect(balanceAssertion).toMatchObject({ status: "passed", expected: recipientUsdcBalance, actual: recipientUsdcBalance });
+  });
+
+  it("does not accept a mismatched result code as the expected failure", async () => {
+    setupSendMaxMocks({ transaction: "tx_failed", operations: ["op_underfunded"] });
+    const gateway = new StellarTestnetGateway("https://horizon.example", "https://friendbot.example");
+
+    const { assertions } = await gateway.execute(sendMaxScenario());
+
+    const failureAssertion = assertions.find((assertion) => assertion.type === "stepFailedWith");
+    expect(failureAssertion).toMatchObject({ status: "failed" });
+  });
+});
+
 // Issue #93 — fee-aware native balance delta assertions
 describe("Issue #93 — feeAwareNativeBalanceDelta assertion", () => {
   afterEach(() => vi.restoreAllMocks());

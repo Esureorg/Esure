@@ -19,7 +19,7 @@ describe.runIf(live)("real Stellar Testnet smoke", () => {
   beforeAll(async () => app.ready());
   afterAll(async () => app.close());
 
-  for (const scenarioId of ["xlm-payment", "issued-asset-payment", "missing-trustline", "payment-with-memo", "unfunded-destination", "trustline-limit-exact", "trustline-balance-reduction"] as const) {
+  for (const scenarioId of ["xlm-payment", "issued-asset-payment", "missing-trustline", "payment-with-memo", "unfunded-destination", "trustline-limit-exact", "trustline-balance-reduction", "path-payment-sendmax-exceeded"] as const) {
     it(`executes ${scenarioId} through the public API`, async () => {
       const started = await app.inject({
         method: "POST",
@@ -68,6 +68,26 @@ describe.runIf(live)("real Stellar Testnet smoke", () => {
           expect.objectContaining({ type: "stepFailedWith", status: "passed", expected: "tx_failed/op_invalid_limit", actual: "tx_failed/op_invalid_limit" }),
           expect.objectContaining({ type: "balanceEquals", status: "passed", expected: "10", actual: "10" }),
         ]);
+      }
+      if (scenarioId === "path-payment-sendmax-exceeded") {
+        expect(report.steps).toContainEqual(expect.objectContaining({
+          id: "pay-path-sendmax-exceeded",
+          status: "failed",
+          stellarTransactionCode: "tx_failed",
+          stellarOperationCodes: ["op_too_few_offers"],
+        }));
+        expect(report.assertions).toContainEqual(expect.objectContaining({
+          type: "stepFailedWith",
+          status: "passed",
+          expected: "tx_failed/op_too_few_offers",
+          actual: "tx_failed/op_too_few_offers",
+        }));
+        expect(report.assertions).toContainEqual(expect.objectContaining({
+          type: "balanceEquals",
+          status: "passed",
+          expected: "0",
+          actual: "0",
+        }));
       }
       const downloaded = await app.inject({ method: "GET", url: `/api/v1/runs/${report.id}/report` });
       expect(downloaded.statusCode).toBe(200);
