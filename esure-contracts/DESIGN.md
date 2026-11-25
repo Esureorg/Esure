@@ -28,6 +28,16 @@ A minimal conditional-payment contract may eventually test authorization,
 contract events, expiration, and successful or rejected release. This is a
 candidate, not an approved implementation.
 
+The [first fixture decision](./FIRST_FIXTURE_DECISION.md) compares this
+candidate with the token examples in [PROPOSAL.md](./PROPOSAL.md) and selects
+conditional payment as the first prototype candidate, still proposal-only.
+
+## Supporting designs
+
+- [Fixture identity and reset behavior](./FIXTURE_IDENTITY.md)
+- [Simulation resource evidence](./SIMULATION_RESOURCES.md)
+- [Deterministic local test strategy](./TEST_STRATEGY.md)
+
 ## Non-goals
 
 - Production escrow
