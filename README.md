@@ -33,7 +33,7 @@ take longer than subsequent requests.
 
 ## Capabilities
 
-- **10 MVP Scenarios**: XLM payments, issued assets, trustlines, expected failures, multi-op transactions (Testnet only)
+- **13 Bundled Scenarios**: XLM payments, issued assets, trustlines, expected failures, multi-op transactions (Testnet only)
 - **Developer-Friendly Errors**: Plain-English explanations for 30+ Stellar error codes with causes and fix suggestions
 - **Command-Line Interface**: Run scenarios from terminal or CI pipelines (run from source; not yet published to npm)
 - **CI/CD Integration**: First-class GitHub Actions, GitLab CI, and CircleCI support
@@ -68,7 +68,7 @@ Unlike Stellar Lab, which requires manual step-through and copy/paste workflow, 
 
 ## Bundled scenarios
 
-Esure includes 10 MVP scenarios for Testnet integration testing:
+Esure includes 13 bundled scenarios for Testnet integration testing:
 
 | Scenario | Purpose | Expected result |
 | --- | --- | --- |
@@ -76,9 +76,11 @@ Esure includes 10 MVP scenarios for Testnet integration testing:
 | `issued-asset-payment` | Create TESTUSD trustline, issue 100 TESTUSD, verify balance | Pass |
 | `missing-trustline` | Attempt issued-asset payment without recipient trustline | Controlled `op_no_trust` failure |
 | `insufficient-xlm-balance` | Attempt to send more XLM than available in account | Controlled `op_underfunded` failure |
-| `payment-with-memo` | Send XLM with memo for transaction tracking | Pass |
+| `unfunded-destination` | Pay a generated destination that has not been funded or created on the ledger | Controlled `tx_failed/op_no_destination` failure |
+| `payment-with-memo` | Send XLM with a text memo and verify it on the confirmed transaction | Pass |
 | `multi-operation-transaction` | Execute trustline + payment atomically in single tx | Pass |
 | `trustline-limit-exceeded` | Attempt payment exceeding trustline limit | Controlled `op_line_full` failure |
+| `trustline-limit-exact` | Pay exactly the fractional trustline limit and verify the final balance | Pass |
 | `trustline-already-exists` | Multiple payments using existing trustline | Pass |
 | `basic-payment-with-checks` | Send XLM and verify both accounts exist after transaction | Pass |
 | `minimum-xlm-payment` | Send minimum viable XLM amount (1 stroop = 0.0000001 XLM) | Pass |
@@ -229,8 +231,20 @@ npm run build
 # List bundled scenarios
 node dist/cli.js list
 
+# Filter and sort scenarios
+node dist/cli.js list --search payment --sort id
+
+# Show a bundled scenario definition
+node dist/cli.js show xlm-payment
+
 # Validate a scenario file
 node dist/cli.js validate ./my-scenario.yaml
+
+# Validate a scenario from standard input
+cat ./my-scenario.json | node dist/cli.js validate --stdin --format json
+
+# Validate a directory of scenario files
+node dist/cli.js validate-directory ./scenarios
 
 # Run a bundled scenario
 node dist/cli.js run xlm-payment
@@ -283,6 +297,8 @@ The complete contract is available from the deployed
 | Variable | Default | Description |
 | --- | --- | --- |
 | `ESURE_BACKEND_URL` | `http://127.0.0.1:3001` | Server-only backend origin used by the Next.js proxy |
+
+Restart the local frontend or redeploy it after changing `ESURE_BACKEND_URL`.
 
 ### Backend
 
@@ -346,17 +362,13 @@ The Render free tier sleeps after 15 minutes of inactivity. To keep the backend 
 
 ## Current MVP status
 
-| Area | Status |
-| --- | --- |
-| Declarative scenario validation | Implemented |
-| XLM and issued-asset Testnet execution | Implemented |
-| Expected-failure reporting | Implemented |
-| Dashboard and report rendering | Implemented |
-| Unit and API test suite | Implemented |
-| Monorepo CI | Implemented |
-| Published scenario PostgreSQL catalogue | Optional foundation implemented |
-| Persistent run execution and evidence | Planned |
-| Automated primary browser journey | Planned |
+| Capability | Shipped in this checkout | Planned / proposal |
+| --- | --- | --- |
+| Testnet scenarios and reports | Bounded scenario validation, classic Stellar execution, expected-failure reporting, and dashboard reports are shipped. Mainnet is rejected. | Mainnet use is out of scope. |
+| Published scenario catalogue | Optional PostgreSQL catalogue with version history and migration checks; see the [persistence implementation](esure-backend/src/persistence.ts). | No additional catalogue phase is recorded. |
+| Run history | Reports are in memory by default. `RUN_PERSISTENCE_ENABLED=true` with `PERSISTENCE_MODE=published` opts into PostgreSQL report storage; see the [run stores](esure-backend/src/run-store.ts). | Durable run execution, worker leases, and recovery are planned in [#21](https://github.com/Esureorg/Esure/issues/21). |
+| Primary browser journey | Playwright covers scenario selection, run start, polling, and passed/failed reports in the [journey test](esure-frontend/e2e/primary-journey.spec.ts); the [monorepo workflow](.github/workflows/ci.yml) runs it. | No additional primary-journey work is recorded. |
+| Soroban contract testing | Not in the MVP execution path. | Design examples are proposals in [esure-contracts](esure-contracts/PROPOSAL.md). |
 
 Active work is tracked in [GitHub Issues](https://github.com/Esureorg/Esure/issues).
 

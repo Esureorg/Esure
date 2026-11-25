@@ -3,6 +3,7 @@ import {
   BASE_FEE,
   Horizon,
   Keypair,
+  Memo,
   Networks,
   Operation,
   TransactionBuilder,
@@ -20,8 +21,15 @@ import type {
   StepResult,
   ValidatedScenario,
 } from "./domain.js";
-import { SafeRunError, StepTimeoutError, withTimeout } from "./errors.js";
+import {
+  friendbotTimeoutError,
+  horizonTimeoutError,
+  SafeRunError,
+  StepTimeoutError,
+  withTimeout,
+} from "./errors.js";
 import { interpretOperationCode, interpretTransactionCode, isStellarErrorRetryable } from "./stellar-error-interpreter.js";
+import { isTextMemo } from "./text-memo.js";
 
 export type { FriendbotRetryConfig };
 
@@ -31,7 +39,27 @@ export interface StellarGatewayOptions {
   horizonRetry?: HorizonRetryConfig;
   fetch?: typeof fetch;
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
+  /** Issue #82: maximum number of concurrent Friendbot funding requests per run. */
+  fundingConcurrency?: number;
+  /** Issue #83: injectable clock for deterministic step-timing tests. */
+  clock?: Clock;
 }
+
+/** Issue #83: a clock abstraction so timing tests can avoid real delays. */
+export interface Clock {
+  /** Monotonic timestamp (ms) suitable for measuring elapsed duration. */
+  monotonicNow: () => number;
+  /** Wall-clock ISO-8601 timestamp suitable for display. */
+  isoNow: () => string;
+}
+
+export const DEFAULT_CLOCK: Clock = {
+  monotonicNow: () => performance.now(),
+  isoNow: () => new Date().toISOString(),
+};
+
+/** Issue #82: default cap on concurrent Friendbot funding requests per run. */
+export const DEFAULT_FUNDING_CONCURRENCY = 5;
 
 export interface HorizonRetryConfig {
   maxRetries?: number;
@@ -137,24 +165,28 @@ export class StellarTestnetGateway implements LedgerGateway {
 
     const initialBalances = new Map<string, string>();
     for (const assertion of scenario.assertions) {
-      if (assertion.type !== "balanceChangedBy") continue;
+      if (assertion.type !== "balanceChangedBy" && assertion.type !== "feeAwareNativeBalanceDelta") continue;
       const key = balanceKey(assertion.account, assertion.asset);
       if (!initialBalances.has(key)) {
         initialBalances.set(key, await this.readBalanceOrZero(required(accounts, assertion.account).publicKey(), required(assets, assertion.asset), options, `initial-${assertion.account}-${assertion.asset}`));
       }
     }
 
+    const clock = this.#options.clock ?? DEFAULT_CLOCK;
     for (const definition of scenario.steps) {
       const expectedFailure = scenario.assertions.find((assertion): assertion is Extract<ScenarioAssertion, { type: "stepFailedWith" }> => assertion.type === "stepFailedWith" && assertion.step === definition.id);
+      const startedAt = clock.isoNow();
+      const startMark = clock.monotonicNow();
       try {
         const result = await executeBounded(definition.id, options, async () => this.executeOperation(definition, accounts, assets));
-        const outcome = { result, succeeded: true } satisfies StepOutcome;
+        const timed = withTiming(result, startedAt, startMark, clock);
+        const outcome = { result: timed, succeeded: true } satisfies StepOutcome;
         outcomes.set(definition.id, outcome);
-        recordStep(steps, result, options);
+        recordStep(steps, timed, options);
       } catch (error) {
         const safe = normalizeStellarError(error, definition.id);
         const exactExpectedFailure = expectedFailure && matchesFailure(safe, expectedFailure.transactionCode, expectedFailure.operationCodes);
-        const failed = failureStep(definition, safe, Boolean(exactExpectedFailure));
+        const failed = withTiming(failureStep(definition, safe, Boolean(exactExpectedFailure)), startedAt, startMark, clock);
         outcomes.set(definition.id, {
           result: failed,
           succeeded: false,
@@ -168,7 +200,7 @@ export class StellarTestnetGateway implements LedgerGateway {
 
     for (const definition of scenario.assertions) {
       try {
-        const result = await this.evaluateAssertion(definition, accounts, assets, outcomes, initialBalances, options);
+        const result = withSubjectRefs(await this.evaluateAssertion(definition, accounts, assets, outcomes, initialBalances, options), definition);
         recordAssertion(assertions, result, options);
       } catch (error) {
         throw normalizeStellarError(error, `assert-${definition.type}`);
@@ -193,7 +225,7 @@ export class StellarTestnetGateway implements LedgerGateway {
         destination: required(accounts, definition.to).publicKey(),
         asset: required(assets, definition.asset),
         amount: definition.amount,
-      })]);
+      })], definition.memo);
       return transactionStep(definition.id, definition.type, response);
     }
     if (definition.type === "manageSellOffer") {
@@ -234,9 +266,22 @@ export class StellarTestnetGateway implements LedgerGateway {
     assets: Map<string, Asset>,
     outcomes: Map<string, StepOutcome>,
     initialBalances: Map<string, string>,
+    steps: StepResult[],
     options: LedgerExecutionOptions,
   ): Promise<AssertionResult> {
     switch (definition.type) {
+      case "transactionMemoEquals": {
+        const outcome = required(outcomes, definition.step);
+        let actual: string | null = null;
+        if (outcome.succeeded && outcome.result.transactionHash && outcome.result.ledger) {
+          const hash = outcome.result.transactionHash;
+          const transaction = await executeBounded(`assert-${definition.type}`, options, async () =>
+            this.withHorizonRetry(() => this.#server.transactions().transaction(hash).call(), "transaction lookup"));
+          // Only bounded text from the matching successful transaction enters a report.
+          if (transaction.hash === hash && transaction.successful && transaction.memo_type === "text" && isTextMemo(transaction.memo)) actual = transaction.memo;
+        }
+        return comparison(definition.type, definition.memo, actual, `Text memo for step ${definition.step} matched the confirmed transaction.`);
+      }
       case "balanceEquals": {
         const actual = await this.readBalanceOrZero(required(accounts, definition.account).publicKey(), required(assets, definition.asset), options, `assert-${definition.type}`);
         return comparison(definition.type, canonicalDecimal(definition.amount), canonicalDecimal(actual), `Balance for ${definition.account}/${definition.asset} matched.`);
@@ -265,21 +310,53 @@ export class StellarTestnetGateway implements LedgerGateway {
         const actual = await executeBounded(`assert-${definition.type}`, options, async () => this.accountExists(required(accounts, definition.account).publicKey()));
         return comparison(definition.type, true, actual, `Account ${definition.account} exists on Testnet.`);
       }
+      case "accountMissing": {
+        const result = await executeBounded(`assert-${definition.type}`, options, async () => this.accountLookupResult(required(accounts, definition.account).publicKey()));
+        if (result === "not_found") return comparison(definition.type, true, true, `Account ${definition.account} is absent on Testnet as expected.`);
+        if (result === "found") return comparison(definition.type, true, false, `Account ${definition.account} exists on Testnet but was expected to be absent.`);
+        throw result;
+      }
       case "trustlineExists":
       case "trustlineMissing": {
         const exists = await executeBounded(`assert-${definition.type}`, options, async () => this.trustlineExists(required(accounts, definition.account).publicKey(), required(assets, definition.asset)));
         const expected = definition.type === "trustlineExists";
         return comparison(definition.type, expected, exists, `Trustline ${definition.account}/${definition.asset} is ${expected ? "present" : "absent"}.`);
       }
+      case "trustlineLimitEquals": {
+        const actual = await executeBounded(`assert-${definition.type}`, options, async () => this.trustlineLimit(required(accounts, definition.account).publicKey(), required(assets, definition.asset)));
+        if (actual === null) {
+          return { type: definition.type, status: "failed", expected: canonicalDecimal(definition.limit), actual: null, message: `Trustline ${definition.account}/${definition.asset} does not exist; expected limit ${canonicalDecimal(definition.limit)}.` };
+        }
+        return comparison(definition.type, canonicalDecimal(definition.limit), canonicalDecimal(actual), `Trustline limit for ${definition.account}/${definition.asset} matched ${canonicalDecimal(definition.limit)}.`);
+      }
+      case "feeAwareNativeBalanceDelta": {
+        const before = required(initialBalances, balanceKey(definition.account, definition.asset));
+        const after = await this.readBalanceOrZero(required(accounts, definition.account).publicKey(), required(assets, definition.asset), options, `assert-${definition.type}`);
+        const stepResult = steps.find((s) => s.id === definition.step);
+        const feeCharged = stepResult?.feeCharged;
+        const feeStroops = feeCharged !== undefined ? BigInt(feeCharged) : undefined;
+        const amountStroops = decimalToStroops(definition.amount);
+        const expectedTotalStroops = feeStroops !== undefined ? amountStroops - feeStroops : amountStroops;
+        const actualDeltaStroops = decimalToStroops(after) - decimalToStroops(before);
+        const expectedEvidence: Record<string, unknown> = { amount: canonicalDecimal(definition.amount), fee: feeStroops !== undefined ? stroopsToDecimal(feeStroops) : null, total: stroopsToDecimal(expectedTotalStroops) };
+        const actualEvidence: Record<string, unknown> = { delta: stroopsToDecimal(actualDeltaStroops), fee: feeStroops !== undefined ? stroopsToDecimal(feeStroops) : null };
+        const passed = actualDeltaStroops === expectedTotalStroops;
+        return { type: definition.type, status: passed ? "passed" : "failed", expected: expectedEvidence, actual: actualEvidence, message: passed ? `Fee-aware native balance delta for ${definition.account}/${definition.asset} matched.` : `Expected delta ${stroopsToDecimal(expectedTotalStroops)} (amount ${canonicalDecimal(definition.amount)}, fee ${feeStroops !== undefined ? stroopsToDecimal(feeStroops) : "unknown"}), received ${stroopsToDecimal(actualDeltaStroops)}.` };
+      }
     }
   }
 
   private async performRequiredStep(id: string, type: string, options: LedgerExecutionOptions, steps: StepResult[], action: (signal: AbortSignal) => Promise<StepResult>): Promise<void> {
+    const clock = this.#options.clock ?? DEFAULT_CLOCK;
+    const startedAt = clock.isoNow();
+    const startMark = clock.monotonicNow();
     try {
-      recordStep(steps, await executeBounded(id, options, action), options);
+      const result = await executeBounded(id, options, action);
+      recordStep(steps, withTiming(result, startedAt, startMark, clock), options);
     } catch (error) {
       const safe = normalizeStellarError(error, id);
-      recordStep(steps, failureStep({ id, type } as ScenarioStep, safe, false), options);
+      const failed = withTiming(failureStep({ id, type } as ScenarioStep, safe, false), startedAt, startMark, clock);
+      recordStep(steps, failed, options);
       throw safe;
     }
   }
@@ -351,6 +428,7 @@ export class StellarTestnetGateway implements LedgerGateway {
       } catch (error) {
         if (signal?.aborted) throw error;
         if (attempt >= retryConfig.maxAttempts) {
+          if (isTimeoutError(error)) throw friendbotTimeoutError("fund-accounts");
           throw new SafeRunError({
             code: "FRIENDBOT_UNAVAILABLE",
             message: "Friendbot could not be reached.",
@@ -370,6 +448,9 @@ export class StellarTestnetGateway implements LedgerGateway {
 
       const isRetryable = response.status === 429 || response.status >= 500;
       if (!isRetryable || attempt >= retryConfig.maxAttempts) {
+        if (response.status === 408 || response.status === 504) {
+          throw friendbotTimeoutError("fund-accounts");
+        }
         throw new SafeRunError({
           code: "FRIENDBOT_UNAVAILABLE",
           message: `Friendbot rejected the funding request with HTTP ${response.status}.`,
@@ -395,13 +476,15 @@ export class StellarTestnetGateway implements LedgerGateway {
     ReturnType<typeof Operation.manageSellOffer> |
     ReturnType<typeof Operation.pathPaymentStrictReceive> |
     ReturnType<typeof Operation.pathPaymentStrictSend>
-  >) {
-    const account = await this.withHorizonRetry(() => this.#server.loadAccount(source.publicKey()));
-    const builder = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: Networks.TESTNET, timebounds: await this.#server.fetchTimebounds(60) });
+  >, memo?: string) {
+    const account = await this.withHorizonRetry(() => this.#server.loadAccount(source.publicKey()), "account loading");
+    const timebounds = await this.withHorizonRetry(() => this.#server.fetchTimebounds(60), "transaction submission");
+    const builder = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: Networks.TESTNET, timebounds });
+    if (memo !== undefined) builder.addMemo(Memo.text(memo));
     for (const operation of operations) builder.addOperation(operation);
     const transaction = builder.build();
     transaction.sign(source);
-    return this.withHorizonRetry(() => this.#server.submitTransaction(transaction));
+    return this.withHorizonRetry(() => this.#server.submitTransaction(transaction), "transaction submission");
   }
 
   private async readBalanceOrZero(publicKey: string, asset: Asset, options: LedgerExecutionOptions, stepId: string): Promise<string> {
@@ -416,7 +499,7 @@ export class StellarTestnetGateway implements LedgerGateway {
   }
 
   private async balance(publicKey: string, asset: Asset): Promise<string> {
-    const account = await this.withHorizonRetry(() => this.#server.loadAccount(publicKey));
+    const account = await this.withHorizonRetry(() => this.#server.loadAccount(publicKey), "account loading");
     const found = account.balances.find((balance) => asset.isNative()
       ? balance.asset_type === "native"
       : "asset_code" in balance && balance.asset_code === asset.getCode() && "asset_issuer" in balance && balance.asset_issuer === asset.getIssuer());
@@ -424,16 +507,38 @@ export class StellarTestnetGateway implements LedgerGateway {
   }
 
   private async accountExists(publicKey: string): Promise<boolean> {
-    try { await this.withHorizonRetry(() => this.#server.loadAccount(publicKey)); return true; }
+    try { await this.withHorizonRetry(() => this.#server.loadAccount(publicKey), "account loading"); return true; }
     catch (error) { if (isNotFound(error)) return false; throw error; }
   }
 
+  /** Returns "found", "not_found", or rethrows if the error is not a 404. */
+  private async accountLookupResult(publicKey: string): Promise<"found" | "not_found" | Error> {
+    try { await this.withHorizonRetry(() => this.#server.loadAccount(publicKey), "account loading"); return "found"; }
+    catch (error) { if (isNotFound(error)) return "not_found"; throw error; }
+  }
+
   private async trustlineExists(publicKey: string, asset: Asset): Promise<boolean> {
-    const account = await this.withHorizonRetry(() => this.#server.loadAccount(publicKey));
+    const account = await this.withHorizonRetry(() => this.#server.loadAccount(publicKey), "account loading");
     return account.balances.some((balance) => "asset_code" in balance && balance.asset_code === asset.getCode() && "asset_issuer" in balance && balance.asset_issuer === asset.getIssuer());
   }
 
-  private async withHorizonRetry<T>(operation: () => Promise<T>): Promise<T> {
+  /** Returns the trustline limit as a decimal string, or null if the trustline does not exist. */
+  private async trustlineLimit(publicKey: string, asset: Asset): Promise<string | null> {
+    try {
+      const account = await this.withHorizonRetry(() => this.#server.loadAccount(publicKey), "account loading");
+      const found = account.balances.find((balance) => "asset_code" in balance && balance.asset_code === asset.getCode() && "asset_issuer" in balance && balance.asset_issuer === asset.getIssuer());
+      if (!found || !("limit" in found)) return null;
+      return (found as { limit: string }).limit;
+    } catch (error) {
+      if (isNotFound(error)) return null;
+      throw error;
+    }
+  }
+
+  private async withHorizonRetry<T>(
+    operation: () => Promise<T>,
+    request: "transaction submission" | "account loading" | "transaction lookup",
+  ): Promise<T> {
     const config = {
       maxRetries: Math.max(0, this.#options.horizonRetry?.maxRetries ?? DEFAULT_HORIZON_RETRY_CONFIG.maxRetries),
       baseDelayMs: this.#options.horizonRetry?.baseDelayMs ?? DEFAULT_HORIZON_RETRY_CONFIG.baseDelayMs,
@@ -448,8 +553,12 @@ export class StellarTestnetGateway implements LedgerGateway {
       try {
         return await operation();
       } catch (error) {
-        if (!isRetryableHorizonError(error)) throw error;
+        if (!isRetryableHorizonError(error)) {
+          if (isTimeoutError(error)) throw horizonTimeoutError(request);
+          throw error;
+        }
         if (retries >= config.maxRetries) {
+          if (isTimeoutError(error)) throw horizonTimeoutError(request);
           throw new SafeRunError({
             code: "HORIZON_UNAVAILABLE",
             message: `Horizon request failed after ${retries} retries.`,
@@ -473,9 +582,20 @@ async function executeBounded<T>(stepId: string, options: LedgerExecutionOptions
 }
 
 function recordStep(steps: StepResult[], result: StepResult, options: LedgerExecutionOptions): void { steps.push(result); options.onStep?.(structuredClone(result)); }
+
+/** Issue #83: attach start/completion timestamps and monotonic elapsed duration to a step result. */
+function withTiming(result: StepResult, startedAt: string, startMark: number, clock: Clock): StepResult {
+  const completedAt = clock.isoNow();
+  const durationMs = Math.max(0, clock.monotonicNow() - startMark);
+  return { ...result, startedAt, completedAt, durationMs };
+}
 function recordAssertion(assertions: AssertionResult[], result: AssertionResult, options: LedgerExecutionOptions): void { assertions.push(result); options.onAssertion?.(structuredClone(result)); }
 function basicStep(id: string, type: string, message: string): StepResult { return { id, type, status: "passed", message }; }
-function transactionStep(id: string, type: string, response: Horizon.HorizonApi.SubmitTransactionResponse): StepResult { return { id, type, status: "passed", transactionHash: response.hash, ledger: response.ledger, message: "Transaction confirmed on Stellar Testnet." }; }
+function transactionStep(id: string, type: string, response: Horizon.HorizonApi.SubmitTransactionResponse): StepResult {
+  const responseRecord = response as unknown as Record<string, unknown>;
+  const feeCharged = typeof responseRecord.fee_charged === "string" ? responseRecord.fee_charged : undefined;
+  return { id, type, status: "passed", transactionHash: response.hash, ledger: response.ledger, ...(feeCharged !== undefined && { feeCharged }), message: "Transaction confirmed on Stellar Testnet." };
+}
 
 function failureStep(definition: Pick<ScenarioStep, "id" | "type">, safe: SafeRunError, expected: boolean): StepResult {
   return {
@@ -489,6 +609,18 @@ function failureStep(definition: Pick<ScenarioStep, "id" | "type">, safe: SafeRu
 function comparison(type: AssertionResult["type"], expected: AssertionResult["expected"], actual: AssertionResult["actual"], success: string): AssertionResult {
   const passed = JSON.stringify(actual) === JSON.stringify(expected);
   return { type, status: passed ? "passed" : "failed", expected, actual, message: passed ? success : `Expected ${JSON.stringify(expected)}, received ${JSON.stringify(actual)}.` };
+}
+
+/**
+ * Issue #84: attach bounded optional subject references from the assertion
+ * definition onto the result so clients can identify what was tested.
+ */
+function withSubjectRefs(result: AssertionResult, definition: ScenarioAssertion): AssertionResult {
+  const refs: { account?: string; asset?: string; step?: string } = {};
+  if ("account" in definition) refs.account = definition.account;
+  if ("asset" in definition) refs.asset = definition.asset;
+  if ("step" in definition) refs.step = definition.step;
+  return Object.keys(refs).length ? { ...result, ...refs } : result;
 }
 
 export function balanceDeltaAssertion(before: string, after: string, expectedDelta: string, success: string): AssertionResult {
@@ -535,6 +667,19 @@ function failureCode(transaction?: string, operations?: string[]): string { retu
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null; }
 function safeCode(value: unknown): string | undefined { return typeof value === "string" && /^[a-z0-9_]{1,64}$/.test(value) ? value : undefined; }
 function isNotFound(error: unknown): boolean { return isRecord(error) && isRecord(error.response) && error.response.status === 404; }
+function isTimeoutError(error: unknown): boolean {
+  if (!isRecord(error)) return false;
+  const response = isRecord(error.response) ? error.response : undefined;
+  if (response?.status === 408 || response?.status === 504) return true;
+  const code = typeof error.code === "string" ? error.code.toUpperCase() : "";
+  const name = typeof error.name === "string" ? error.name.toLowerCase() : "";
+  const message = typeof error.message === "string" ? error.message.toLowerCase() : "";
+  return ["ECONNABORTED", "ETIMEDOUT", "ESOCKETTIMEDOUT"].includes(code)
+    || name === "timeouterror"
+    || name === "aborterror"
+    || message.includes("timeout")
+    || message.includes("timed out");
+}
 function isRetryableHorizonError(error: unknown): boolean {
   if (!isRecord(error)) return false;
   const response = isRecord(error.response) ? error.response : undefined;

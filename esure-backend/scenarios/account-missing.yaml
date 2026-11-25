@@ -1,0 +1,17 @@
+schemaVersion: 1
+id: account-missing
+version: 1
+name: Unfunded account is absent
+description: Verify that a generated account that is never funded is absent on Testnet after a zero-operation scenario completes.
+network: testnet
+accounts:
+  - id: unfunded
+    generate: true
+    fund: false
+assets:
+  - id: xlm
+    type: native
+steps: []
+assertions:
+  - type: accountMissing
+    account: unfunded

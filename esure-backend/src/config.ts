@@ -81,6 +81,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   };
 }
 
+function booleanEnv(env: NodeJS.ProcessEnv, name: string, fallback: boolean): boolean {
+  const value = env[name];
+  if (value === undefined) return fallback;
+  if (value === "true") return true;
+  if (value === "false") return false;
+  throw new Error(`${name} must be true or false`);
+}
+
 function integerEnv(
   env: NodeJS.ProcessEnv,
   name: string,

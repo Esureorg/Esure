@@ -37,11 +37,25 @@ export function contentHash(definition: ScenarioDefinition): string {
   return `sha256:${createHash("sha256").update(canonicalJson(definition)).digest("hex")}`;
 }
 
+/**
+ * Produce a deterministic canonical JSON string with object keys sorted by
+ * Unicode code-unit order (i.e. the same ordering as the `<` / `>` operators
+ * on strings). Using a plain comparator instead of `localeCompare` makes the
+ * ordering independent of the host locale and ICU collation data, which means
+ * the same input always produces the same bytes regardless of the environment
+ * in which the process runs. This is the ordering contract for all content
+ * hashes produced by this module (issue #87).
+ *
+ * Compatibility note: the Unicode code-unit ordering used here matches the
+ * ordering that `localeCompare` produces under the `"en"` locale for all
+ * ASCII characters (the only characters that appear in scenario field names
+ * and identifiers), so existing stored hashes are unaffected.
+ */
 export function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
   if (value !== null && typeof value === "object") {
     return `{${Object.entries(value as Record<string, unknown>)
-      .sort(([left], [right]) => left.localeCompare(right))
+      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
       .map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`).join(",")}}`;
   }
   return JSON.stringify(value);

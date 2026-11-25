@@ -1,6 +1,7 @@
+import { randomUUID } from "node:crypto";
 import type { RunReport } from "./domain.js";
-import { RunCapacityError } from "./errors.js";
-import type { QueryResultRow } from "pg";
+import { OptimisticConcurrencyError, RunCapacityError } from "./errors.js";
+import type { PoolClient, QueryResultRow } from "pg";
 import type { Database } from "./database.js";
 
 export interface RunStore {
@@ -65,6 +66,7 @@ interface PersistedRunRow extends QueryResultRow {
   scenario_content_hash: string;
   network: "testnet";
   status: RunReport["status"];
+  version: number;
   created_at: Date | string;
   completed_at: Date | string | null;
   steps: RunReport["steps"];
@@ -74,6 +76,8 @@ interface PersistedRunRow extends QueryResultRow {
 }
 
 export class PostgresRunStore implements RunStore {
+  readonly #versions = new Map<string, number>();
+
   constructor(
     private readonly database: Database,
     private readonly retentionMs = 3_600_000,
@@ -94,7 +98,7 @@ export class PostgresRunStore implements RunStore {
   async get(id: string): Promise<RunReport | undefined> {
     const result = await this.database.query<PersistedRunRow>(
       `SELECT run_id, scenario_id, scenario_version, scenario_schema_version,
-        scenario_content_hash, network, status, created_at, completed_at,
+        scenario_content_hash, network, status, version, created_at, completed_at,
         steps, assertions, summary, error
       FROM runs
       WHERE run_id = $1
@@ -103,35 +107,116 @@ export class PostgresRunStore implements RunStore {
       [id, this.retentionMs],
     );
     const row = result.rows[0];
+    if (row) this.#versions.set(id, row.version);
     return row ? reportFromRow(row) : undefined;
   }
 
   async update(id: string, update: Partial<RunReport>): Promise<RunReport> {
+    // Capture the version observed by the caller's preceding `get()` before this
+    // update's own `get()` refreshes the cache. The conditional UPDATE below
+    // rejects the write if another writer changed the version in between.
+    const expectedVersion = this.#versions.get(id) ?? 0;
     const current = await this.get(id);
     if (!current) throw new Error(`Run ${id} does not exist`);
     const updated = sanitizeRunReport({ ...current, ...structuredClone(update) });
     const result = await this.database.query(
       `UPDATE runs SET
-        scenario_id = $2,
-        scenario_version = $3,
-        scenario_schema_version = $4,
-        scenario_content_hash = $5,
-        network = $6,
-        status = $7,
-        created_at = $8,
-        completed_at = $9,
-        duration_ms = $10,
-        steps = $11::jsonb,
-        assertions = $12::jsonb,
-        summary = $13::jsonb,
-        error = $14::jsonb
+        scenario_id = $3,
+        scenario_version = $4,
+        scenario_schema_version = $5,
+        scenario_content_hash = $6,
+        network = $7,
+        status = $8,
+        created_at = $9,
+        completed_at = $10,
+        duration_ms = $11,
+        steps = $12::jsonb,
+        assertions = $13::jsonb,
+        summary = $14::jsonb,
+        error = $15::jsonb,
+        version = version + 1
       WHERE run_id = $1
-        AND (completed_at IS NULL OR completed_at > clock_timestamp() - ($15 * interval '1 millisecond'))`,
-      [id, ...runValues(updated).slice(1), this.retentionMs],
+        AND version = $2
+        AND (completed_at IS NULL OR completed_at > clock_timestamp() - ($16 * interval '1 millisecond'))`,
+      [id, expectedVersion, ...runValues(updated).slice(1), this.retentionMs],
     );
-    if (result.rowCount !== 1) throw new Error(`Run ${id} does not exist`);
+    if (result.rowCount !== 1) throw new OptimisticConcurrencyError(id);
+    this.#versions.set(id, expectedVersion + 1);
     return structuredClone(updated);
   }
+
+  /**
+   * Physically deletes expired terminal runs in bounded batches (issue #160).
+   *
+   * Reads already hide reports past `retentionMs`; this operator-invoked method
+   * removes the rows for real. Deletion goes through the database's audited
+   * cleanup guard (`guard_run_cleanup`, migration 001): every batch runs in its
+   * own transaction as the `esure_maintenance` role with transaction-local
+   * `esure.cleanup_mode=on` and a fresh `esure.cleanup_id`, and writes a
+   * `cleanup_audit` row per deleted run before the DELETE executes. The guard
+   * additionally enforces a hard 30-day floor, so a run is deleted only when it
+   * is terminal (`passed`/`failed`), beyond the configured retention cutoff,
+   * AND older than that database-enforced floor; younger rows stay hidden by
+   * reads until they age past it.
+   *
+   * Each batch commits atomically and the loop stops at the first failing
+   * batch, so previously committed batches stay deleted and a partial failure
+   * never loses auditability — rerunning the prune is idempotent and simply
+   * finds fewer (or no) eligible rows. `dryRun` reports the eligible count
+   * without deleting anything.
+   */
+  async pruneExpired(batchSize = 100, options: { dryRun?: boolean } = {}): Promise<number> {
+    const limit = Math.max(1, Math.trunc(batchSize));
+    if (options.dryRun) {
+      const result = await this.database.query<{ count: string }>(
+        `SELECT count(*)::text AS count FROM runs WHERE ${expiredRunPredicate}`,
+        [this.retentionMs],
+      );
+      return Number(result.rows[0]?.count ?? 0);
+    }
+
+    let totalDeleted = 0;
+    for (;;) {
+      const deleted = await this.database.transaction(async (client) => {
+        await client.query("SET LOCAL ROLE esure_maintenance");
+        await client.query("SET LOCAL esure.cleanup_mode = 'on'");
+        const cleanupId = randomUUID();
+        await client.query("SELECT set_config('esure.cleanup_id', $1, true)", [cleanupId]);
+        const runIds = await selectExpiredRunIds(client, expiredRunPredicate, this.retentionMs, limit);
+        if (runIds.length === 0) return 0;
+        await client.query(
+          `INSERT INTO cleanup_audit(cleanup_id, action, target_table, target_id, reason)
+           SELECT $1, 'delete_run', 'runs', run_id, 'expired run retention prune'
+           FROM unnest($2::uuid[]) AS targets(run_id)`,
+          [cleanupId, runIds],
+        );
+        const result = await client.query("DELETE FROM runs WHERE run_id = ANY($1::uuid[])", [runIds]);
+        return result.rowCount ?? 0;
+      });
+      totalDeleted += deleted;
+      if (deleted < limit) break;
+    }
+    return totalDeleted;
+  }
+}
+
+/**
+ * Eligibility predicate shared by the dry-run count and the batch selection:
+ * terminal status, a known completion time, beyond the configured retention
+ * cutoff, and past the `guard_run_cleanup` 30-day floor (migration 001), which
+ * would otherwise reject the DELETE mid-transaction.
+ */
+const expiredRunPredicate = `status IN ('passed', 'failed')
+      AND completed_at IS NOT NULL
+      AND completed_at <= clock_timestamp() - ($1 * interval '1 millisecond')
+      AND completed_at < clock_timestamp() - interval '30 days'`;
+
+async function selectExpiredRunIds(client: PoolClient, predicate: string, retentionMs: number, limit: number): Promise<string[]> {
+  const result = await client.query<{ run_id: string }>(
+    `SELECT run_id FROM runs WHERE ${predicate} ORDER BY completed_at LIMIT $2`,
+    [retentionMs, limit],
+  );
+  return result.rows.map((row) => row.run_id);
 }
 
 function runValues(run: RunReport): unknown[] {
