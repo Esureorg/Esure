@@ -12,6 +12,62 @@ Thank you for helping make Stellar development easier to test and understand.
 Do not begin work based only on an issue title. Assignment prevents duplicate
 work during time-boxed contribution campaigns.
 
+## Build dependency order and clean-install commands
+
+The three packages have a fixed build dependency order:
+
+```
+esure-backend  (no internal deps — build first)
+      ↓  npm file: link
+esure-cli      (depends on esure-backend dist — build second)
+
+esure-frontend (no internal deps — independent, can build in any order)
+```
+
+**esure-cli depends on esure-backend at two distinct levels:**
+
+- **npm package dependency**: `esure-cli/package.json` declares
+  `"@esure/backend": "file:../esure-backend"`. This is a local file-link that
+  npm resolves at install time. `npm ci` inside `esure-cli` reads compiled
+  output from `esure-backend/dist/`, so the backend must be built before the
+  CLI is typechecked, tested, or built.
+- **Runtime API dependency**: at runtime the CLI calls the esure backend HTTP
+  API (`POST /api/v1/runs`, etc.) over the network. That is a separate concern
+  from the npm link. The CLI does not embed or bundle the backend server; it
+  only imports shared types and schema validators from the backend package.
+
+**Clean-install sequence for the full monorepo:**
+
+```sh
+# 1. Backend — install, check, and build first
+cd esure-backend
+npm ci
+npm run check
+npm run build
+
+# 2. CLI — install after backend dist exists
+cd ../esure-cli
+npm ci
+npm run check
+npm run build
+
+# 3. Frontend — independent, can run in parallel with the above
+cd ../esure-frontend
+npm ci
+npm run check
+npm run build
+```
+
+Alternatively, from the monorepo root (runs check in all three workspaces in
+the declared order, but does not install dependencies):
+
+```sh
+npm run check
+```
+
+The root `package.json` does not define an install step across workspaces; run
+`npm ci` in each package directory individually as shown above.
+
 ## Development workflow
 
 1. Fork the relevant repository.

@@ -48,13 +48,18 @@ lower that trustline's limit to 5. Stellar rejects the `changeTrust` operation
 with `op_invalid_limit`, and the holder's issued-asset balance remains exactly
 10.
 
-`path-payment` provisions its own Testnet liquidity. It creates generated sender,
-market-maker, recipient, and issuer accounts, then submits trustlines, issues
-test-issued EUR/USDC assets to the market maker, and places EUR/XLM and USDC/EUR
-sell offers. The USDC in this isolated scenario is not Circle-issued USDC. A
-strict-receive path payment converts sender XLM through EUR to deliver exactly
-5 USDC to the recipient (with a 10 XLM maximum). It does not depend on
-pre-existing public order-book liquidity.
+`path-payment` provisions its own Testnet liquidity entirely within the scenario.
+It generates four fresh accounts (sender, market-maker, recipient, and issuer)
+and issues two assets — EUR and USDC — from that generated issuer. These are
+**test-issued assets whose identity is `<code>:<generated-issuer-public-key>`**.
+They are not Circle-issued USDC, not ECB-issued EUR, and not any externally
+recognized asset. The asset code alone does not determine identity on Stellar;
+the issuer account is the other half of the identity. A strict-receive path
+payment converts sender XLM through EUR to deliver exactly 5 USDC to the
+recipient (with a 10 XLM maximum). The scenario places its own EUR/XLM and
+USDC/EUR sell offers so it does not depend on pre-existing public order-book
+liquidity and carries no implication of real-value exchange rates or external
+issuer integration.
 
 `issued-asset-partial-redemption-transfer` issues 100 TESTUSD to the sender,
 returns 30 to the issuer for redemption, then transfers 20 of the sender's
@@ -321,6 +326,68 @@ assertions:
 ```
 
 All assertions are evaluated once execution completes. If any assertion fails, the run fails. If all pass, the run passes.
+
+### Worked mismatch example
+
+The following fixture demonstrates how a code mismatch appears in the report.
+The assertion expects `op_no_trust` but Stellar rejects the payment with
+`op_underfunded` because the sender's XLM balance is too low, not because a
+trustline is missing.
+
+```yaml
+# mismatch-demo.yaml  — sanitized deterministic fixture
+schemaVersion: 1
+id: mismatch-demo
+version: 1
+name: Mismatch demo
+description: Demonstrates how a stepFailedWith assertion fails when the wrong error code is received.
+network: testnet
+accounts:
+  - { id: issuer,    generate: true, fund: true }
+  - { id: recipient, generate: true, fund: true }
+  - { id: sender,    generate: true, fund: true }
+assets:
+  - { id: xlm,  type: native }
+  - { id: test, type: issued, code: TESTUSD, issuer: issuer }
+steps:
+  - id: recipient-trusts-test
+    type: changeTrust
+    account: recipient
+    asset: test
+  - id: send-payment
+    type: payment
+    from: sender
+    to: recipient
+    asset: xlm
+    amount: "99999"
+assertions:
+  - type: stepFailedWith
+    step: send-payment
+    transactionCode: tx_failed
+    operationCodes: [op_no_trust]   # wrong guess — actual failure is op_underfunded
+```
+
+The sender has a trustline-free XLM balance that cannot cover 99 999 XLM.
+Stellar rejects the transaction with `tx_failed` / `op_underfunded`, not
+`op_no_trust`. The assertion fails and the report shows:
+
+```json
+{
+  "type": "stepFailedWith",
+  "status": "failed",
+  "step": "send-payment",
+  "expected": "tx_failed/op_no_trust",
+  "actual":   "tx_failed/op_underfunded",
+  "message":  "Expected \"tx_failed/op_no_trust\", received \"tx_failed/op_underfunded\"."
+}
+```
+
+**What to look at:** compare `expected` against `actual` in the assertion
+result. Here the transaction code matched (`tx_failed`) but the operation code
+did not. The declared expectation was `op_no_trust`; the actual failure was
+`op_underfunded`. Fixing the scenario means correcting either the assertion
+(if the failure reason is expected) or the step setup (if the wrong condition
+was triggered).
 
 ### Debugging unmatched failures
 
