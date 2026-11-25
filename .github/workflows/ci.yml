@@ -23,7 +23,7 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: esure-backend/package-lock.json
-      - run: npm ci
+      - run: npm ci --no-workspaces
       - run: npm run check
       - run: npm run build
 
@@ -41,7 +41,7 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: esure-frontend/package-lock.json
-      - run: npm ci
+      - run: npm ci --no-workspaces
       - run: npm run check
       - run: npm run build
       - run: npx playwright install --with-deps chromium
@@ -66,10 +66,10 @@ jobs:
           node-version: 22
       - name: Install backend dependencies
         working-directory: esure-backend
-        run: npm ci
+        run: npm ci --no-workspaces
       - name: Install CLI dependencies
         working-directory: esure-cli
-        run: npm ci
+        run: npm ci --no-workspaces
       - name: Typecheck CLI
         working-directory: esure-cli
         run: npm run typecheck
