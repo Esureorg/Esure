@@ -44,4 +44,22 @@ describe("loadConfig", () => {
       RUN_PERSISTENCE_ENABLED: "yes",
     })).toThrow(/RUN_PERSISTENCE_ENABLED/);
   });
+
+  it("exposes idempotency capacity and retention as bounded settings with correct defaults", () => {
+    const config = loadConfig({});
+    expect(config.idempotencyMaxEntries).toBe(1_000);
+    expect(config.idempotencyRetentionMs).toBe(86_400_000);
+  });
+
+  it("accepts explicit idempotency overrides within their bounds", () => {
+    expect(loadConfig({ IDEMPOTENCY_MAX_ENTRIES: "500" }).idempotencyMaxEntries).toBe(500);
+    expect(loadConfig({ IDEMPOTENCY_RETENTION_MS: "3600000" }).idempotencyRetentionMs).toBe(3_600_000);
+  });
+
+  it("rejects out-of-range idempotency configuration", () => {
+    expect(() => loadConfig({ IDEMPOTENCY_MAX_ENTRIES: "0" })).toThrow(/IDEMPOTENCY_MAX_ENTRIES/);
+    expect(() => loadConfig({ IDEMPOTENCY_MAX_ENTRIES: "100001" })).toThrow(/IDEMPOTENCY_MAX_ENTRIES/);
+    expect(() => loadConfig({ IDEMPOTENCY_RETENTION_MS: "1000" })).toThrow(/IDEMPOTENCY_RETENTION_MS/);
+    expect(() => loadConfig({ IDEMPOTENCY_RETENTION_MS: "999999999" })).toThrow(/IDEMPOTENCY_RETENTION_MS/);
+  });
 });

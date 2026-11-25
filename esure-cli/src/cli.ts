@@ -15,6 +15,12 @@ import { parse as parseYaml } from "yaml";
 import type { ValidatedScenario } from "@esure/backend/src/domain.js";
 import type { LedgerExecution, LedgerExecutionOptions } from "@esure/backend/src/domain.js";
 
+// Re-export extracted modules so existing test imports remain stable.
+export { escapeXml, generateJunitXml, writeArtifactFile } from "./serializers.js";
+export type { JunitRunInput } from "./serializers.js";
+export { parseCliArgs, DEFAULT_CLI_TIMEOUT_MS, MIN_CLI_TIMEOUT_MS, MAX_CLI_TIMEOUT_MS } from "./args.js";
+export type { ParsedArgs, CommonOptions, RunOptions, OutputFormat } from "./args.js";
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Version resolution (#57)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -47,11 +53,6 @@ export function resolveVersion(): string {
 const VERSION = resolveVersion();
 const BUNDLED_SCENARIO_DIR_TIMEOUT_MS = 30_000;
 const MAX_REPORT_FILE_BYTES = 5 * 1024 * 1024;
-
-/** Default overall run timeout in milliseconds (#55). */
-export const DEFAULT_CLI_TIMEOUT_MS = 120_000;
-export const MIN_CLI_TIMEOUT_MS = 1;
-export const MAX_CLI_TIMEOUT_MS = 600_000;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared types

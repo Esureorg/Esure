@@ -203,7 +203,15 @@ export class RunService {
       });
       outcome = passed ? "passed" : "failed";
     } catch (error) {
-      await progressUpdates;
+      // Drain any queued progress writes independently of the execution error.
+      // A rejected progress chain must not prevent the terminal failure write
+      // below — handle it separately so we always persist the terminal state.
+      try {
+        await progressUpdates;
+      } catch {
+        // Progress-chain rejection is non-fatal for terminal persistence.
+        // The error is discarded; the run will be written as failed below.
+      }
       const current = await this.store.get(id);
       const steps = current?.steps ?? [];
       const assertions = current?.assertions ?? [];
