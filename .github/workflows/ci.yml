@@ -26,6 +26,9 @@ jobs:
       - run: npm ci
       - run: npm run check
       - run: npm run build
+      - name: Check Markdown links (offline)
+        working-directory: .
+        run: node esure-backend/scripts/check-links.mjs
 
   frontend:
     name: Frontend checks
@@ -79,4 +82,50 @@ jobs:
       - name: Build CLI
         working-directory: esure-cli
         run: npm run build
+
+  windows:
+    name: Windows checks
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      # Skip database integration tests deterministically on Windows.
+      ESURE_SKIP_DB_TESTS: "1"
+      # Keep live Testnet calls disabled.
+      TESTNET_ENABLED: "false"
+      ESURE_LIVE_NETWORK: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install backend dependencies
+        working-directory: esure-backend
+        run: npm ci
+      - name: Install CLI dependencies
+        working-directory: esure-cli
+        run: npm ci
+      - name: Install frontend dependencies
+        working-directory: esure-frontend
+        run: npm ci
+      - name: Backend check
+        working-directory: esure-backend
+        run: npm run check
+      - name: Backend build
+        working-directory: esure-backend
+        run: npm run build
+      - name: Typecheck CLI
+        working-directory: esure-cli
+        run: npm run typecheck
+      - name: Test CLI
+        working-directory: esure-cli
+        run: npm run test
+      - name: Build CLI
+        working-directory: esure-cli
+        run: npm run build
+      - name: Typecheck frontend
+        working-directory: esure-frontend
+        run: npm run typecheck
+      - name: Test frontend
+        working-directory: esure-frontend
+        run: npm test
 

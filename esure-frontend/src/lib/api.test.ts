@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiError, compareReports, getRun, listScenarios, parseReportJson, startRun, type RunReport, type ScenarioSummary } from "./api";
-import { ApiError, RateLimitError, getRun, listScenarios, parseRetryAfter, startRun, type RunReport, type ScenarioSummary } from "./api";
+import { ApiError, compareReports, getRun, listScenarios, parseReportJson, parseRetryAfter, RateLimitError, startRun, type RunReport, type ScenarioSummary } from "./api";
+import {
+  completeAdditiveReportFixture,
+  minimalLegacyReportFixture,
+  reportFixtureVersion,
+} from "../../../shared/report-fixtures";
 
 const scenario: ScenarioSummary = {
   id: "xlm-payment",
@@ -142,6 +146,57 @@ describe("frontend API response validation", () => {
     });
     if (!(error instanceof ApiError)) throw new Error("Expected ApiError");
     expect(error.message).not.toContain("private upstream diagnostic");
+  });
+});
+
+describe("shared report fixtures (Issue #279)", () => {
+  it("exposes a versioned fixture set", () => {
+    expect(reportFixtureVersion).toBeGreaterThanOrEqual(1);
+    expect(minimalLegacyReportFixture.id).toBeTruthy();
+    expect(completeAdditiveReportFixture.id).toBeTruthy();
+  });
+
+  it("accepts the minimal legacy report via getRun", async () => {
+    mockResponse(JSON.stringify(minimalLegacyReportFixture));
+    const result = await getRun(minimalLegacyReportFixture.id);
+    expect(result.id).toBe(minimalLegacyReportFixture.id);
+    expect(result.steps).toHaveLength(minimalLegacyReportFixture.steps.length);
+    expect(result.assertions).toHaveLength(minimalLegacyReportFixture.assertions.length);
+  });
+
+  it("accepts the complete additive-field report via getRun", async () => {
+    mockResponse(JSON.stringify(completeAdditiveReportFixture));
+    const result = await getRun(completeAdditiveReportFixture.id);
+    expect(result.id).toBe(completeAdditiveReportFixture.id);
+    expect(result.steps).toHaveLength(completeAdditiveReportFixture.steps.length);
+    expect(result.assertions).toHaveLength(completeAdditiveReportFixture.assertions.length);
+  });
+
+  it("preserves optional timing, fee, and subject fields from the additive fixture", async () => {
+    mockResponse(JSON.stringify(completeAdditiveReportFixture));
+    const result = await getRun(completeAdditiveReportFixture.id);
+    const step = result.steps[0] as Record<string, unknown>;
+    expect(step.startedAt).toBe(completeAdditiveReportFixture.steps[0].startedAt);
+    expect(step.completedAt).toBe(completeAdditiveReportFixture.steps[0].completedAt);
+    expect(step.durationMs).toBe(completeAdditiveReportFixture.steps[0].durationMs);
+    expect(step.feeCharged).toBe(completeAdditiveReportFixture.steps[0].feeCharged);
+    expect(step.subject).toEqual(completeAdditiveReportFixture.steps[0].subject);
+  });
+
+  it("parses both fixtures offline with parseReportJson", () => {
+    const legacy = parseReportJson(JSON.stringify(minimalLegacyReportFixture));
+    expect(legacy.id).toBe(minimalLegacyReportFixture.id);
+    expect(legacy.steps).toHaveLength(minimalLegacyReportFixture.steps.length);
+
+    const additive = parseReportJson(JSON.stringify(completeAdditiveReportFixture));
+    expect(additive.id).toBe(completeAdditiveReportFixture.id);
+    expect(additive.steps).toHaveLength(completeAdditiveReportFixture.steps.length);
+    const step = additive.steps[0] as Record<string, unknown>;
+    expect(step.startedAt).toBe(completeAdditiveReportFixture.steps[0].startedAt);
+    expect(step.completedAt).toBe(completeAdditiveReportFixture.steps[0].completedAt);
+    expect(step.durationMs).toBe(completeAdditiveReportFixture.steps[0].durationMs);
+    expect(step.feeCharged).toBe(completeAdditiveReportFixture.steps[0].feeCharged);
+    expect(step.subject).toEqual(completeAdditiveReportFixture.steps[0].subject);
   });
 });
 
