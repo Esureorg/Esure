@@ -1,0 +1,18 @@
+#compdef esure
+# Esure CLI shell completion for zsh.
+# Source this file or add it to your fpath to enable completions.
+
+_esure() {
+  local -a commands=("list" "validate" "init" "run" "run-suite" "completions" "doctor")
+  local -a options=("--help" "--version" "--output" "--ascii" "--report-file" "--junit" "--overwrite" "--fail-fast")
+
+  if [[ ${words[1]} == "esure" ]]; then
+    if (( CURRENT == 2 )); then
+      _describe 'command' commands
+    elif (( CURRENT > 2 )); then
+      _describe 'option' options
+    fi
+  fi
+}
+
+_esure "$@"

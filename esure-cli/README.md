@@ -280,25 +280,61 @@ Executes a scenario on Stellar Testnet.
 
 When `--output json` is requested, argument errors and cancellation responses are emitted to `stderr` in a structured JSON error envelope (`{"error": {"code": "...", "message": "..."}}`).
 
-### `esure run-suite <id> [<id>...]`
+### `esure run-suite <id|file> [<id|file>...]`
 
-Runs multiple bundled scenarios sequentially.
+Runs multiple scenarios sequentially. Targets can be bundled scenario IDs or paths to local scenario files (`.json`, `.yaml`, `.yml`). All targets are resolved and validated before any network execution starts; a target that fails validation aborts the suite with a machine-readable error (`code: "VALIDATION_FAILED"`) listing each failing target. The suite is capped at 50 scenarios per invocation.
 
 **Arguments:**
-- `<id>...`: Bundled scenario IDs to run
+- `<id|file>...`: Bundled scenario IDs and/or scenario file paths, executed in the order given
 
 **Options:**
 - `--fail-fast`: Stop after first failure
 - `--output json`: Output in JSON format
+- `--report-file <path>`: Write a JSON suite report artifact
+- `--junit <path>`: Write a JUnit XML artifact
+
+**JSON output** includes planned versus executed counts and explicit `skipped` records for scenarios not run due to `--fail-fast`:
+
+```json
+{
+  "status": "failed",
+  "planned": 3,
+  "executed": 2,
+  "total": 3,
+  "passed": 1,
+  "failed": 1,
+  "skipped": 1,
+  "scenarios": [
+    { "scenarioId": "a", "status": "passed", "summary": { ... } },
+    { "scenarioId": "b", "status": "failed", "summary": { ... } },
+    { "scenarioId": "c", "status": "skipped" }
+  ]
+}
+```
+
+JUnit XML output represents unexecuted scenarios as `<testcase ...><skipped/></testcase>` so CI systems report them as skipped rather than missing.
+
+**Examples:**
+
+```bash
+# Bundled IDs only
+esure run-suite xlm-payment issued-asset-payment path-payment
+
+# Local file targets with a JUnit artifact
+esure run-suite ./suite/a.yaml ./suite/b.json --junit results.xml
+
+# Mixed bundled IDs and files
+esure run-suite xlm-payment ./custom/checks.yaml --fail-fast
+```
 
 ---
 
 ### `esure completions <shell>`
 
-Generate shell command completions for Bash or Zsh.
+Generate shell command completions for Bash, Zsh, Fish, or PowerShell.
 
 **Arguments:**
-- `<shell>`: `bash` or `zsh`
+- `<shell>`: `bash`, `zsh`, `fish`, or `powershell`
 
 **Examples:**
 
@@ -312,9 +348,28 @@ source <(esure completions bash)
 esure completions zsh > /usr/local/share/zsh/site-functions/_esure
 # or source in your shell:
 source <(esure completions zsh)
+
+# Fish completion
+esure completions fish > ~/.config/fish/completions/esure.fish
+# or source in the current session:
+esure completions fish | source
+
+# PowerShell completion (Windows)
+# Add to $PROFILE for permanent effect:
+esure completions powershell | Out-File -Encoding UTF8 "$HOME\Documents\PowerShell\esure_completions.ps1"
+. "$HOME\Documents\PowerShell\esure_completions.ps1"
+# or load for the current session only:
+esure completions powershell | Invoke-Expression
 ```
 
----
+PowerShell completion uses `Register-ArgumentCompleter` with native command support. All command names and option flags are single-quoted so names containing hyphens (e.g. `--fail-fast`, `--report-file`) work correctly without word-splitting. File path completion for `run`, `validate`, and `init` automatically quotes paths that contain spaces.
+
+Completion snapshots for all four shells are stored in `snapshots/` and can be regenerated with:
+
+```bash
+npm run build
+node scripts/generate-completion-snapshot.mjs
+```
 
 ### `esure doctor`
 

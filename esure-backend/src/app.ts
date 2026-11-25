@@ -146,7 +146,6 @@ export function buildApp(options: BuildAppOptions): AppInstance {
   const ledger = options.ledger ?? new StellarTestnetGateway(options.config.horizonUrl, options.config.friendbotUrl, {
     fundingConcurrency: options.config.maxConcurrentFriendbotRequests,
   });
-  const clock = options.clock ?? Date.now;
   const runs = new RunService(persistence.runStore ?? new InMemoryRunStore(options.config.maxStoredRuns, options.config.runRetentionMs, clock), ledger, {
     maxConcurrentRuns: options.config.maxConcurrentRuns, runTimeoutMs: options.config.runTimeoutMs, stepTimeoutMs: options.config.stepTimeoutMs,
   }, clock, options.runLogger ?? app.log);

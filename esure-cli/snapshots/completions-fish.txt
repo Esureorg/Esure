@@ -1,0 +1,24 @@
+# Esure CLI shell completion for fish.
+# Save to ~/.config/fish/completions/esure.fish  or run:
+#   esure completions fish | source
+
+complete -c esure -f -n '__fish_use_subcommand' -a 'list'
+complete -c esure -f -n '__fish_use_subcommand' -a 'validate'
+complete -c esure -f -n '__fish_use_subcommand' -a 'init'
+complete -c esure -f -n '__fish_use_subcommand' -a 'run'
+complete -c esure -f -n '__fish_use_subcommand' -a 'run-suite'
+complete -c esure -f -n '__fish_use_subcommand' -a 'completions'
+complete -c esure -f -n '__fish_use_subcommand' -a 'doctor'
+
+complete -c esure -f -l 'help'
+complete -c esure -f -l 'version'
+complete -c esure -f -l 'output'
+complete -c esure -f -l 'ascii'
+complete -c esure -f -l 'report-file'
+complete -c esure -f -l 'junit'
+complete -c esure -f -l 'overwrite'
+complete -c esure -f -l 'fail-fast'
+
+complete -c esure -F -n '__fish_seen_subcommand_from run'
+complete -c esure -F -n '__fish_seen_subcommand_from validate'
+complete -c esure -F -n '__fish_seen_subcommand_from init'

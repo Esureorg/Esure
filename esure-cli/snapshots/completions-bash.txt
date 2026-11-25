@@ -1,0 +1,28 @@
+_esure_complete() {
+  local cur prev opts cmds
+  COMPREPLY=()
+  cur="${COMP_WORDS[COMP_CWORD]}"
+  prev="${COMP_WORDS[COMP_CWORD-1]}"
+  cmds="list validate init run run-suite completions doctor"
+  opts="--help --version --output --ascii --report-file --junit --overwrite --fail-fast"
+
+  if [[ ${cur} == -* ]] ; then
+    COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") 2>/dev/null )
+    return 0
+  fi
+
+  case "${prev}" in
+    esure)
+      COMPREPLY=( $(compgen -W "${cmds}" -- "${cur}") 2>/dev/null )
+      ;;
+    run|validate|init)
+      COMPREPLY=( $(compgen -f -- "${cur}") 2>/dev/null )
+      ;;
+    *)
+      COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") 2>/dev/null )
+      ;;
+  esac
+}
+
+complete -F _esure_complete esure
+complete -F _esure_complete ./esure 2>/dev/null || true

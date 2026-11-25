@@ -1,0 +1,43 @@
+# Esure CLI shell completion for PowerShell.
+# Add this to your $PROFILE, or run once per session:
+#   esure completions powershell | Invoke-Expression
+#
+# Windows usage example:
+#   esure completions powershell | Out-File -Encoding UTF8 "$HOME\Documents\PowerShell\esure_completions.ps1"
+#   . "$HOME\Documents\PowerShell\esure_completions.ps1"
+
+Register-ArgumentCompleter -Native -CommandName @('esure') -ScriptBlock {
+    param($wordToComplete, $commandAst, $cursorPosition)
+
+    $commands = @('list', 'validate', 'init', 'run', 'run-suite', 'completions', 'doctor')
+    $options  = @('--help', '--version', '--output', '--ascii', '--report-file', '--junit', '--overwrite', '--fail-fast')
+
+    $tokens = $commandAst.CommandElements
+    $subCmd = if ($tokens.Count -gt 1) { $tokens[1].Value } else { $null }
+
+    # Completing the sub-command position
+    if ($tokens.Count -le 2 -and -not $wordToComplete.StartsWith('-')) {
+        $commands | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
+            [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
+        }
+        return
+    }
+
+    # File path completion for sub-commands that accept a file argument
+    if ($subCmd -in @('run', 'validate', 'init') -and -not $wordToComplete.StartsWith('-')) {
+        $pattern = if ($wordToComplete) { "$wordToComplete*" } else { '*' }
+        Get-ChildItem -Path $pattern -ErrorAction SilentlyContinue |
+            Where-Object { $_.Extension -in @('.json', '.yaml', '.yml') -or $_.PSIsContainer } |
+            ForEach-Object {
+                $completion = if ($_.PSIsContainer) { "$($_.Name)\" } else { $_.Name }
+                $display = if ($completion -match ' ') { "'$completion'" } else { $completion }
+                [System.Management.Automation.CompletionResult]::new($display, $_.Name, 'ParameterValue', $_.Name)
+            }
+        return
+    }
+
+    # Option completion
+    $options | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
+        [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
+    }
+}

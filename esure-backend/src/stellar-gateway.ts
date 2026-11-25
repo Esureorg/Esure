@@ -192,7 +192,7 @@ export class StellarTestnetGateway implements LedgerGateway {
 
     for (const definition of scenario.assertions) {
       try {
-        const result = withSubjectRefs(await this.evaluateAssertion(definition, accounts, assets, outcomes, initialBalances, options), definition);
+        const result = withSubjectRefs(await this.evaluateAssertion(definition, accounts, assets, outcomes, initialBalances, steps, options), definition);
         recordAssertion(assertions, result, options);
       } catch (error) {
         throw normalizeStellarError(error, `assert-${definition.type}`);

@@ -8,11 +8,12 @@ const mocks = vi.hoisted(() => ({
   list: vi.fn(),
   createRegistry: vi.fn(),
   readFile: vi.fn(),
+  stat: vi.fn(),
   fsReaddirSync: vi.fn(),
   fsStatSync: vi.fn(),
 }));
 
-vi.mock("node:fs/promises", () => ({ readFile: mocks.readFile }));
+vi.mock("node:fs/promises", () => ({ readFile: mocks.readFile, stat: mocks.stat }));
 vi.mock("node:fs", () => ({
   readdirSync: mocks.fsReaddirSync,
   statSync: mocks.fsStatSync,
@@ -160,6 +161,7 @@ function mockDirectory(files: { name: string; size: number; content: string }[])
 }
 
 async function withFile(content: string, _filePath?: string): Promise<void> {
+  mocks.stat.mockResolvedValueOnce({ size: 100 });
   mocks.readFile.mockResolvedValueOnce(content);
 }
 
@@ -183,6 +185,8 @@ describe("CLI commands", () => {
     mocks.createRegistry.mockReturnValue({ list: mocks.list, find: mocks.find });
     mocks.execute.mockResolvedValue(passedExecution);
     mocks.readFile.mockReset();
+    mocks.stat.mockReset();
+    mocks.stat.mockResolvedValue({ size: 100 });
     mocks.fsReaddirSync.mockReturnValue([]);
     mocks.fsStatSync.mockReturnValue({ size: 1 });
     mocks.list.mockClear();
@@ -789,7 +793,9 @@ describe("#67 run-suite command", () => {
   it("rejects unknown scenario IDs before any execution", async () => {
     expect(await invokeCli("run-suite", "missing-scenario", "--output", "json")).toBe(1);
     expect(mocks.execute).not.toHaveBeenCalled();
-    expect(JSON.parse(stderr.join("\n")).error.message).toContain("missing-scenario");
+    const err = JSON.parse(stderr.join("\n"));
+    expect(err.error.message).toContain("failed validation");
+    expect(JSON.stringify(err)).toContain("missing-scenario");
   });
 
   it("rejects duplicate IDs before any execution", async () => {
@@ -846,7 +852,9 @@ describe("#67 run-suite command", () => {
     ).toBe(1);
     const result = JSON.parse(stdout.join("\n"));
     expect(result.status).toBe("failed");
-    expect(result.total).toBe(1); // only 1 ran
+    expect(result.executed).toBe(1);     // only 1 ran
+    expect(result.skipped).toBe(1);      // 1 not run
+    expect(result.total).toBe(2);        // executed + skipped
     expect(mocks.execute).toHaveBeenCalledTimes(1);
   });
 
@@ -992,7 +1000,7 @@ describe("#68 ASCII status markers", () => {
   });
 
   it("completions rejects an unsupported shell", async () => {
-    expect(await invokeCli("completions", "fish")).toBe(1);
+    expect(await invokeCli("completions", "tcsh")).toBe(1);
     const err = stderr.join("\n");
     expect(err).toContain("Unsupported shell");
     expect(err).toContain("bash");
