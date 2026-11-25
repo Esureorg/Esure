@@ -638,7 +638,161 @@ describe("CLI commands", () => {
     });
   });
 
+  describe("#244 schema inspection command", () => {
+    it("emits the scenario schema as valid JSON in JSON mode", async () => {
+      expect(await invokeCli("schema", "scenario", "--output", "json")).toBe(0);
+      expect(stderr).toEqual([]);
+      const result = JSON.parse(stdout.join("\n"));
+      expect(result).toBeTruthy();
+      expect(typeof result).toBe("object");
+    });
+
+    it("emits the report schema as valid JSON in JSON mode", async () => {
+      expect(await invokeCli("schema", "report", "--output", "json")).toBe(0);
+      expect(stderr).toEqual([]);
+      const result = JSON.parse(stdout.join("\n"));
+      expect(result).toBeTruthy();
+      expect(typeof result).toBe("object");
+    });
+
+    it("selects distinct schemas for scenario and report targets", async () => {
+      expect(await invokeCli("schema", "scenario", "--output", "json")).toBe(0);
+      const scenarioSchema = JSON.parse(stdout.join("\n"));
+      stdout = [];
+      expect(await invokeCli("schema", "report", "--output", "json")).toBe(0);
+      const reportSchema = JSON.parse(stdout.join("\n"));
+      expect(scenarioSchema).not.toEqual(reportSchema);
+    });
+
+    it("prints the scenario schema in human-readable mode", async () => {
+      expect(await invokeCli("schema", "scenario")).toBe(0);
+      expect(stdout.join("\n").length).toBeGreaterThan(0);
+      expect(stderr).toEqual([]);
+    });
+
+    it("rejects an unknown schema target with a nonzero exit and clear error", async () => {
+      expect(await invokeCli("schema", "unknown-target", "--output", "json")).toBe(1);
+      const err = JSON.parse(stderr.join("\n"));
+      expect(err.error.message).toContain("unknown-target");
+    });
+
+    it("rejects a missing schema target with a nonzero exit", async () => {
+      expect(await invokeCli("schema", "--output", "json")).toBe(1);
+      const err = JSON.parse(stderr.join("\n"));
+      expect(err.error.message).toBeTruthy();
+    });
+  });
+
+  describe("#245 validate-directory continues after unreadable files", () => {
+    it("records a disappearing file (ENOENT) and continues validating remaining files", async () => {
+      mockDirectory([
+        { name: "a-good.json", size: 50, content: validJson },
+        { name: "b-vanishing.json", size: 50, content: validJson },
+        { name: "c-good.json", size: 50, content: validJson },
+      ]);
+      const baseRead = mocks.readFile.getMockImplementation()!;
+      mocks.readFile.mockImplementation(async (path: string) => {
+        if (String(path).includes("b-vanishing.json")) {
+          throw Object.assign(new Error("ENOENT: no such file or directory"), { code: "ENOENT" });
+        }
+        return baseRead(path);
+      });
+      expect(await invokeCli("validate-directory", "./scenarios", "--output", "json")).toBe(1);
+      const result = JSON.parse(stdout.join("\n"));
+      expect(result.valid).toBe(false);
+      expect(result.files.map((f: { file: string }) => f.file)).toEqual([
+        "a-good.json",
+        "b-vanishing.json",
+        "c-good.json",
+      ]);
+      const vanished = result.files.find((f: { file: string }) => f.file === "b-vanishing.json");
+      expect(vanished.valid).toBe(false);
+      expect(vanished.error).toBeTruthy();
+      const good = result.files.filter((f: { file: string }) => f.valid);
+      expect(good.map((f: { file: string }) => f.file)).toEqual(["a-good.json", "c-good.json"]);
+      expect(result.summary).toEqual({ total: 3, passed: 2, failed: 1 });
+    });
+
+    it("records an injected permission error (EACCES) and continues", async () => {
+      mockDirectory([
+        { name: "a-good.json", size: 50, content: validJson },
+        { name: "b-locked.json", size: 50, content: validJson },
+      ]);
+      const baseRead = mocks.readFile.getMockImplementation()!;
+      mocks.readFile.mockImplementation(async (path: string) => {
+        if (String(path).includes("b-locked.json")) {
+          throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+        }
+        return baseRead(path);
+      });
+      expect(await invokeCli("validate-directory", "./scenarios", "--output", "json")).toBe(1);
+      const result = JSON.parse(stdout.join("\n"));
+      expect(result.valid).toBe(false);
+      expect(result.files.map((f: { file: string }) => f.file)).toEqual(["a-good.json", "b-locked.json"]);
+      const locked = result.files.find((f: { file: string }) => f.file === "b-locked.json");
+      expect(locked.valid).toBe(false);
+      expect(locked.error).toBeTruthy();
+      expect(result.files.find((f: { file: string }) => f.file === "a-good.json").valid).toBe(true);
+    });
+
+    it("records a stat failure and continues with deterministic ordering", async () => {
+      mockDirectory([
+        { name: "a-good.json", size: 50, content: validJson },
+        { name: "b-stat.json", size: 50, content: validJson },
+        { name: "c-good.json", size: 50, content: validJson },
+      ]);
+      const baseStat = mocks.fsStatSync.getMockImplementation()!;
+      mocks.fsStatSync.mockImplementation((path: string) => {
+        if (String(path).includes("b-stat.json")) {
+          throw Object.assign(new Error("ENOENT: no such file or directory"), { code: "ENOENT" });
+        }
+        return baseStat(path);
+      });
+      expect(await invokeCli("validate-directory", "./scenarios", "--output", "json")).toBe(1);
+      const result = JSON.parse(stdout.join("\n"));
+      expect(result.valid).toBe(false);
+      expect(result.files.map((f: { file: string }) => f.file)).toEqual([
+        "a-good.json",
+        "b-stat.json",
+        "c-good.json",
+      ]);
+      expect(result.files.find((f: { file: string }) => f.file === "b-stat.json").valid).toBe(false);
+    });
+  });
+
+  describe("#246 formatter --check mode", () => {
+    it("returns success when files are already canonical", async () => {
+      mockDirectory([{ name: "good.json", size: 50, content: validJson }]);
+      expect(await invokeCli("format", "./scenarios", "--check", "--output", "json")).toBe(0);
+      const result = JSON.parse(stdout.join("\n"));
+      expect(result.changed).toEqual([]);
+    });
+
+    it("returns the documented nonzero code on drift without modifying files", async () => {
+      const unformatted = JSON.stringify(definition, null, 4);
+      mockDirectory([{ name: "drift.json", size: 50, content: unformatted }]);
+      expect(await invokeCli("format", "./scenarios", "--check", "--output", "json")).toBe(3);
+      const result = JSON.parse(stdout.join("\n"));
+      expect(result.changed).toContain("drift.json");
+      // No write should have occurred during check mode
+      expect(mocks.readFile).toHaveBeenCalled();
+    });
+
+    it("lists affected files in JSON mode", async () => {
+      const unformatted = JSON.stringify(definition, null, 4);
+      mockDirectory([
+        { name: "a-drift.json", size: 50, content: unformatted },
+        { name: "b-good.json", size: 50, content: validJson },
+        { name: "c-drift.json", size: 50, content: unformatted },
+      ]);
+      expect(await invokeCli("format", "./scenarios", "--check", "--output", "json")).toBe(3);
+      const result = JSON.parse(stdout.join("\n"));
+      expect(result.changed).toEqual(["a-drift.json", "c-drift.json"]);
+    });
+  });
+
   describe("#53 explicit --file selector for run targets", () => {
+=======
     it("runs local scenario with --file even if filename has no slashes or dots", async () => {
       await withFile(validJson);
       expect(await invokeCli("run", "--file", "custom-file.json")).toBe(0);
