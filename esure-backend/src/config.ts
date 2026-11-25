@@ -29,6 +29,21 @@ export interface AppConfig {
   databaseConnectionTimeoutMs: number;
   databaseQueryTimeoutMs: number;
   databaseIdleTimeoutMs: number;
+  /**
+   * Maximum number of in-flight idempotency entries (issue #72).
+   * Governs the size of the per-process IdempotencyStore. Once reached,
+   * new keyed requests receive a 503 until entries expire.
+   * Must be large enough to cover the expected peak of distinct
+   * Idempotency-Key values within one retention window.
+   */
+  idempotencyMaxEntries: number;
+  /**
+   * How long an idempotency entry lives before it is eligible for lazy
+   * removal (issue #72). Should be at least as long as your client's
+   * retry window to guarantee deduplication across retries.
+   * Also controls when a key may be safely reused for a different request.
+   */
+  idempotencyRetentionMs: number;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
@@ -84,6 +99,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     databaseConnectionTimeoutMs: integerEnv(env, "DATABASE_CONNECTION_TIMEOUT_MS", 5_000, 500, 30_000),
     databaseQueryTimeoutMs: integerEnv(env, "DATABASE_QUERY_TIMEOUT_MS", 5_000, 100, 30_000),
     databaseIdleTimeoutMs: integerEnv(env, "DATABASE_IDLE_TIMEOUT_MS", 10_000, 1_000, 60_000),
+    idempotencyMaxEntries: integerEnv(env, "IDEMPOTENCY_MAX_ENTRIES", 1_000, 1, 100_000),
+    idempotencyRetentionMs: integerEnv(env, "IDEMPOTENCY_RETENTION_MS", 86_400_000, 60_000, 604_800_000),
     ...(env.DATABASE_URL && { databaseUrl: env.DATABASE_URL }),
     ...(env.SCENARIO_DIRECTORY && { scenarioDirectory: env.SCENARIO_DIRECTORY }),
   };

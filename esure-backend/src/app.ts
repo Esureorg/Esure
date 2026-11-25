@@ -97,15 +97,6 @@ const exportQuerySchema = {
 /** Maximum Idempotency-Key length accepted (issue #72). */
 const IDEMPOTENCY_KEY_MAX_LENGTH = 128;
 
-/** Maximum number of in-flight idempotency entries (issue #72). */
-const IDEMPOTENCY_MAX_ENTRIES = 1_000;
-
-/**
- * Retention window for idempotency entries: 24 h (issue #72).
- * Entries older than this are pruned lazily on the next lookup.
- */
-const IDEMPOTENCY_RETENTION_MS = 86_400_000;
-
 export function buildApp(options: BuildAppOptions): AppInstance {
   const clock = options.clock ?? Date.now;
   const app = Fastify({ logger: options.logger ?? false, bodyLimit: options.config.bodyLimitBytes, ajv: { customOptions: { removeAdditional: false } } });
@@ -126,8 +117,8 @@ export function buildApp(options: BuildAppOptions): AppInstance {
   // Idempotency store shared across both run-creation endpoints (issue #72).
   // RunService.start returns Promise<RunReport>, so T = RunReport.
   const idempotency = new IdempotencyStore<RunReport>(
-    IDEMPOTENCY_MAX_ENTRIES,
-    IDEMPOTENCY_RETENTION_MS,
+    options.config.idempotencyMaxEntries,
+    options.config.idempotencyRetentionMs,
   );
 
   app.addHook("onRequest", async (request, reply) => {
@@ -146,7 +137,6 @@ export function buildApp(options: BuildAppOptions): AppInstance {
   const ledger = options.ledger ?? new StellarTestnetGateway(options.config.horizonUrl, options.config.friendbotUrl, {
     fundingConcurrency: options.config.maxConcurrentFriendbotRequests,
   });
-  const clock = options.clock ?? Date.now;
   const runs = new RunService(persistence.runStore ?? new InMemoryRunStore(options.config.maxStoredRuns, options.config.runRetentionMs, clock), ledger, {
     maxConcurrentRuns: options.config.maxConcurrentRuns, runTimeoutMs: options.config.runTimeoutMs, stepTimeoutMs: options.config.stepTimeoutMs,
   }, clock, options.runLogger ?? app.log);
