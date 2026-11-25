@@ -41,6 +41,19 @@ work during time-boxed contribution campaigns.
 - New dependencies require a clear need and must pass the repository audit.
 - Accessibility and reduced-motion behavior are required for frontend changes.
 
+### Contracts
+
+`esure-contracts/` is **proposal-only** during the classic payment MVP. No
+on-chain contract code is accepted until a written proposal passes the design
+gate. Before adding contract code, the proposal must show:
+
+- a demonstrated testing need that classic Stellar operations cannot cover;
+- completion of the admission checklist in
+  [`esure-contracts/DESIGN.md`](../esure-contracts/DESIGN.md);
+- maintainer approval of the proposal in
+  [`esure-contracts/PROPOSAL.md`](../esure-contracts/PROPOSAL.md);
+- Testnet-only scope, consistent with the MVP constraints above.
+
 ## Issue labels and sizing
 
 Issue forms apply a type label: `bug` or `enhancement`. Maintainers add one or

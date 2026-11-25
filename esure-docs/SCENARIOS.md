@@ -369,7 +369,46 @@ schema, and generated API types import the updated domain types directly.
 
 - Bundled definitions live in the backend `scenarios/` directory.
 - A server operator can set `SCENARIO_DIRECTORY` to load additional JSON/YAML
-  files without editing application source.
+  files without editing application source. This is **additive**: files in the
+  configured directory are loaded alongside the bundled `scenarios/` directory
+  and do not override bundled IDs. A custom scenario that reuses a bundled ID
+  (or any other duplicate ID) causes startup to fail with
+  `duplicate scenario id <id>`, so custom scenarios must use a distinct ID.
+- File extensions are matched case-insensitively: `.json`, `.yaml`, and `.yml`
+  (for example `.JSON` or `.YAML`) are all accepted.
+- A configured directory may contain at most **100 files**; exceeding this
+  limit fails startup. Each file is still bounded by the 16 KiB definition
+  limit described above.
+
+For example, a custom file `custom-xlm-payment.yaml` placed in
+`SCENARIO_DIRECTORY`:
+
+```yaml
+schemaVersion: 1
+id: custom-xlm-payment
+version: 1
+name: Custom XLM payment
+description: Operator-supplied XLM transfer scenario.
+network: testnet
+accounts:
+  - { id: sender, generate: true, fund: true }
+  - { id: recipient, generate: true, fund: true }
+assets:
+  - { id: xlm, type: native }
+steps:
+  - id: pay
+    type: payment
+    from: sender
+    to: recipient
+    asset: xlm
+    amount: "1"
+assertions:
+  - { type: balanceEquals, account: recipient, asset: xlm, amount: "1" }
+  - { type: stepSucceeded, step: pay }
+```
+
+Because its ID `custom-xlm-payment` is distinct from every bundled ID, it is
+catalogued alongside the bundled scenarios rather than replacing any of them.
 - `POST /api/v1/scenarios/validate` validates raw JSON or YAML without execution.
 - `POST /api/v1/runs/definitions` validates and executes raw JSON or YAML.
 - `POST /api/v1/runs` continues to execute a catalogued definition by ID.

@@ -32,6 +32,21 @@ npm run bench:stores -- 833 20 # offline bounded-store latency benchmark
 
 Benchmark methodology and local results are in [benchmarks/README.md](benchmarks/README.md).
 
+## Maintenance command reference
+
+These commands are opt-in and only needed for published persistence,
+reconciliation, pruning, or benchmarking. Verify names and flags against
+`package.json` and the script sources before use.
+
+| Command | Purpose | Required database role | Read/write effect | Runbook |
+| --- | --- | --- | --- | --- |
+| `npm run db:migrate` | Apply checksummed migrations | `esure_migrations` (via `DATABASE_MIGRATION_URL`) | Writes schema | [PERSISTENCE.md](../esure-docs/PERSISTENCE.md) |
+| `npm run migrate:status` | Report applied and pending migrations | `esure_migrations` | Read-only | [PERSISTENCE.md](../esure-docs/PERSISTENCE.md) |
+| `npm run db:reconcile` | Reconcile published scenario fixtures | `esure_migrations` | Writes catalogue | [PERSISTENCE.md](../esure-docs/PERSISTENCE.md) |
+| `npm run db:reconcile:dry-run` | Report reconciliation changes without writing | `esure_migrations` | Read-only | [PERSISTENCE.md](../esure-docs/PERSISTENCE.md) |
+| `npm run prune:runs` | Physically delete expired terminal runs in bounded batches; supports `--dry-run` | `esure_maintenance` | Writes/deletes, with `cleanup_audit` entries | [PERSISTENCE.md](../esure-docs/PERSISTENCE.md), [TESTNET_RESET_RECOVERY.md](../esure-docs/TESTNET_RESET_RECOVERY.md) |
+| `npm run bench:stores -- <iterations> <concurrency>` | Offline bounded-store latency benchmark | None | Read-only | [benchmarks/README.md](benchmarks/README.md) |
+
 The default runner limits each step to 30 seconds, each run to 120 seconds,
 and concurrent execution to two runs. Request rates, in-memory retention, body
 size, and concurrency are configurable through the bounded values documented in
