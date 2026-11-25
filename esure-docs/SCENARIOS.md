@@ -28,6 +28,9 @@ ESURE includes 12 bundled scenarios for Testnet integration testing:
 | `minimum-xlm-payment` | Send minimum viable XLM (1 stroop) | Pass |
 | `minimum-issued-asset-payment` | Transfer the smallest issued-asset unit between holders | Pass; sender and recipient balances are exact |
 | `path-payment` | Create EUR/XLM and USDC/EUR offers and send XLM through EUR to deliver USDC | Pass on Testnet |
+| `strict-send-below-dest-min` | Strict-send XLM through isolated EUR liquidity with a `destMin` the offers cannot meet | Controlled `op_under_dest_min` failure; issued balances unchanged |
+| `path-payment-no-liquidity` | Path payment between freshly generated issued assets with no offers | Controlled no-liquidity failure; recipient balance unchanged; scenario continues |
+| `path-payment-trustline-limit-exceeded` | Path conversion delivering more than the destination trustline limit | Controlled `op_line_full` failure; destination balance unchanged |
 
 These scenarios demonstrate XLM transfers, issued assets, trustline management,
 expected failure handling, and multi-step transaction flows that Stellar developers
@@ -55,6 +58,30 @@ sell offers. The USDC in this isolated scenario is not Circle-issued USDC. A
 strict-receive path payment converts sender XLM through EUR to deliver exactly
 5 USDC to the recipient (with a 10 XLM maximum). It does not depend on
 pre-existing public order-book liquidity.
+
+`strict-send-below-dest-min` builds its own isolated offers whose output is
+below the requested `destMin`. For a strict-send path payment, `destMin` is a
+minimum-receive constraint: the sender fixes `sendAmount`, and Stellar must
+deliver at least `destMin` to the destination. When the available offers cannot
+meet that minimum, the operation fails with `op_under_dest_min` and no issued
+assets move; the scenario asserts that exact failure and that the issuer and
+holder balances are unchanged.
+
+`path-payment-no-liquidity` uses freshly generated issued assets with no offers
+at all. The path payment therefore has no liquidity to convert through and
+fails with the no-path outcome (for example `op_no_issuer` when no issuer or
+offer can satisfy the path). Because this is an expected failure matched by
+`stepFailedWith`, the scenario continues to later steps, and the assertions
+verify the recipient's balance is unchanged.
+
+`path-payment-trustline-limit-exceeded` uses isolated liquidity and a
+destination trustline whose limit is below the amount the path would deliver.
+The conversion is rejected with `op_line_full` and the destination balance is
+unchanged. This is distinct from a `sendMax` failure: a strict-receive
+`sendMax` failure means the sender cannot source enough input to deliver the
+requested amount (for example `op_too_few_offers` or `op_underfunded`), whereas
+`op_line_full` is about the destination's trustline capacity, not the sender's
+maximum spend.
 
 `issued-asset-partial-redemption-transfer` issues 100 TESTUSD to the sender,
 returns 30 to the issuer for redemption, then transfers 20 of the sender's

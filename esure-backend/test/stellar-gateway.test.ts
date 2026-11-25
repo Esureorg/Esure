@@ -1275,6 +1275,106 @@ describe("Issue #94 — trustlineLimitEquals assertion", () => {
   });
 });
 
+// Issues #289/#290/#293 — expected-failure path-payment fixtures
+describe("expected-failure path-payment fixtures", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  const fixtureIds = ["path-payment-strict-send-below-dest-min", "path-payment-no-liquidity", "path-payment-trustline-limit-exceeded"] as const;
+
+  function fixture(id: (typeof fixtureIds)[number]): ValidatedScenario {
+    const scenario = createScenarioRegistry().find(id);
+    expect(scenario, `fixture ${id} should be registered`).toBeDefined();
+    return scenario!;
+  }
+
+  function issuedBalance(asset: { code: string; issuer: string }, balance: string) {
+    return { asset_type: "credit_alphanum4", asset_code: asset.code, asset_issuer: asset.issuer, balance, limit: "1000000" };
+  }
+
+  function setupExpectedFailure(
+    scenario: ValidatedScenario,
+    failure: { transaction: string; operations: string[] },
+    balances: Record<string, Array<Record<string, unknown>>>,
+  ) {
+    vi.spyOn(Horizon.Server.prototype, "fetchTimebounds").mockResolvedValue({ minTime: 0, maxTime: 2_000_000_000 });
+    vi.spyOn(Horizon.Server.prototype, "loadAccount").mockImplementation(async (key) =>
+      Object.assign(new Account(key, "1"), { balances: balances[key] ?? [] }) as unknown as Awaited<ReturnType<Horizon.Server["loadAccount"]>>,
+    );
+    const submit = vi.spyOn(Horizon.Server.prototype, "submitTransaction").mockImplementation(async (transaction) => {
+      const types = transaction.operations.map((operation) => operation.type);
+      if (types.includes("pathPaymentStrictSend") || types.includes("pathPaymentStrictReceive")) {
+        throw horizonError(failure.transaction, failure.operations);
+      }
+      return { hash: "a".repeat(64), ledger: 100 } as Horizon.HorizonApi.SubmitTransactionResponse;
+    });
+    return submit;
+  }
+
+  it("fails strict-send below destMin with op_under_dest_min and unchanged issued balances", async () => {
+    const scenario = fixture("path-payment-strict-send-below-dest-min");
+    const recipient = scenario.accounts.find((account) => account.id === "recipient")!;
+    const marketMaker = scenario.accounts.find((account) => account.id === "market-maker")!;
+    const usd = { code: "USD", issuer: "issuer" };
+    const balances = {
+      [recipient.publicKey!]: [issuedBalance(usd, "0")],
+      [marketMaker.publicKey!]: [issuedBalance(usd, "1000")],
+    };
+    setupExpectedFailure(scenario, { transaction: "tx_failed", operations: ["op_under_dest_min"] }, balances);
+
+    const execution = await new StellarTestnetGateway("https://horizon.example", "https://friendbot.example").execute(scenario);
+
+    const pathStep = execution.steps.find((step) => step.type === "pathPaymentStrictSend")!;
+    expect(pathStep).toMatchObject({ status: "failed" });
+    expect(pathStep.error).toMatchObject({ stellarTransactionCode: "tx_failed", stellarOperationCodes: ["op_under_dest_min"] });
+    expect(execution.assertions.find((assertion) => assertion.type === "stepFailedWith")).toMatchObject({ status: "passed" });
+    const recipientBalance = execution.assertions.find((assertion) => assertion.type === "balanceEquals" && assertion.account === "recipient");
+    expect(recipientBalance).toMatchObject({ status: "passed", actual: "0" });
+    const marketMakerBalance = execution.assertions.find((assertion) => assertion.type === "balanceEquals" && assertion.account === "market-maker");
+    expect(marketMakerBalance).toMatchObject({ status: "passed", actual: "1000" });
+  });
+
+  it("fails path payment with no liquidity and continues past the expected failure", async () => {
+    const scenario = fixture("path-payment-no-liquidity");
+    const recipient = scenario.accounts.find((account) => account.id === "recipient")!;
+    const usd = { code: "USD", issuer: "issuer" };
+    setupExpectedFailure(scenario, { transaction: "tx_failed", operations: ["op_no_issuer"] }, { [recipient.publicKey!]: [issuedBalance(usd, "0")] });
+
+    const execution = await new StellarTestnetGateway("https://horizon.example", "https://friendbot.example").execute(scenario);
+
+    const pathStep = execution.steps.find((step) => step.type === "pathPaymentStrictReceive")!;
+    expect(pathStep).toMatchObject({ status: "failed" });
+    expect(pathStep.error).toMatchObject({ stellarTransactionCode: "tx_failed", stellarOperationCodes: ["op_no_issuer"] });
+    expect(execution.assertions.find((assertion) => assertion.type === "stepFailedWith")).toMatchObject({ status: "passed" });
+    const recipientBalance = execution.assertions.find((assertion) => assertion.type === "balanceEquals" && assertion.account === "recipient");
+    expect(recipientBalance).toMatchObject({ status: "passed", actual: "0" });
+    // Expected-failure continuation: the run completes and evaluates later assertions instead of throwing.
+    expect(execution.assertions.every((assertion) => assertion.status === "passed")).toBe(true);
+  });
+
+  it("fails path payment exceeding the destination trustline limit with op_line_full", async () => {
+    const scenario = fixture("path-payment-trustline-limit-exceeded");
+    const recipient = scenario.accounts.find((account) => account.id === "recipient")!;
+    const marketMaker = scenario.accounts.find((account) => account.id === "market-maker")!;
+    const usd = { code: "USD", issuer: "issuer" };
+    const balances = {
+      [recipient.publicKey!]: [issuedBalance(usd, "0")],
+      [marketMaker.publicKey!]: [issuedBalance(usd, "1000")],
+    };
+    setupExpectedFailure(scenario, { transaction: "tx_failed", operations: ["op_line_full"] }, balances);
+
+    const execution = await new StellarTestnetGateway("https://horizon.example", "https://friendbot.example").execute(scenario);
+
+    const pathStep = execution.steps.find((step) => step.type === "pathPaymentStrictReceive")!;
+    expect(pathStep).toMatchObject({ status: "failed" });
+    expect(pathStep.error).toMatchObject({ stellarTransactionCode: "tx_failed", stellarOperationCodes: ["op_line_full"] });
+    expect(execution.assertions.find((assertion) => assertion.type === "stepFailedWith")).toMatchObject({ status: "passed" });
+    const recipientBalance = execution.assertions.find((assertion) => assertion.type === "balanceEquals" && assertion.account === "recipient");
+    expect(recipientBalance).toMatchObject({ status: "passed", actual: "0" });
+    const marketMakerBalance = execution.assertions.find((assertion) => assertion.type === "balanceEquals" && assertion.account === "market-maker");
+    expect(marketMakerBalance).toMatchObject({ status: "passed", actual: "1000" });
+  });
+});
+
 // Issue #93 — fee-aware native balance delta assertions
 describe("Issue #93 — feeAwareNativeBalanceDelta assertion", () => {
   afterEach(() => vi.restoreAllMocks());
