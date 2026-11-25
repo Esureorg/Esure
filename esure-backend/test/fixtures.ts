@@ -34,3 +34,85 @@ export function completeScenario(): ScenarioDefinition {
     ],
   };
 }
+
+export interface GoldenScenarioCase {
+  name: string;
+  description: string;
+  scenario: ScenarioDefinition;
+  expectedHash: string;
+}
+
+/**
+ * Small reviewed scenario definitions with their expected canonical hashes.
+ *
+ * The hashes are the persistence integrity boundary for stored scenarios, so
+ * they are pinned here and re-verified on every CI runtime. Each case isolates
+ * one property of canonicalization:
+ * - `unicode-description`: non-ASCII text must hash by its UTF-8 content.
+ * - `reordered-keys`: object key order must not affect the hash.
+ * - `decimal-strings`: amounts stay strings, so "1.50" and "1.5" differ.
+ *
+ * To regenerate after an intentional canonicalization change, run the golden
+ * corpus test with `UPDATE_GOLDEN_HASHES=1` and review the diff.
+ */
+export function goldenScenarioCases(): GoldenScenarioCase[] {
+  return [
+    {
+      name: "unicode-description",
+      description: "Unicode descriptions hash by their UTF-8 content.",
+      scenario: {
+        schemaVersion: 1,
+        id: "golden-unicode",
+        version: 1,
+        name: "Unicode scenario",
+        description: "Transfert de démonstration — 日本語の説明 — emoji 🚀",
+        network: "testnet",
+        accounts: [{ id: "issuer", generate: true, fund: true }],
+        assets: [{ id: "xlm", type: "native" }],
+        steps: [
+          { id: "pay", type: "payment", from: "issuer", to: "issuer", asset: "xlm", amount: "1" },
+        ],
+        assertions: [{ type: "accountExists", account: "issuer" }],
+      },
+      expectedHash: "GOLDEN_UNICODE_DESCRIPTION_HASH",
+    },
+    {
+      name: "reordered-keys",
+      description: "Reordering object keys must not change the canonical hash.",
+      scenario: {
+        schemaVersion: 1,
+        id: "golden-reordered",
+        version: 1,
+        name: "Reordered keys scenario",
+        description: "Same content, different key order.",
+        network: "testnet",
+        accounts: [{ id: "issuer", generate: true, fund: true }],
+        assets: [{ id: "xlm", type: "native" }],
+        steps: [
+          { id: "pay", type: "payment", from: "issuer", to: "issuer", asset: "xlm", amount: "1" },
+        ],
+        assertions: [{ type: "accountExists", account: "issuer" }],
+      },
+      expectedHash: "GOLDEN_REORDERED_KEYS_HASH",
+    },
+    {
+      name: "decimal-strings",
+      description: "Decimal amounts are hashed as strings, preserving trailing zeros.",
+      scenario: {
+        schemaVersion: 1,
+        id: "golden-decimals",
+        version: 1,
+        name: "Decimal strings scenario",
+        description: "Amounts are decimal strings, not numbers.",
+        network: "testnet",
+        accounts: [{ id: "issuer", generate: true, fund: true }],
+        assets: [{ id: "xlm", type: "native" }],
+        steps: [
+          { id: "pay", type: "payment", from: "issuer", to: "issuer", asset: "xlm", amount: "1.50" },
+        ],
+        assertions: [{ type: "accountExists", account: "issuer" }],
+      },
+      expectedHash: "GOLDEN_DECIMAL_STRINGS_HASH",
+    },
+  ];
+}

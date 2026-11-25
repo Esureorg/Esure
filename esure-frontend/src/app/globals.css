@@ -185,6 +185,28 @@ footer { border-top:1px solid var(--line); min-height:80px; display:flex; justif
   .section-heading { flex-direction:column; }
 }
 @media (prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}
+@media print{
+  html,body{max-width:100%;overflow:visible;background:#fff;color:#000}
+  .shell{width:100%;max-width:100%;margin:0;padding:0}
+  .topbar,.hero,.workspace,.launch-panel,.scenario-grid,.scenario-filters,.catalogue-toolbar,.preview-panel,.report-controls,.report-filters,.filter-pill,.print-button,.download,button.download,.copy-control,.copy-button,.copy-status,.copy-error,.diff-toggle-btn,.preview-btn,.skip-link,.error-banner,.run-error,.browser-offline-banner,.report-expiration-hint,.empty-report,.empty-scenarios,footer{display:none!important}
+  .print-report-header{display:block!important;margin:0 0 16px;padding:0 0 12px;border-bottom:1px solid #000}
+  .print-status-label{display:inline!important}
+  .print-only{display:block!important}
+  .results{padding-block:0;min-height:0}
+  .report-grid{display:block}
+  .timeline-card,.summary-card{background:#fff;border:1px solid #000;box-shadow:none;position:static;break-inside:auto}
+  .summary-card{margin-top:16px}
+  .report-meta{grid-template-columns:auto minmax(0,1fr);border-bottom:1px solid #000}
+  .report-meta code,.id-cell,.id-cell code,.hash-cell code,.timeline-row a,.tx-actions,.tx-actions a,.assertion strong,.assertion-value-pre,.preview-meta dd{overflow-wrap:anywhere;word-break:break-word;white-space:normal;max-width:100%}
+  .timeline-row,.assertion,.running-row{grid-template-columns:24px minmax(0,1fr);padding:12px 0;break-inside:avoid;page-break-inside:avoid}
+  .ledger{grid-column:2;justify-self:start}
+  .assertion{background:#fff;border-top:1px solid #000}
+  .assertion-diff{grid-template-columns:1fr 1fr}
+  .assertion-value-pre{max-height:none;overflow:visible;background:#fff;border:1px solid #000}
+  .step-dot,.status-badge span,.signal-dot{box-shadow:none}
+  .status-badge{border-color:#000}
+  a{color:#000;text-decoration:underline}
+}
 .error-boundary{min-height:100vh;display:grid;place-items:center;padding:24px;background:var(--paper)}
 .error-boundary__card{max-width:520px;width:100%;padding:28px;border:1px solid var(--line);background:#f8f6f0}
 .error-boundary__card h1{margin:10px 0 8px;font-size:28px;letter-spacing:-.04em}
