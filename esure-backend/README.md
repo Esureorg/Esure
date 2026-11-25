@@ -69,13 +69,52 @@ set `RUN_PERSISTENCE_ENABLED=true`. Run persistence defaults to disabled, and
 the API report format remains unchanged. Generated Testnet secret keys and
 account keys are never included in persisted reports.
 
+### Metrics operator reference
+
 Process-local aggregate execution metrics are available at `GET /metrics` only
-when `METRICS_ENABLED=true`; the default is `false`. The endpoint reports active
-runs, terminal totals, rejected starts, and aggregate duration. It is not
-authenticated and exposes process-level operational data, so keep it on a
-private network or restrict it at the reverse proxy to trusted monitoring
-systems. Do not expose it publicly. Metrics reset when the process restarts and
-are not shared between backend instances.
+when `METRICS_ENABLED=true`; the default is `false`. The route responds with
+`Content-Type: text/plain; version=0.0.4` (Prometheus text exposition format)
+and `Cache-Control: no-store`. No external monitoring dependency is required;
+any Prometheus-compatible scraper can read the plain-text output.
+
+Metric names, types, labels, and units:
+
+| Metric | Type | Labels | Unit / meaning |
+| --- | --- | --- | --- |
+| `esure_active_runs` | gauge | none | Count of currently admitted active runs. |
+| `esure_terminal_runs_total` | counter | `outcome="passed"` or `outcome="failed"` | Number of runs that reached a terminal state, per outcome. |
+| `esure_rejected_run_starts_total` | counter | `reason="capacity"` or `reason="draining"` | Number of run starts rejected before admission, per reason. |
+| `esure_run_duration_seconds_sum` | summary sum | none | Total observed run duration in seconds (accumulated milliseconds divided by 1000). |
+| `esure_run_duration_seconds_count` | counter | none | Number of terminal runs included in the duration sum. |
+
+Sanitized sample output (values are illustrative):
+
+```text
+# HELP esure_active_runs Number of currently admitted active runs.
+# TYPE esure_active_runs gauge
+esure_active_runs 1
+# HELP esure_terminal_runs_total Number of runs that reached a terminal state.
+# TYPE esure_terminal_runs_total counter
+esure_terminal_runs_total{outcome="passed"} 4
+esure_terminal_runs_total{outcome="failed"} 1
+# HELP esure_rejected_run_starts_total Number of run starts rejected before admission.
+# TYPE esure_rejected_run_starts_total counter
+esure_rejected_run_starts_total{reason="capacity"} 2
+esure_rejected_run_starts_total{reason="draining"} 0
+# HELP esure_run_duration_seconds Run duration in seconds.
+# TYPE esure_run_duration_seconds summary
+esure_run_duration_seconds_sum 12.345
+esure_run_duration_seconds_count 5
+```
+
+Reset semantics: all values are process-local aggregates. They reset to zero
+when the process restarts and are not shared between backend instances, so
+scrape each instance separately and expect counters to restart from zero.
+
+Access configuration: the endpoint is not authenticated and exposes
+process-level operational data. Keep it on a private network or restrict it at
+the reverse proxy to trusted monitoring systems. Do not expose it publicly.
+=======
 
 The backend logger emits structured `run.started`, `run.completed`, and
 `run.failed` events for accepted scenario runs. Events include the run ID,
