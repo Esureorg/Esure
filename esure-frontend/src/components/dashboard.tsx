@@ -750,7 +750,13 @@ export function Dashboard() {
                 <button
                   type="button"
                   className={`favorite-btn ${favorites.has(scenario.id) ? "active" : ""}`}
-                  aria-label={`${favorites.has(scenario.id) ? "Remove from" : "Add to"} favorites`}
+                  aria-label={
+                    // Scenario name keeps each card's button distinct for
+                    // screen readers (#191); aria-pressed carries the state.
+                    favorites.has(scenario.id)
+                      ? `Remove ${scenario.name} from favorites`
+                      : `Add ${scenario.name} to favorites`
+                  }
                   aria-pressed={favorites.has(scenario.id)}
                   onClick={(e) => { e.stopPropagation(); toggleFavorite(scenario.id); }}
                 >
