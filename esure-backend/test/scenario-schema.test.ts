@@ -119,6 +119,33 @@ assertions:
     );
   });
 
+  it("loads the bundled sendMax-exceeded path payment scenario", () => {
+    const scenario = createScenarioRegistry().find("path-payment-sendmax-exceeded");
+    expect(scenario).toBeDefined();
+    expect(scenario).toMatchObject({
+      id: "path-payment-sendmax-exceeded",
+      steps: expect.arrayContaining([
+        expect.objectContaining({ type: "manageSellOffer" }),
+        expect.objectContaining({
+          type: "pathPaymentStrictReceive",
+          sendAsset: "xlm",
+          destAsset: "usdc",
+          sendMax: "1",
+        }),
+      ]),
+    });
+    const pathPayment = scenario?.steps.find((step) => step.type === "pathPaymentStrictReceive");
+    expect(pathPayment?.type === "pathPaymentStrictReceive" ? pathPayment.sendMax : undefined).toBe("1");
+    expect(scenario?.assertions).toEqual(
+      expect.arrayContaining([
+        { type: "stepFailedWith", step: "pay-usdc-through-eur", transactionCode: "tx_failed", operationCodes: ["op_too_few_offers"] },
+        { type: "balanceEquals", account: "recipient", asset: "usdc", amount: "0" },
+      ]),
+    );
+    const { contentHash: _hash, ...definition } = structuredClone(scenario!);
+    expect(prepareScenario(definition)).toMatchObject({ id: "path-payment-sendmax-exceeded" });
+  });
+
   it("rejects unresolved or endpoint assets in path payment paths", () => {
     const scenario = createScenarioRegistry().find("path-payment")!;
     const { contentHash: _invalidHash, ...invalidReference } = structuredClone(scenario);
