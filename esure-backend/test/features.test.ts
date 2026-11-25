@@ -15,6 +15,7 @@ import { buildApp } from "../src/app.js";
 import type { LedgerExecution, LedgerGateway, Scenario } from "../src/domain.js";
 import type { AppConfig } from "../src/config.js";
 import { scenarioSchemaV1 } from "../src/scenario-schema.js";
+import { createScenarioRegistry } from "../src/scenario-registry.js";
 import { completeScenario } from "./fixtures.js";
 
 // ── shared config / ledger ─────────────────────────────────────────────────
@@ -435,6 +436,57 @@ describe("Issue #72 — Idempotency-Key header for POST /api/v1/runs", () => {
     });
     expect(retry.statusCode).toBe(202);
     expect(retry.json().id).toBe(first.json().id);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Issue #291 — Direct path-payment fixture with an empty path
+// ══════════════════════════════════════════════════════════════════════════════
+
+describe("Issue #291 — path-payment-direct fixture (empty path)", () => {
+  it("POST /api/v1/runs with scenarioId path-payment-direct returns 202 and records the fixture content hash", async () => {
+    const app = createApp();
+    const catalogue = await app.inject({ method: "GET", url: "/api/v1/scenarios" });
+    const item = catalogue.json().items.find((s: { id: string }) => s.id === "path-payment-direct");
+    expect(item).toBeDefined();
+
+    const started = await app.inject({
+      method: "POST",
+      url: "/api/v1/runs",
+      payload: { scenarioId: "path-payment-direct" },
+    });
+    expect(started.statusCode).toBe(202);
+    expect(started.json().scenarioId).toBe("path-payment-direct");
+    expect(started.json().scenarioContentHash).toBe(item.contentHash);
+  });
+
+  it("loads the fixture with an empty path and executes it against the deterministic harness", async () => {
+    const registry = createScenarioRegistry();
+    const scenario = registry.find("path-payment-direct");
+    expect(scenario).toBeDefined();
+    expect(scenario!.id).toBe("path-payment-direct");
+
+    // The fixture must use a direct offer: no intermediate path assets.
+    const pathPaymentStep = scenario!.steps.find((s) => s.type === "pathPayment");
+    expect(pathPaymentStep).toBeDefined();
+    const path = (pathPaymentStep as { path?: unknown[] }).path;
+    expect(path).toEqual([]);
+
+    // Execute against the deterministic mock ledger harness.
+    const ledger = createMockLedger();
+    const execution = await ledger.execute(scenario!);
+
+    // The direct path-payment step must be confirmed.
+    const step = execution.steps.find((s) => s.id === "pay");
+    expect(step).toBeDefined();
+    expect(step!.status).toBe("passed");
+
+    // The delivered destination balance must match the fixture's expected amount.
+    const balanceAssertion = execution.assertions.find((a) => a.type === "balanceEquals");
+    expect(balanceAssertion).toBeDefined();
+    expect(balanceAssertion!.status).toBe("passed");
+    expect(balanceAssertion!.expected).toBe("5");
+    expect(balanceAssertion!.actual).toBe("5");
   });
 });
 

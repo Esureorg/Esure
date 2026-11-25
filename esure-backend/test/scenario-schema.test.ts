@@ -106,6 +106,31 @@ assertions:
     expect(scenario?.accounts).toHaveLength(4);
   });
 
+  it("loads the bundled direct path payment scenario with an empty path", () => {
+    const scenario = createScenarioRegistry().find("path-payment-direct");
+    expect(scenario).toBeDefined();
+    expect(scenario).toMatchObject({
+      id: "path-payment-direct",
+      steps: expect.arrayContaining([
+        expect.objectContaining({
+          type: "pathPaymentStrictReceive",
+          sendAsset: "xlm",
+          destAsset: "usdc",
+          path: [],
+        }),
+      ]),
+    });
+    const { contentHash: _directHash, ...definition } = structuredClone(scenario!);
+    expect(() => prepareScenario(definition)).not.toThrow();
+    expect(scenario?.assertions).toEqual(
+      expect.arrayContaining([
+        { type: "stepSucceeded", step: "pay-usdc-direct" },
+        { type: "transactionConfirmed", step: "pay-usdc-direct" },
+        { type: "balanceEquals", account: "recipient", asset: "usdc", amount: "5" },
+      ]),
+    );
+  });
+
   it("loads the bundled sender missing-trustline scenario", () => {
     const scenario = createScenarioRegistry().find("sender-missing-trustline");
     expect(scenario?.accounts.map((account) => account.id)).toEqual(["issuer", "sender", "recipient"]);
