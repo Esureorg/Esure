@@ -385,15 +385,17 @@ export function compareReports(a: RunReport, b: RunReport): ReportComparison {
   }
 
   // Assertion comparison using documented stable occurrence keys: `${type}#${index}`
-  // index is occurrence count of this assertion type in the report
+  // index is occurrence count of this assertion type in the report.
+  // The type is stored alongside the key (rather than re-derived via split("#"))
+  // so assertion types containing "#" cannot corrupt the reported type.
   function getAssertionKeyMap(assertions: AssertionResult[]) {
-    const keyMap = new Map<string, AssertionResult>();
+    const keyMap = new Map<string, { type: string; assertion: AssertionResult }>();
     const counts = new Map<string, number>();
     for (const assertion of assertions) {
       const count = counts.get(assertion.type) ?? 0;
       counts.set(assertion.type, count + 1);
       const key = `${assertion.type}#${count}`;
-      keyMap.set(key, assertion);
+      keyMap.set(key, { type: assertion.type, assertion });
     }
     return keyMap;
   }
@@ -413,9 +415,11 @@ export function compareReports(a: RunReport, b: RunReport): ReportComparison {
   let assertionsUnchanged = 0;
 
   for (const key of allAssertKeys) {
-    const assertA = assertMapA.get(key);
-    const assertB = assertMapB.get(key);
-    const type = key.split("#")[0];
+    const entryA = assertMapA.get(key);
+    const entryB = assertMapB.get(key);
+    const assertA = entryA?.assertion;
+    const assertB = entryB?.assertion;
+    const type = (entryB ?? entryA)!.type;
 
     if (assertA && assertB) {
       const change = assertA.status === assertB.status ? "unchanged" : "changed";

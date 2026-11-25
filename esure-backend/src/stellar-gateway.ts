@@ -41,6 +41,12 @@ export interface StellarGatewayOptions {
   fundingConcurrency?: number;
   /** Issue #83: injectable clock for deterministic step-timing tests. */
   clock?: Clock;
+  /**
+   * Issue #281: optional abort signal observed by retry backoff sleeps
+   * (Horizon retries). Lets tests abort during backoff without wall-clock
+   * sleeps. Production callers leave this unset.
+   */
+  retrySignal?: AbortSignal;
 }
 
 /** Issue #83: a clock abstraction so timing tests can avoid real delays. */
@@ -566,7 +572,9 @@ export class StellarTestnetGateway implements LedgerGateway {
         }
         retries += 1;
         const delay = calculateRetryDelay(retries, config);
-        await sleepFn(delay);
+        // Issue #281: route backoff through the injected sleep so a
+        // controllable-clock harness can advance time deterministically.
+        await sleepFn(delay, this.#options.retrySignal);
       }
     }
   }
