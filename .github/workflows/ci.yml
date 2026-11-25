@@ -26,6 +26,13 @@ jobs:
       - run: npm ci --no-workspaces
       - run: npm run check
       - run: npm run build
+      - name: Fail if generated API types drift
+        run: |
+          if ! git diff --exit-code -- src/generated/api-types.ts; then
+            echo "src/generated/api-types.ts is out of date."
+            echo "Regenerate and commit it with: cd esure-backend && npm run generate:api-types"
+            exit 1
+          fi
 
   frontend:
     name: Frontend checks
