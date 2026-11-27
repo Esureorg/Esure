@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { RunService } from "./run-service.js";
 import { InMemoryRunStore } from "./run-store.js";
-import type { LedgerGateway, ValidatedScenario, StepResult, AssertionResult, LedgerExecutionOptions } from "./domain.js";
+import type { RunStore } from "./run-store.js";
+import type { LedgerGateway, ValidatedScenario, StepResult, AssertionResult, LedgerExecutionOptions, RunRecord } from "./domain.js";
 import { RunTimeoutError, SafeRunError } from "./errors.js";
 import type { RunLifecycleLog } from "./run-service.js";
 
@@ -256,6 +257,57 @@ describe("RunService", () => {
     expect(events.filter((event) => event.event !== "run.started")).toHaveLength(2);
   });
 
+  it("persists terminal failure when the progress chain itself rejects", async () => {
+    // Regression for: execute catch block awaiting progressUpdates where a
+    // rejected progress chain would swallow the terminal failure write.
+    //
+    // We simulate this by having the gateway both:
+    //   1. fire a step callback that queues a progress update, AND
+    //   2. reject the execution promise itself.
+    //
+    // Before the fix, the catch block did `await progressUpdates` without
+    // guarding against its rejection, so if the progress update's store call
+    // also threw (e.g. due to an already-terminal run being updated), the
+    // terminal failure write would be skipped. Here we verify that the run
+    // always reaches a terminal state even when the execution and progress
+    // chain both encounter errors.
+    let capturedOptions: LedgerExecutionOptions | undefined;
+
+    const gateway: LedgerGateway = {
+      execute(scenario, options) {
+        capturedOptions = options;
+        return new Promise((_resolve, reject) => {
+          // Immediately fire a step callback so it is queued into progressUpdates,
+          // then reject the execution on the next tick.
+          options?.onStep?.(dummyStep);
+          setImmediate(() => reject(new SafeRunError({
+            code: "HORIZON_UNAVAILABLE",
+            message: "Horizon timed out",
+            category: "network",
+            retryable: true,
+          })));
+        });
+      },
+    };
+
+    const service = new RunService(
+      store,
+      gateway,
+      { maxConcurrentRuns: 1, runTimeoutMs: 5_000, stepTimeoutMs: 500 },
+      Date.now,
+    );
+
+    const run = await service.start(dummyScenario);
+    await vi.runAllTimersAsync();
+
+    // The run must reach a terminal state despite the concurrent progress and
+    // execution rejection.
+    const finalized = store.get(run.id);
+    expect(finalized?.status).toBe("failed");
+    expect(finalized?.error?.code).toBe("HORIZON_UNAVAILABLE");
+    expect(service.getMetrics().activeRuns).toBe(0);
+  });
+
   it("ignores late callbacks after report eviction", async () => {
     let capturedOptions: LedgerExecutionOptions | undefined;
     const gateway: LedgerGateway = {
@@ -357,5 +409,172 @@ describe("RunService — graceful shutdown", () => {
     const gateway: LedgerGateway = { execute: vi.fn().mockResolvedValue({ steps: [], assertions: [] }) };
     const service = new RunService(store, gateway, { maxConcurrentRuns: 2, runTimeoutMs: 1000, stepTimeoutMs: 500 });
     await expect(Promise.all([service.drain(), service.drain(), service.drain()])).resolves.toBeDefined();
+  });
+});
+
+type StoreFailurePoint = "create" | "progress" | "finalSuccess" | "finalFailure";
+
+/**
+ * Deterministic fake store that wraps InMemoryRunStore and can be configured to
+ * throw at a specific persistence point in the run lifecycle.
+ */
+class FailingRunStore implements RunStore {
+  private readonly inner: InMemoryRunStore;
+  private readonly failAt: StoreFailurePoint;
+  private readonly error: Error;
+
+  constructor(failAt: StoreFailurePoint, error = new Error("injected store failure")) {
+    this.inner = new InMemoryRunStore();
+    this.failAt = failAt;
+    this.error = error;
+  }
+
+  create(record: RunRecord): void {
+    if (this.failAt === "create") throw this.error;
+    this.inner.create(record);
+  }
+
+  get(id: string): RunRecord | undefined {
+    return this.inner.get(id);
+  }
+
+  update(id: string, patch: Partial<RunRecord>): void {
+    const isProgress = patch.steps !== undefined || patch.assertions !== undefined;
+    const isFinalSuccess = patch.status === "passed";
+    const isFinalFailure = patch.status === "failed";
+
+    if (this.failAt === "progress" && isProgress) throw this.error;
+    if (this.failAt === "finalSuccess" && isFinalSuccess) throw this.error;
+    if (this.failAt === "finalFailure" && isFinalFailure) throw this.error;
+
+    this.inner.update(id, patch);
+  }
+}
+
+describe("RunService — store failure injection", () => {
+  let unhandledRejectionSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    unhandledRejectionSpy = vi.spyOn(process, "emit");
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  const expectNoUnhandledRejection = () => {
+    const unhandledCalls = unhandledRejectionSpy.mock.calls.filter(
+      ([event]) => event === "unhandledRejection",
+    );
+    expect(unhandledCalls).toHaveLength(0);
+  };
+
+  it("create throws — start() rejects, capacity is released, and a subsequent start succeeds", async () => {
+    const failingStore = new FailingRunStore("create");
+    const gateway: LedgerGateway = {
+      execute: vi.fn().mockResolvedValue({ steps: [dummyStep], assertions: [dummyAssertion] }),
+    };
+    const service = new RunService(
+      failingStore,
+      gateway,
+      { maxConcurrentRuns: 1, runTimeoutMs: 1000, stepTimeoutMs: 500 },
+      Date.now,
+    );
+
+    await expect(service.start(dummyScenario)).rejects.toThrow("injected store failure");
+    expect(service.getMetrics().activeRuns).toBe(0);
+
+    // Capacity must be released so a subsequent start succeeds.
+    const run = await service.start(dummyScenario);
+    expect(run.status).toBe("requested");
+    await vi.runAllTimersAsync();
+
+    expect(service.getMetrics().activeRuns).toBe(0);
+    expectNoUnhandledRejection();
+  });
+
+  it("progress update throws — run still finalizes and capacity is released", async () => {
+    const failingStore = new FailingRunStore("progress");
+    const gateway: LedgerGateway = {
+      async execute(scenario, options) {
+        options?.onStep?.(dummyStep);
+        options?.onAssertion?.(dummyAssertion);
+        return { steps: [dummyStep], assertions: [dummyAssertion] };
+      },
+    };
+    const service = new RunService(
+      failingStore,
+      gateway,
+      { maxConcurrentRuns: 1, runTimeoutMs: 1000, stepTimeoutMs: 500 },
+      Date.now,
+    );
+
+    const run = await service.start(dummyScenario);
+    await vi.runAllTimersAsync();
+
+    expect(failingStore.get(run.id)?.status).toBe("passed");
+    expect(service.getMetrics().activeRuns).toBe(0);
+
+    // Capacity released — a new start succeeds.
+    const next = await service.start(dummyScenario);
+    expect(next.status).toBe("requested");
+    await vi.runAllTimersAsync();
+    expect(service.getMetrics().activeRuns).toBe(0);
+    expectNoUnhandledRejection();
+  });
+
+  it("final success update throws — failure update is attempted, capacity is released, no unhandled rejection", async () => {
+    const failingStore = new FailingRunStore("finalSuccess");
+    const gateway: LedgerGateway = {
+      execute: vi.fn().mockResolvedValue({ steps: [dummyStep], assertions: [dummyAssertion] }),
+    };
+    const service = new RunService(
+      failingStore,
+      gateway,
+      { maxConcurrentRuns: 1, runTimeoutMs: 1000, stepTimeoutMs: 500 },
+      Date.now,
+    );
+
+    const run = await service.start(dummyScenario);
+    await vi.runAllTimersAsync();
+
+    // The success update threw, so the record never reached "passed".
+    expect(failingStore.get(run.id)?.status).not.toBe("passed");
+    expect(service.getMetrics().activeRuns).toBe(0);
+
+    // Capacity released — a new start succeeds.
+    const next = await service.start(dummyScenario);
+    expect(next.status).toBe("requested");
+    await vi.runAllTimersAsync();
+    expect(service.getMetrics().activeRuns).toBe(0);
+    expectNoUnhandledRejection();
+  });
+
+  it("failure update throws — capacity is released and no unhandled rejection occurs", async () => {
+    const failingStore = new FailingRunStore("finalFailure");
+    const gateway: LedgerGateway = {
+      execute: vi.fn().mockRejectedValue(new Error("execution failed")),
+    };
+    const service = new RunService(
+      failingStore,
+      gateway,
+      { maxConcurrentRuns: 1, runTimeoutMs: 1000, stepTimeoutMs: 500 },
+      Date.now,
+    );
+
+    const run = await service.start(dummyScenario);
+    await vi.runAllTimersAsync();
+
+    expect(failingStore.get(run.id)?.status).not.toBe("failed");
+    expect(service.getMetrics().activeRuns).toBe(0);
+
+    // Capacity released — a new start succeeds.
+    const next = await service.start(dummyScenario);
+    expect(next.status).toBe("requested");
+    await vi.runAllTimersAsync();
+    expect(service.getMetrics().activeRuns).toBe(0);
+    expectNoUnhandledRejection();
   });
 });

@@ -289,6 +289,158 @@ describe("report comparison (Issue #48)", () => {
   });
 });
 
+describe("report comparison property invariants (Issue #283)", () => {
+  // Deterministic PRNG so generated reports are reproducible across runs.
+  function mulberry32(seed: number): () => number {
+    let a = seed >>> 0;
+    return () => {
+      a = (a + 0x6d2b79f5) >>> 0;
+      let t = a;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  const STEP_TYPES = ["payment", "balance", "trustline", "offer"];
+  const ASSERTION_TYPES = ["balanceEquals", "trustlineExists", "offerExists"];
+  const MAX_STEPS = 4;
+  const MAX_ASSERTIONS = 5;
+
+  function generateReport(rand: () => number, index: number): RunReport {
+    const pick = <T>(items: readonly T[]): T => items[Math.floor(rand() * items.length)];
+    const int = (max: number) => Math.floor(rand() * (max + 1));
+    const status = (): "passed" | "failed" => (rand() < 0.5 ? "passed" : "failed");
+
+    const stepCount = int(MAX_STEPS);
+    const steps = Array.from({ length: stepCount }, (_, i) => ({
+      id: `step-${i}`,
+      type: pick(STEP_TYPES),
+      status: status(),
+      message: `Step ${i}.`,
+    }));
+
+    // Repeated assertion types exercise the `${type}#${index}` occurrence keys.
+    const assertionCount = int(MAX_ASSERTIONS);
+    const assertions = Array.from({ length: assertionCount }, (_, i) => ({
+      type: pick(ASSERTION_TYPES),
+      status: status(),
+      expected: `${i}.0000000`,
+      actual: `${i}.0000000`,
+      message: `Assertion ${i}.`,
+    }));
+
+    const stepsPassed = steps.filter((s) => s.status === "passed").length;
+    const assertionsPassed = assertions.filter((a) => a.status === "passed").length;
+
+    return {
+      ...run,
+      id: `run-prop-${index}`,
+      status: stepsFailedCount(steps) === 0 ? "passed" : "failed",
+      createdAt: "2026-10-16T00:00:00.000Z",
+      completedAt: `2026-10-16T00:00:${String(int(59)).padStart(2, "0")}.000Z`,
+      steps,
+      assertions,
+      summary: {
+        stepsPassed,
+        stepsFailed: steps.length - stepsPassed,
+        assertionsPassed,
+        assertionsFailed: assertions.length - assertionsPassed,
+      },
+      error: undefined,
+    };
+  }
+
+  function stepsFailedCount(steps: RunReport["steps"]): number {
+    return steps.filter((s) => s.status === "failed").length;
+  }
+
+  function stepIds(report: RunReport): Set<string> {
+    return new Set(report.steps.map((s) => s.id));
+  }
+
+  function assertionKeys(report: RunReport): Set<string> {
+    const seen = new Map<string, number>();
+    const keys = new Set<string>();
+    for (const assertion of report.assertions) {
+      const occurrence = seen.get(assertion.type) ?? 0;
+      seen.set(assertion.type, occurrence + 1);
+      keys.add(`${assertion.type}#${occurrence}`);
+    }
+    return keys;
+  }
+
+  function union<T>(a: Set<T>, b: Set<T>): Set<T> {
+    return new Set([...a, ...b]);
+  }
+
+  const SEED = 0x5eed_0283;
+  const PAIRS = 25;
+
+  it("self-comparison yields no changes and unchanged counts", () => {
+    const rand = mulberry32(SEED);
+    for (let i = 0; i < PAIRS; i++) {
+      const report = generateReport(rand, i);
+      const comp = compareReports(report, report);
+
+      expect(comp.scenariosMatch).toBe(true);
+      expect(comp.statusChanged).toBe(false);
+      expect(comp.durationDiffMs).toBe(0);
+
+      for (const entry of [...comp.steps, ...comp.assertions]) {
+        expect(entry.statusChange).toBe("unchanged");
+      }
+
+      expect(comp.stepsAdded).toBe(0);
+      expect(comp.stepsRemoved).toBe(0);
+      expect(comp.stepsChanged).toBe(0);
+      expect(comp.stepsUnchanged).toBe(stepIds(report).size);
+      expect(comp.assertionsAdded).toBe(0);
+      expect(comp.assertionsRemoved).toBe(0);
+      expect(comp.assertionsChanged).toBe(0);
+      expect(comp.assertionsUnchanged).toBe(assertionKeys(report).size);
+    }
+  });
+
+  it("A/B reversal swaps added/removed and preserves changed/unchanged", () => {
+    const rand = mulberry32(SEED);
+    for (let i = 0; i < PAIRS; i++) {
+      const a = generateReport(rand, i * 2);
+      const b = generateReport(rand, i * 2 + 1);
+      const ab = compareReports(a, b);
+      const ba = compareReports(b, a);
+
+      expect(ba.stepsAdded).toBe(ab.stepsRemoved);
+      expect(ba.stepsRemoved).toBe(ab.stepsAdded);
+      expect(ba.stepsChanged).toBe(ab.stepsChanged);
+      expect(ba.stepsUnchanged).toBe(ab.stepsUnchanged);
+
+      expect(ba.assertionsAdded).toBe(ab.assertionsRemoved);
+      expect(ba.assertionsRemoved).toBe(ab.assertionsAdded);
+      expect(ba.assertionsChanged).toBe(ab.assertionsChanged);
+      expect(ba.assertionsUnchanged).toBe(ab.assertionsUnchanged);
+    }
+  });
+
+  it("counts are conserved over the union of step ids and assertion keys", () => {
+    const rand = mulberry32(SEED);
+    for (let i = 0; i < PAIRS; i++) {
+      const a = generateReport(rand, i * 2);
+      const b = generateReport(rand, i * 2 + 1);
+      const comp = compareReports(a, b);
+
+      expect(comp.stepsAdded + comp.stepsRemoved + comp.stepsChanged + comp.stepsUnchanged)
+        .toBe(union(stepIds(a), stepIds(b)).size);
+      expect(comp.assertionsAdded + comp.assertionsRemoved + comp.assertionsChanged + comp.assertionsUnchanged)
+        .toBe(union(assertionKeys(a), assertionKeys(b)).size);
+
+      // Every reported entry is classified exactly once.
+      expect(comp.steps).toHaveLength(union(stepIds(a), stepIds(b)).size);
+      expect(comp.assertions).toHaveLength(union(assertionKeys(a), assertionKeys(b)).size);
+    }
+  });
+});
+
 describe("parseRetryAfter", () => {
 
   it("parses a numeric seconds value", () => {
