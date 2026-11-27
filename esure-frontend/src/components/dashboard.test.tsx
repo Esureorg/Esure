@@ -514,7 +514,7 @@ describe("Dashboard URL Restoration", () => {
     fireEvent.click(runButton);
     
     await waitFor(() => {
-      expect(startRunMock).toHaveBeenCalledWith("xlm-payment");
+      expect(startRunMock).toHaveBeenCalledWith("xlm-payment", 1, expect.any(String));
     });
     
     expect(mockReplace).toHaveBeenCalledWith("/dashboard?runId=run-123", { scroll: false });
@@ -866,6 +866,7 @@ describe("Scenario definition preview, rate limiting, and ARIA announcements (#3
       assertions: [{ id: "ast1", description: "Balance check" }],
     };
     vi.spyOn(api, "getScenario").mockResolvedValueOnce(mockDetail);
+    vi.spyOn(api, "getScenarioVersions").mockResolvedValue({ items: [] });
 
     render(<Dashboard />);
     await act(async () => { await Promise.resolve(); });
@@ -882,6 +883,76 @@ describe("Scenario definition preview, rate limiting, and ARIA announcements (#3
       expect(screen.getByText("Detailed description of XLM payment.")).toBeDefined();
       expect(screen.getByText("hash-full-123456789")).toBeDefined();
     });
+  });
+
+  it("runs the exact preview version and shows it before execution", async () => {
+    const latest: api.ScenarioDetail = {
+      id: "xlm-payment",
+      version: 2,
+      name: "XLM payment",
+      description: "Latest definition.",
+      contentHash: "latest-hash",
+      network: "testnet",
+      schemaVersion: 1,
+      accounts: [],
+      assets: [],
+      steps: [],
+      assertions: [],
+    };
+    vi.spyOn(api, "getScenario").mockResolvedValue(latest);
+    vi.spyOn(api, "getScenarioVersions").mockResolvedValue({
+      items: [
+        { version: 2, schemaVersion: 1, contentHash: "latest-hash", createdAt: "2026-10-16T00:00:00.000Z" },
+        { version: 1, schemaVersion: 1, contentHash: "older-hash", createdAt: "2026-10-15T00:00:00.000Z" },
+      ],
+    });
+    vi.spyOn(api, "getScenarioVersion").mockResolvedValue({ ...latest, version: 1, contentHash: "older-hash" });
+    const startRunMock = vi.spyOn(api, "startRun").mockResolvedValue(mockRun);
+
+    render(<Dashboard />);
+    await act(async () => { await Promise.resolve(); });
+    fireEvent.click(screen.getByLabelText("Preview definition for XLM payment"));
+    await screen.findByText("Version history");
+    fireEvent.click(await screen.findByRole("button", { name: /v1 ·/ }));
+
+    await screen.findByText("xlm-payment · version 1");
+    fireEvent.click(screen.getByRole("button", { name: /Run on Testnet/i }));
+
+    await waitFor(() => {
+      expect(startRunMock).toHaveBeenCalledWith("xlm-payment", 1, expect.any(String));
+    });
+  });
+
+  it("does not fall back when a selected historical version has been removed", async () => {
+    const latest: api.ScenarioDetail = {
+      id: "xlm-payment",
+      version: 2,
+      name: "XLM payment",
+      description: "Latest definition.",
+      contentHash: "latest-hash",
+      network: "testnet",
+      schemaVersion: 1,
+      accounts: [],
+      assets: [],
+      steps: [],
+      assertions: [],
+    };
+    vi.spyOn(api, "getScenario").mockResolvedValue(latest);
+    vi.spyOn(api, "getScenarioVersions").mockResolvedValue({
+      items: [{ version: 1, schemaVersion: 1, contentHash: "old-hash", createdAt: "2026-10-15T00:00:00.000Z" }],
+    });
+    vi.spyOn(api, "getScenarioVersion").mockRejectedValue(
+      new api.ApiError("The requested scenario version is not available.", "SCENARIO_VERSION_NOT_FOUND", 404),
+    );
+    const startRunMock = vi.spyOn(api, "startRun");
+
+    render(<Dashboard />);
+    await act(async () => { await Promise.resolve(); });
+    fireEvent.click(screen.getByLabelText("Preview definition for XLM payment"));
+    fireEvent.click(await screen.findByRole("button", { name: /v1 ·/ }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("SCENARIO_VERSION_NOT_FOUND");
+    expect(startRunMock).not.toHaveBeenCalled();
   });
 
   it("handles 429 RateLimitError with retry countdown (#39)", async () => {

@@ -23,6 +23,7 @@ async function forward(request: NextRequest, context: RouteContext, method: "GET
   }
 
   const target = new URL(path.map(encodeURIComponent).join("/"), `${backendUrl.replace(/\/$/, "")}/`);
+  target.search = request.nextUrl.search;
   const response = await fetch(target, {
     method,
     headers: { accept: "application/json", ...(method === "POST" && { "content-type": "application/json" }) },
@@ -56,6 +57,9 @@ export function isAllowedPath(path: string[], method: "GET" | "POST"): boolean {
   if (method === "POST") return path.length === 3 && path.join("/") === "api/v1/runs";
   if (path.join("/") === "health" || path.join("/") === "api/v1/scenarios") return true;
   if (method === "GET" && path.length === 4 && path.slice(0, 3).join("/") === "api/v1/scenarios") return true;
+  const isScenarioRoute = path.slice(0, 3).join("/") === "api/v1/scenarios";
+  if (method === "GET" && isScenarioRoute && path.length === 5 && path[4] === "versions") return true;
+  if (method === "GET" && isScenarioRoute && path.length === 6 && path[4] === "versions" && /^[1-9]\d*$/.test(path[5])) return true;
   const isRunPath = path.slice(0, 3).join("/") === "api/v1/runs";
   return isRunPath && (path.length === 4 || (path.length === 5 && path[4] === "report"));
 }

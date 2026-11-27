@@ -33,8 +33,10 @@ npm run bench:stores -- 833 20 # offline bounded-store latency benchmark
 Benchmark methodology and local results are in [benchmarks/README.md](benchmarks/README.md).
 
 The default runner limits each step to 30 seconds, each run to 120 seconds,
-and concurrent execution to two runs. Request rates, in-memory retention, body
-size, and concurrency are configurable through the bounded values documented in
+graceful shutdown to 30 seconds, and concurrent execution to two runs. The
+shutdown deadline can be configured from 1 to 120 seconds with
+`SHUTDOWN_TIMEOUT_MS`. Request rates, in-memory retention, body size, and
+concurrency are configurable through the bounded values documented in
 `.env.example`.
 
 ## Initial endpoints

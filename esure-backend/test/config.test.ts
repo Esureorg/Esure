@@ -6,7 +6,14 @@ describe("loadConfig", () => {
     const config = loadConfig({});
     expect(config.horizonUrl).toContain("testnet");
     expect(config.friendbotUrl).toBe("https://friendbot.stellar.org");
-    expect(config.maxConcurrentFriendbotRequests).toBe(5);
+    expect(config.metricsEnabled).toBe(false);
+    expect(config.shutdownTimeoutMs).toBe(30_000);
+  });
+
+  it("enables metrics only for an explicit boolean setting", () => {
+    expect(loadConfig({ METRICS_ENABLED: "true" }).metricsEnabled).toBe(true);
+    expect(loadConfig({ METRICS_ENABLED: "false" }).metricsEnabled).toBe(false);
+    expect(() => loadConfig({ METRICS_ENABLED: "yes" })).toThrow(/METRICS_ENABLED/);
   });
 
   it("rejects Mainnet configuration", () => {
@@ -21,6 +28,9 @@ describe("loadConfig", () => {
     expect(() => loadConfig({ MAX_CONCURRENT_FRIENDBOT_REQUESTS: "51" })).toThrow(/MAX_CONCURRENT_FRIENDBOT_REQUESTS/);
     expect(() => loadConfig({ MAX_CONCURRENT_FRIENDBOT_REQUESTS: "1.5" })).toThrow(/MAX_CONCURRENT_FRIENDBOT_REQUESTS/);
     expect(() => loadConfig({ BODY_LIMIT_BYTES: "99999999" })).toThrow(/BODY_LIMIT_BYTES/);
+    expect(() => loadConfig({ SHUTDOWN_TIMEOUT_MS: "999" })).toThrow(/SHUTDOWN_TIMEOUT_MS/);
+    expect(() => loadConfig({ SHUTDOWN_TIMEOUT_MS: "120001" })).toThrow(/SHUTDOWN_TIMEOUT_MS/);
+    expect(() => loadConfig({ SHUTDOWN_TIMEOUT_MS: "30s" })).toThrow(/SHUTDOWN_TIMEOUT_MS/);
   });
 
   it("keeps persistence explicitly disabled unless configured", () => {

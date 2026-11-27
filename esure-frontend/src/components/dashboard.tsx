@@ -2,8 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
-import { ApiError, getRun, listScenarios, startRun, type RunReport, type ScenarioSummary } from "@/lib/api";
-import { readFavorites, writeFavorites } from "@/lib/favorites";
+import { ApiError, RateLimitError, downloadReport, getRun, getScenario, getScenarioVersion, getScenarioVersions, listScenarios, startRun, type JsonValue, type RunReport, type ScenarioDetail, type ScenarioSummary, type ScenarioVersionSummary } from "@/lib/api";
 
 import { parseFavorites } from "@/lib/favorites";
 
@@ -19,7 +18,19 @@ export const FILTER_OPTIONS: { key: ScenarioFilter; label: string }[] = [
   { key: "favorites", label: "Favorites" },
 ];
 
-export function filterScenario(scenario: ScenarioSummary, filter: ScenarioFilter, favorites: Set<string> = new Set()): boolean {
+
+export const REPORT_FILTER_OPTIONS: { key: ReportFilter; label: string }[] = [
+  { key: "all", label: "All" },
+  { key: "failed", label: "Failed" },
+];
+
+export const SORT_OPTIONS: { key: SortOrder; label: string }[] = [
+  { key: "name-asc", label: "Name A–Z" },
+  { key: "name-desc", label: "Name Z–A" },
+  { key: "id-asc", label: "ID A–Z" },
+];
+
+export function filterScenario(scenario: ScenarioSummary, filter: ScenarioFilter): boolean {
   if (filter === "all") return true;
   const text = `${scenario.id} ${scenario.name} ${scenario.description}`.toLowerCase();
   if (filter === "xlm") return text.includes("xlm");
@@ -81,14 +92,19 @@ export function Dashboard() {
   const [isBrowserOffline, setIsBrowserOffline] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<"report" | "compare">("report");
-  const [reportFilter, setReportFilter] = useState<ReportFilter>("all");
 
   // #32 — Scenario preview panel
   const [previewId, setPreviewId] = useState<string | null>(null);
   const [previewScenario, setPreviewScenario] = useState<ScenarioDetail | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
-  const [previewExpandedSection, setPreviewExpandedSection] = useState<"steps" | "assertions" | null>(null);
+  const [previewVersions, setPreviewVersions] = useState<ScenarioVersionSummary[]>([]);
+  const [previewHistoryError, setPreviewHistoryError] = useState<string | null>(null);
+  const [previewHistoryNextCursor, setPreviewHistoryNextCursor] = useState<number | undefined>();
+  const [previewHistoryCursors, setPreviewHistoryCursors] = useState<(number | undefined)[]>([undefined]);
+  const [previewHistoryPage, setPreviewHistoryPage] = useState(0);
+  const [previewHistoryLoading, setPreviewHistoryLoading] = useState(false);
+  const [runVersionSelection, setRunVersionSelection] = useState<{ scenarioId: string; version: number } | null>(null);
   const previewAbortRef = useRef<AbortController | null>(null);
 
   // #39 — Rate-limit countdown (seconds remaining before retry is allowed)
@@ -250,6 +266,8 @@ export function Dashboard() {
     if (!previewId) {
       setPreviewScenario(null);
       setPreviewError(null);
+      setPreviewVersions([]);
+      setPreviewHistoryError(null);
       return;
     }
     previewAbortRef.current?.abort();
@@ -272,6 +290,33 @@ export function Dashboard() {
       });
     return () => { controller.abort(); };
   }, [previewId]);
+
+  useEffect(() => {
+    if (!previewId) return;
+    const controller = new AbortController();
+    setPreviewHistoryLoading(true);
+    setPreviewVersions([]);
+    setPreviewHistoryNextCursor(undefined);
+    setPreviewHistoryError(null);
+    getScenarioVersions(previewId, 10, previewHistoryCursors[previewHistoryPage], controller.signal)
+      .then((history) => {
+        if (controller.signal.aborted) return;
+        setPreviewVersions(history.items);
+        setPreviewHistoryNextCursor(history.nextCursor);
+      })
+      .catch((reason: unknown) => {
+        if (controller.signal.aborted) return;
+        if (reason instanceof ApiError && reason.code === "PERSISTENCE_REQUIRED") {
+          setPreviewHistoryError("Version history is unavailable because published persistence is disabled.");
+        } else {
+          setPreviewHistoryError(readError(reason));
+        }
+        setPreviewVersions([]);
+        setPreviewHistoryNextCursor(undefined);
+      })
+      .finally(() => { if (!controller.signal.aborted) setPreviewHistoryLoading(false); });
+    return () => controller.abort();
+  }, [previewId, previewHistoryCursors, previewHistoryPage]);
 
   // #39 — Clear rate-limit timer when it expires or component unmounts
   useEffect(() => {
@@ -444,6 +489,25 @@ export function Dashboard() {
   }, [run, isOffline, isBrowserOffline, consecutiveFailures]);
 
   const selected = useMemo(() => scenarios.find((scenario) => scenario.id === selectedId), [scenarios, selectedId]);
+  const selectedVersion = selected
+    ? runVersionSelection?.scenarioId === selected.id ? runVersionSelection.version : selected.version
+    : undefined;
+
+  async function handlePreviewVersion(version: number) {
+    if (!previewId) return;
+    setPreviewLoading(true);
+    setPreviewError(null);
+    try {
+      const detail = await getScenarioVersion(previewId, version);
+      setPreviewScenario(detail);
+      setSelectedId(previewId);
+      setRunVersionSelection({ scenarioId: previewId, version });
+    } catch (reason) {
+      setPreviewError(readError(reason));
+    } finally {
+      setPreviewLoading(false);
+    }
+  }
 
   function toggleFavorite(scenarioId: string) {
     setFavorites((current) => current.includes(scenarioId)
@@ -452,7 +516,7 @@ export function Dashboard() {
   }
 
   async function handleRun() {
-    if (!selectedId) return;
+    if (!selectedId || selectedVersion === undefined) return;
     setIsOffline(false);
     setImportError(null);
     setViewMode("report");
@@ -462,7 +526,7 @@ export function Dashboard() {
     setRun(null);
     try {
       const key = crypto.randomUUID();
-      const newRun = await startRun(selectedId, key);
+      const newRun = await startRun(selectedId, selectedVersion, key);
       setRun(newRun);
       setRunIdempotencyKey(crypto.randomUUID());
       const newParams = new URLSearchParams(searchParams?.toString() ?? "");
@@ -711,7 +775,26 @@ export function Dashboard() {
             </div>
           ) : (
             filteredScenarios.map((scenario, index) => (
-              <div className="scenario-card-wrap" key={scenario.id}>
+              <div
+                role="button"
+                tabIndex={0}
+                className={`scenario-card ${selectedId === scenario.id ? "selected" : ""}`}
+                key={scenario.id}
+                id={`scenario-card-${scenario.id}`}
+                onClick={() => { setSelectedId(scenario.id); setRunVersionSelection(null); }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    setSelectedId(scenario.id);
+                    setRunVersionSelection(null);
+                  }
+                }}
+              >
+                <span className="card-index">0{index + 1}</span>
+                <ScenarioIcon kind={scenario.id} />
+                <span className="scenario-name">{scenario.name}</span>
+                <span className="scenario-description">{scenario.description}</span>
+                <span className="version">V{scenario.version}</span>
                 <button
                   type="button"
                   className={`scenario-card ${selectedId === scenario.id ? "selected" : ""}`}
@@ -725,10 +808,15 @@ export function Dashboard() {
                 </button>
                 <button
                   type="button"
-                  className={`favorite-toggle ${favorites.includes(scenario.id) ? "active" : ""}`}
-                  aria-label={`${favorites.includes(scenario.id) ? "Remove" : "Add"} ${scenario.name} ${favorites.includes(scenario.id) ? "from" : "to"} favorites`}
-                  aria-pressed={favorites.includes(scenario.id)}
-                  onClick={() => toggleFavorite(scenario.id)}
+                  className="preview-btn"
+                  aria-label={`Preview definition for ${scenario.name}`}
+                  aria-expanded={previewId === scenario.id}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setPreviewHistoryPage(0);
+                    setPreviewHistoryCursors([undefined]);
+                    setPreviewId(previewId === scenario.id ? null : scenario.id);
+                  }}
                 >
                   {favorites.includes(scenario.id) ? "★" : "☆"}
                 </button>
@@ -766,62 +854,88 @@ export function Dashboard() {
                   <div><dt>Assertions</dt><dd>{previewScenario.assertions.length}</dd></div>
                 </dl>
                 <p className="preview-description">{previewScenario.description}</p>
-
-                {previewScenario.steps.length > 0 && (
-                  <div className="preview-section">
-                    <button
-                      type="button"
-                      className={`preview-section-toggle ${previewExpandedSection === "steps" ? "expanded" : ""}`}
-                      aria-expanded={previewExpandedSection === "steps"}
-                      onClick={() => setPreviewExpandedSection(previewExpandedSection === "steps" ? null : "steps")}
-                    >
-                      <span>Steps</span>
-                      <span className="toggle-icon">›</span>
-                    </button>
-                    {previewExpandedSection === "steps" && (
-                      <ul className="preview-items">
-                        {previewScenario.steps.map((step, idx) => (
-                          <li key={idx} className="preview-item">
-                            <span className="item-type">{step.type}</span>
-                            {step.id && <span className="item-id">{step.id}</span>}
-                            <code className="item-data">{JSON.stringify(step, null, 2)}</code>
-                          </li>
+                <div className="preview-definition-list">
+                  <h3>Accounts</h3>
+                  {previewScenario.accounts.length ? (
+                    <ol>{previewScenario.accounts.map((account) => <li key={account.id}>
+                      <strong>{account.id}</strong>
+                      <pre>{JSON.stringify(account, null, 2)}</pre>
+                    </li>)}</ol>
+                  ) : <p>No accounts.</p>}
+                  <h3>Assets</h3>
+                  {previewScenario.assets.length ? (
+                    <ol>{previewScenario.assets.map((asset, index) => <li key={`${asset.id ?? asset.type}-${index}`}>
+                      <strong>{asset.id ?? asset.type}</strong>
+                      <pre>{JSON.stringify(asset, null, 2)}</pre>
+                    </li>)}</ol>
+                  ) : <p>No assets.</p>}
+                  <h3>Steps</h3>
+                  {previewScenario.steps.length ? (
+                    <ol>{previewScenario.steps.map((step) => <li key={step.id}>
+                      <strong>{step.id} · {step.type}</strong>
+                      <pre>{JSON.stringify(step, null, 2)}</pre>
+                    </li>)}</ol>
+                  ) : <p>No steps.</p>}
+                  <h3>Assertions</h3>
+                  {previewScenario.assertions.length ? (
+                    <ol>{previewScenario.assertions.map((assertion, index) => <li key={`${assertion.type}-${index}`}>
+                      <strong>{assertion.type}</strong>
+                      <pre>{JSON.stringify(assertion, null, 2)}</pre>
+                    </li>)}</ol>
+                  ) : <p>No assertions.</p>}
+                </div>
+                <section className="preview-history" aria-label="Scenario version history">
+                  <h3>Version history</h3>
+                  {previewHistoryLoading ? <p role="status">Loading version history…</p> : null}
+                  {previewHistoryError && <p className="preview-history-note" role="status">{previewHistoryError}</p>}
+                  {!previewHistoryError && previewVersions.length > 0 && (
+                    <>
+                      <div className="preview-version-list">
+                        {previewVersions.map((version) => (
+                          <button
+                            type="button"
+                            key={version.version}
+                            aria-pressed={previewScenario.version === version.version}
+                            disabled={previewLoading}
+                            onClick={() => { void handlePreviewVersion(version.version); }}
+                          >
+                            v{version.version} · {new Date(version.createdAt).toLocaleDateString()}
+                          </button>
                         ))}
-                      </ul>
-                    )}
-                  </div>
-                )}
-
-                {previewScenario.assertions.length > 0 && (
-                  <div className="preview-section">
-                    <button
-                      type="button"
-                      className={`preview-section-toggle ${previewExpandedSection === "assertions" ? "expanded" : ""}`}
-                      aria-expanded={previewExpandedSection === "assertions"}
-                      onClick={() => setPreviewExpandedSection(previewExpandedSection === "assertions" ? null : "assertions")}
-                    >
-                      <span>Assertions</span>
-                      <span className="toggle-icon">›</span>
-                    </button>
-                    {previewExpandedSection === "assertions" && (
-                      <ul className="preview-items">
-                        {previewScenario.assertions.map((assertion, idx) => (
-                          <li key={idx} className="preview-item">
-                            <span className="item-type">{assertion.type}</span>
-                            <code className="item-data">{JSON.stringify(assertion, null, 2)}</code>
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                  </div>
-                )}
+                      </div>
+                      <div className="preview-history-controls">
+                        <button
+                          type="button"
+                          disabled={previewHistoryPage === 0 || previewHistoryLoading}
+                          onClick={() => setPreviewHistoryPage((page) => page - 1)}
+                        >
+                          Previous
+                        </button>
+                        <button
+                          type="button"
+                          disabled={previewHistoryNextCursor === undefined || previewHistoryLoading}
+                          onClick={() => {
+                            if (previewHistoryNextCursor === undefined) return;
+                            setPreviewHistoryCursors((cursors) => [...cursors.slice(0, previewHistoryPage + 1), previewHistoryNextCursor]);
+                            setPreviewHistoryPage((page) => page + 1);
+                          }}
+                        >
+                          More versions
+                        </button>
+                      </div>
+                    </>
+                  )}
+                  {!previewHistoryError && !previewHistoryLoading && previewVersions.length === 0 && (
+                    <p className="preview-history-note">No published versions are available.</p>
+                  )}
+                </section>
               </div>
             )}
           </div>
         )}
 
         <div className="launch-panel">
-          <div><span className="label">SELECTED SCENARIO</span><strong>{selected?.name ?? "Choose a scenario"}</strong><span>{selected?.id ?? "—"}</span></div>
+          <div><span className="label">SELECTED SCENARIO</span><strong>{selected?.name ?? "Choose a scenario"}</strong><span>{selected ? `${selected.id} · version ${selectedVersion}` : "—"}</span></div>
           <button
             className="run-button"
             type="button"

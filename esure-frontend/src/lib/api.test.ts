@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiError, RateLimitError, compareReports, getRun, listScenarios, parseReportJson, parseRetryAfter, startRun, type RunReport, type ScenarioSummary } from "./api";
+import { ApiError, RateLimitError, compareReports, getRun, getScenarioVersion, getScenarioVersions, listScenarios, parseReportJson, parseRetryAfter, startRun, type RunReport, type ScenarioSummary } from "./api";
 
 const scenario: ScenarioSummary = {
   id: "xlm-payment",
@@ -117,7 +117,51 @@ describe("frontend API response validation", () => {
     expect(result.error?.failedStepId).toBe("pay");
 
     mockResponse(JSON.stringify(run));
-    await expect(startRun("xlm-payment")).resolves.toEqual(run);
+    await expect(startRun("xlm-payment", 1)).resolves.toEqual(run);
+  });
+
+  it("sends the explicitly selected version with a new run request", async () => {
+    mockResponse(JSON.stringify(run));
+
+    await startRun("xlm-payment", 4, "request-key");
+
+    expect(fetch).toHaveBeenCalledWith("/api/backend/api/v1/runs", expect.objectContaining({
+      body: JSON.stringify({ scenarioId: "xlm-payment", scenarioVersion: 4, inputs: {} }),
+      headers: expect.objectContaining({ "idempotency-key": "request-key" }),
+    }));
+  });
+
+  it("fetches paginated history and exact version details", async () => {
+    const history = {
+      items: [{ version: 2, schemaVersion: 1, contentHash: "hash", createdAt: "2026-10-16T00:00:00.000Z" }],
+      nextCursor: 2,
+    };
+    mockResponse(JSON.stringify(history));
+    await expect(getScenarioVersions("xlm-payment", 10, 3)).resolves.toEqual(history);
+    expect(fetch).toHaveBeenLastCalledWith(
+      "/api/backend/api/v1/scenarios/xlm-payment/versions?limit=10&cursor=3",
+      expect.any(Object),
+    );
+
+    const detail = {
+      id: "xlm-payment",
+      version: 2,
+      name: "XLM payment",
+      description: "Testnet payment.",
+      contentHash: "hash",
+      network: "testnet",
+      schemaVersion: 1,
+      accounts: [],
+      assets: [],
+      steps: [],
+      assertions: [],
+    };
+    mockResponse(JSON.stringify(detail));
+    await expect(getScenarioVersion("xlm-payment", 2)).resolves.toEqual(detail);
+    expect(fetch).toHaveBeenLastCalledWith(
+      "/api/backend/api/v1/scenarios/xlm-payment/versions/2",
+      expect.any(Object),
+    );
   });
 
   it("accepts optional expiry metadata without rejecting a report with malformed metadata", async () => {

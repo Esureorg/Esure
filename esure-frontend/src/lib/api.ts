@@ -6,6 +6,18 @@ export interface ScenarioSummary {
   contentHash: string;
 }
 
+export interface ScenarioVersionSummary {
+  version: number;
+  schemaVersion: number;
+  contentHash: string;
+  createdAt: string;
+}
+
+export interface ScenarioVersionHistory {
+  items: ScenarioVersionSummary[];
+  nextCursor?: number;
+}
+
 export type RunStatus = "requested" | "validating" | "running" | "passed" | "failed";
 
 export interface StepResult {
@@ -75,7 +87,7 @@ export async function listScenarios(signal?: AbortSignal): Promise<ScenarioSumma
   return data.items;
 }
 
-export function startRun(scenarioId: string, idempotencyKey?: string): Promise<RunReport> {
+export function startRun(scenarioId: string, scenarioVersion: number, idempotencyKey?: string): Promise<RunReport> {
   const headers: Record<string, string> = { "content-type": "application/json" };
   if (idempotencyKey) {
     headers["idempotency-key"] = idempotencyKey;
@@ -83,7 +95,7 @@ export function startRun(scenarioId: string, idempotencyKey?: string): Promise<R
   return request("/api/backend/api/v1/runs", {
     method: "POST",
     headers,
-    body: JSON.stringify({ scenarioId, inputs: {} }),
+    body: JSON.stringify({ scenarioId, scenarioVersion, inputs: {} }),
   }, isRunReport);
 }
 
@@ -579,6 +591,46 @@ function isScenarioDetail(value: unknown): value is ScenarioDetail {
 
 export function getScenario(scenarioId: string, signal?: AbortSignal): Promise<ScenarioDetail> {
   return request(`/api/backend/api/v1/scenarios/${encodeURIComponent(scenarioId)}`, { signal }, isScenarioDetail);
+}
+
+export function getScenarioVersions(
+  scenarioId: string,
+  limit = 10,
+  cursor?: number,
+  signal?: AbortSignal,
+): Promise<ScenarioVersionHistory> {
+  const query = new URLSearchParams({ limit: String(limit) });
+  if (cursor !== undefined) query.set("cursor", String(cursor));
+  return request(
+    `/api/backend/api/v1/scenarios/${encodeURIComponent(scenarioId)}/versions?${query}`,
+    { signal },
+    isScenarioVersionHistory,
+  );
+}
+
+export function getScenarioVersion(scenarioId: string, version: number, signal?: AbortSignal): Promise<ScenarioDetail> {
+  return request(
+    `/api/backend/api/v1/scenarios/${encodeURIComponent(scenarioId)}/versions/${version}`,
+    { signal },
+    isScenarioDetail,
+  );
+}
+
+function isScenarioVersionSummary(value: unknown): value is ScenarioVersionSummary {
+  return isRecord(value)
+    && isNonNegativeInteger(value.version)
+    && value.version > 0
+    && isNonNegativeInteger(value.schemaVersion)
+    && value.schemaVersion > 0
+    && isString(value.contentHash)
+    && isString(value.createdAt);
+}
+
+function isScenarioVersionHistory(value: unknown): value is ScenarioVersionHistory {
+  return isRecord(value)
+    && Array.isArray(value.items)
+    && value.items.every(isScenarioVersionSummary)
+    && (value.nextCursor === undefined || (isNonNegativeInteger(value.nextCursor) && value.nextCursor > 0));
 }
 
 export function parseRetryAfter(value: string | null, maxSeconds = 60): number | null {
