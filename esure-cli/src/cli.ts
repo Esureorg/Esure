@@ -6,6 +6,10 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { validateScenarioDefinition } from "@esure/backend/src/scenario-schema.js";
+import { SCENARIO_LIMITS, ScenarioValidationError, scenarioSchemaV1 } from "@esure/backend/src/scenario-schema.js";
+import { runReportSchemaV1 } from "@esure/backend/src/report-schema.js";
+import { parseScenario, prepareScenario, contentHash } from "@esure/backend/src/scenario-loader.js";
 import { createScenarioRegistry } from "@esure/backend/src/scenarios.js";
 import { StellarTestnetGateway } from "@esure/backend/src/stellar-gateway.js";
 import type { ValidatedScenario } from "@esure/backend/src/domain.js";
@@ -24,13 +28,7 @@ interface CliOptions {
   sort?: string;
   stdin?: boolean;
   format?: "json" | "yaml";
-  file?: string;
-  ascii?: boolean;
-  timeoutMs?: number;
-  failFast?: boolean;
-  targetFormat?: "json" | "yaml";
-  outputFile?: string;
-  overwrite?: boolean;
+  check?: boolean;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -61,16 +59,24 @@ function showHelp(): void {
 esure - Stellar Testnet scenario testing toolkit
 
 Usage:
-  esure list                              List bundled scenarios
-  esure validate <file>                   Validate a scenario file
-  esure validate --stdin --format <format> Validate a scenario from standard input
-  esure run <scenario-id>                 Run a bundled scenario
-  esure run <file>                        Run a scenario from file
+  esure list                                  List bundled scenarios
+  esure list --search <term>                  Filter scenarios by ID, name, or description
+  esure list --sort id                        Sort scenarios by ID
+  esure show <scenario-id>                    Show a bundled scenario definition
+  esure validate <file>                       Validate a scenario file
+  esure validate --stdin --format <format>    Validate a scenario from standard input
+  esure validate-directory <dir>              Validate scenario files in a directory
+  esure schema <scenario|report>              Print a supported JSON schema (offline)
+  esure run <scenario-id>                     Run a bundled scenario
+  esure run <file>                            Run a scenario from file
 
 Options:
   --output <format>   Output format: human (default) or json
-  --stdin             Read a scenario from standard input (validate only)
-  --format <format>   Standard input format: json or yaml
+  --search <term>     Filter scenarios by ID, name, or description (case-insensitive)
+  --sort <field>      Sort results: id
+  --stdin             Read the scenario definition from standard input
+  --format <format>   Input format for standard input: json or yaml (required with --stdin)
+  --check             For format: verify canonical output without writing (exit 2 on drift)
   --help              Show this help message
   --version           Show version information
 
@@ -98,7 +104,10 @@ Options:
 
 Examples:
   esure validate ./my-scenario.yaml
-  esure validate --stdin --format yaml
+  cat ./my-scenario.json | esure validate --stdin --format json
+  esure validate-directory ./scenarios
+  esure schema scenario --output json
+  esure schema report
   esure run xlm-payment
   esure run ./my-scenario.yaml --output json
   esure run --file ./my-scenario.json --timeout-ms 30000`,
@@ -173,13 +182,7 @@ function parseCliArgs(): { command?: string; args: string[]; options: CliOptions
       sort: { type: "string" },
       stdin: { type: "boolean" },
       format: { type: "string" },
-      file: { type: "string" },
-      ascii: { type: "boolean" },
-      "timeout-ms": { type: "string" },
-      "fail-fast": { type: "boolean" },
-      to: { type: "string" },
-      "output-file": { type: "string" },
-      overwrite: { type: "boolean" },
+      check: { type: "boolean" },
     },
     allowPositionals: true,
     strict: false,
@@ -198,13 +201,7 @@ function parseCliArgs(): { command?: string; args: string[]; options: CliOptions
       sort: typeof values.sort === "string" ? values.sort : undefined,
       stdin: Boolean(values.stdin),
       format: values.format === "json" || values.format === "yaml" ? values.format : undefined,
-      file: typeof values.file === "string" ? values.file : undefined,
-      ascii: Boolean(values.ascii),
-      timeoutMs: typeof values["timeout-ms"] === "string" ? Number(values["timeout-ms"]) : undefined,
-      failFast: Boolean(values["fail-fast"]),
-      targetFormat: values.to === "json" || values.to === "yaml" ? values.to : undefined,
-      outputFile: typeof values["output-file"] === "string" ? values["output-file"] : undefined,
-      overwrite: Boolean(values.overwrite),
+      check: Boolean(values.check),
     },
   };
 }
@@ -602,21 +599,22 @@ async function validateDirectoryCommand(dirPath: string, options: CliOptions): P
 
     for (const entry of entries) {
       const filePath = resolve(absolute, entry.name);
-      const size = statSync(filePath).size;
-      if (size > SCENARIO_LIMITS.definitionBytes) {
-        results.push({ file: entry.name, valid: false, issues: [`exceeds ${SCENARIO_LIMITS.definitionBytes} bytes`] });
-        continue;
-      }
-
-      const content = await readFilePromises(filePath, "utf-8");
       const format = extname(entry.name).toLowerCase() === ".json" ? "json" : "yaml";
       try {
+        const size = statSync(filePath).size;
+        if (size > SCENARIO_LIMITS.definitionBytes) {
+          results.push({ file: entry.name, valid: false, issues: [`exceeds ${SCENARIO_LIMITS.definitionBytes} bytes`] });
+          continue;
+        }
+
+        const content = await readFilePromises(filePath, "utf-8");
         const scenario = parseScenario(content, format);
         results.push({ file: entry.name, valid: true, scenario });
       } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
         const issues = error instanceof ScenarioValidationError
           ? error.issues
-          : [error instanceof Error ? error.message : String(error)];
+          : [`unreadable: ${message}`];
         results.push({ file: entry.name, valid: false, issues });
       }
     }
@@ -672,6 +670,39 @@ async function validateDirectoryCommand(dirPath: string, options: CliOptions): P
     }
     return 1;
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #244 — schema inspection command (offline)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const SCHEMA_TARGETS: Record<string, unknown> = {
+  scenario: scenarioSchemaV1,
+  report: runReportSchemaV1,
+};
+
+async function schemaCommand(target: string | undefined, options: CliOptions): Promise<number> {
+  const key = target?.trim().toLowerCase();
+  if (!key || !(key in SCHEMA_TARGETS)) {
+    const message = key
+      ? `Unknown schema target "${target}". Supported targets: scenario, report.`
+      : "Missing schema target. Usage: esure schema <scenario|report>";
+    if (options.output === "json") {
+      console.error(JSON.stringify({ error: { code: "UNKNOWN_SCHEMA_TARGET", message } }));
+    } else {
+      console.error(`Error: ${message}`);
+    }
+    return 1;
+  }
+
+  const schema = SCHEMA_TARGETS[key];
+  if (options.output === "json") {
+    console.log(JSON.stringify(schema, null, 2));
+  } else {
+    console.log(`Schema: ${key}`);
+    console.log(JSON.stringify(schema, null, 2));
+  }
+  return 0;
 }
 
 async function runCommand(target: string, options: CliOptions): Promise<number> {
@@ -1187,7 +1218,17 @@ export async function main(): Promise<number> {
         console.error("Error: Provide only one scenario file");
         return 1;
       }
-      return validateCommand(() => loadScenarioFile(args[0]), options);
+      return validateDirectoryCommand(args[0], options);
+    case "schema":
+      if (args.length > 1) {
+        reportArgumentError(
+          "Unexpected argument(s) for schema command",
+          "Usage: esure schema <scenario|report>",
+          options.output,
+        );
+        return 1;
+      }
+      return schemaCommand(args[0], options);
     case "run":
       if (options.file !== undefined && args.length > 0) {
         console.error("Error: Cannot specify both --file and a positional target");
