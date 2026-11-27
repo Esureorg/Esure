@@ -7,8 +7,13 @@ import type { Database } from "./database.js";
 export interface RunStore {
   create(run: RunReport): void | Promise<void>;
   get(id: string): RunReport | undefined | Promise<RunReport | undefined>;
+  /**
+   * Update a run. Callers that need optimistic concurrency protection should
+   * pass the `expectedVersion` they received from their own `get()` call.
+   * When omitted, the implementation falls back to its own cached version
+   * (backwards compatible, but weaker — two interleaved callers may race).
+   */
   update(id: string, update: Partial<RunReport>, expectedVersion?: number): RunReport | Promise<RunReport>;
-  markOrphaned(opts: { ageThresholdMs: number; activeRunIds?: ReadonlySet<string>; dryRun?: boolean }): number | Promise<number>;
 }
 
 export class InMemoryRunStore implements RunStore {
@@ -129,28 +134,12 @@ export class PostgresRunStore implements RunStore {
     return row ? reportFromRow(row) : undefined;
   }
 
-  async getWithVersion(id: string): Promise<{ report: RunReport; version: number } | undefined> {
-    const result = await this.database.query<PersistedRunRow>(
-      `SELECT run_id, scenario_id, scenario_version, scenario_schema_version,
-        scenario_content_hash, network, status, version, created_at, completed_at,
-        steps, assertions, summary, error
-      FROM runs
-      WHERE run_id = $1
-        AND scenario_id IS NOT NULL
-        AND (completed_at IS NULL OR completed_at > clock_timestamp() - ($2 * interval '1 millisecond'))`,
-      [id, this.retentionMs],
-    );
-    const row = result.rows[0];
-    if (!row) return undefined;
-    this.#versions.set(id, row.version);
-    return { report: reportFromRow(row), version: row.version };
-  }
-
   async update(id: string, update: Partial<RunReport>, expectedVersion?: number): Promise<RunReport> {
-    // The caller may pass an explicit revision token observed from getWithVersion(),
-    // making the concurrency token caller-owned rather than shared-mutable state.
-    // Falls back to the shared #versions map for callers that use get() instead.
-    const resolvedVersion = expectedVersion ?? this.#versions.get(id) ?? 0;
+    // Prefer the version the caller observed from their own get() call.
+    // Fall back to the shared cache only when the caller did not supply one,
+    // which preserves backwards compatibility at the cost of weaker isolation
+    // when two callers interleave get→update on the same run id.
+    const resolvedExpectedVersion = expectedVersion ?? this.#versions.get(id) ?? 0;
     const current = await this.get(id);
     if (!current) throw new Error(`Run ${id} does not exist`);
     const updated = sanitizeRunReport({ ...current, ...structuredClone(update) });
@@ -173,10 +162,10 @@ export class PostgresRunStore implements RunStore {
       WHERE run_id = $1
         AND version = $2
         AND (completed_at IS NULL OR completed_at > clock_timestamp() - ($16 * interval '1 millisecond'))`,
-      [id, resolvedVersion, ...runValues(updated).slice(1), this.retentionMs],
+      [id, resolvedExpectedVersion, ...runValues(updated).slice(1), this.retentionMs],
     );
     if (result.rowCount !== 1) throw new OptimisticConcurrencyError(id);
-    this.#versions.set(id, resolvedVersion + 1);
+    this.#versions.set(id, resolvedExpectedVersion + 1);
     return structuredClone(updated);
   }
 
@@ -234,25 +223,65 @@ export class PostgresRunStore implements RunStore {
     return totalDeleted;
   }
 
-  async markOrphaned({ ageThresholdMs, activeRunIds = new Set(), dryRun = false }: { ageThresholdMs: number; activeRunIds?: ReadonlySet<string>; dryRun?: boolean } = { ageThresholdMs: 0 }): Promise<number> {
-    const excludeIds = [...activeRunIds];
-    const excludeClause = excludeIds.length ? ` AND run_id <> ALL($2::uuid[])` : "";
-    if (dryRun) {
-      const params: unknown[] = [ageThresholdMs];
-      if (excludeIds.length) params.push(excludeIds);
+  /**
+   * Marks orphaned non-terminal runs as failed (issue #219).
+   *
+   * A run is "orphaned" when the process that started it has exited without
+   * completing it — the row is still in a non-terminal status (`running`,
+   * `requested`, etc.) and has no `completed_at`, but was created longer
+   * ago than `ageThresholdMs`.
+   *
+   * Active runs (created recently) are always excluded so a slow-running
+   * scenario is never incorrectly marked. Only runs older than the threshold
+   * and still in a non-terminal status are eligible.
+   *
+   * The operation is idempotent: running it again on already-marked runs is a
+   * no-op because those rows now have `status = 'failed'` and `completed_at`
+   * set, so the WHERE clause no longer matches them.
+   *
+   * @param ageThresholdMs  Minimum age (ms) of the run's `created_at` before
+   *                        it may be considered orphaned. Default: 1 hour.
+   * @param options.dryRun  When true, returns the count of eligible runs
+   *                        without modifying any rows.
+   * @returns The number of runs marked (or eligible, in dry-run mode).
+   */
+  async markOrphaned(
+    ageThresholdMs = 3_600_000,
+    options: { dryRun?: boolean } = {},
+  ): Promise<number> {
+    const threshold = Math.max(0, Math.trunc(ageThresholdMs));
+
+    // Orphan eligibility: non-terminal, no completion timestamp, older than
+    // the age threshold.  Crucially, this never touches rows whose status is
+    // already 'passed' or 'failed'.
+    const orphanedWhere = `status NOT IN ('passed', 'failed')
+      AND completed_at IS NULL
+      AND created_at < clock_timestamp() - ($1 * interval '1 millisecond')`;
+
+    if (options.dryRun) {
       const result = await this.database.query<{ count: string }>(
-        `SELECT count(*)::text AS count FROM runs WHERE status NOT IN ('passed','failed') AND created_at < clock_timestamp() - ($1 * interval '1 millisecond')${excludeClause}`,
-        params,
+        `SELECT count(*)::text AS count FROM runs WHERE ${orphanedWhere}`,
+        [threshold],
       );
       return Number(result.rows[0]?.count ?? 0);
     }
-    const orphanError = JSON.stringify({ code: "SERVER_SHUTDOWN", message: "Run marked failed by orphan cleanup.", category: "internal", retryable: false });
-    const params: unknown[] = [ageThresholdMs, orphanError];
-    const updateExcludeClause = excludeIds.length ? ` AND run_id <> ALL($3::uuid[])` : "";
-    if (excludeIds.length) params.push(excludeIds);
-    const result = await this.database.query(
-      `UPDATE runs SET status = 'failed', completed_at = clock_timestamp(), error = $2::jsonb, version = version + 1 WHERE status NOT IN ('passed','failed') AND created_at < clock_timestamp() - ($1 * interval '1 millisecond')${updateExcludeClause}`,
-      params,
+
+    const interruptionError = JSON.stringify({
+      code: "ORPHANED_RUN",
+      message: "Run was orphaned by a process exit and has been marked failed by the operator cleanup tool.",
+      category: "infrastructure",
+      retryable: false,
+    });
+
+    const result = await this.database.query<{ run_id: string }>(
+      `UPDATE runs
+          SET status       = 'failed',
+              completed_at = clock_timestamp(),
+              error        = $2::jsonb,
+              version      = version + 1
+        WHERE ${orphanedWhere}
+        RETURNING run_id`,
+      [threshold, interruptionError],
     );
     return result.rowCount ?? 0;
   }

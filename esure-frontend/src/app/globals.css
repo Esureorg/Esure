@@ -379,38 +379,55 @@ button.download:focus-visible {
 /* ── Run button rate-limit note (#39) ───────────────────────────────────── */
 .rate-limit-note { font:400 12px var(--font-mono); color:var(--muted); margin:6px 0 0; }
 
-/* ── Forced-colors (Windows High Contrast) support (#206) ──────────────── */
+/* ── forced-colors / high-contrast accessibility overrides (issue #206) ─── */
+/* In forced-colors mode the browser substitutes a system palette so custom    */
+/* background/color properties are overridden.  Borders and outlines continue  */
+/* to work, so we use them to communicate status and selection state.          */
 @media (forced-colors: active) {
-  .scenario-card.selected {
-    background: Highlight;
-    border-color: ButtonText;
-    color: HighlightText;
-    forced-color-adjust: none;
-  }
-  .scenario-card:focus-visible {
-    outline: 3px solid ButtonText;
-    outline-offset: 2px;
-  }
-  .step-dot.passed {
-    background: transparent;
+  /* Status dot inside a badge: use a solid border instead of a colored disc */
+  .status-badge span {
+    background: ButtonText;
+    box-shadow: none;
     border: 2px solid ButtonText;
-    forced-color-adjust: none;
   }
-  .step-dot.failed {
-    background: transparent;
-    border: 2px solid ButtonText;
-    color: ButtonText;
-    forced-color-adjust: none;
-  }
-  .status-badge.passed {
-    border-color: ButtonText;
-  }
-  .status-badge.failed span,
+  .status-badge.passed span { border-color: Highlight; background: Highlight; }
+  .status-badge.failed span { border-color: LinkText; background: LinkText; }
   .status-badge.running span,
   .status-badge.validating span,
-  .status-badge.requested span {
-    background: ButtonText;
+  .status-badge.requested span { border-color: ButtonText; background: ButtonText; }
+
+  /* Step dots: rely on outline so passed/failed remain distinguishable */
+  .step-dot        { border-color: ButtonText; background: ButtonFace; color: ButtonText; }
+  .step-dot.passed { background: Highlight; border-color: Highlight; color: HighlightText; }
+  .step-dot.failed { background: LinkText; border-color: LinkText; color: Canvas; }
+
+  /* Selected scenario card: use system Highlight colours */
+  .scenario-card.selected {
+    background: Highlight;
+    border-color: Highlight;
+    color: HighlightText;
     box-shadow: none;
     forced-color-adjust: none;
   }
+  .selected .card-index,
+  .selected .scenario-description,
+  .selected .version { color: HighlightText; }
+  .selected .scenario-icon { stroke: HighlightText; }
+
+  /* Keyboard focus: ensure outlines are always visible */
+  :focus-visible {
+    outline: 3px solid Highlight;
+    outline-offset: 2px;
+  }
+  .print-button:focus-visible,
+  .copy-button:focus-visible,
+  .filter-pill:focus-visible,
+  .search-clear:focus-visible,
+  .sort-select:focus,
+  .search-input:focus,
+  .diff-toggle-btn:focus-visible,
+  .inline-clear:focus-visible,
+  .preview-btn:focus-visible,
+  .preview-close:focus-visible,
+  button.download:focus-visible { outline: 3px solid Highlight; outline-offset: 2px; }
 }

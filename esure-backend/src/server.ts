@@ -24,28 +24,31 @@ const DRAIN_TIMEOUT_MS = 30_000;
 
 let shuttingDown = false;
 
-export async function shutdownLogic(
-  logApp: { log: { info(...args: unknown[]): void; error(...args: unknown[]): void } },
-  drain: () => Promise<void>,
-  signal: string,
-): Promise<number> {
-  logApp.log.info({ signal }, "Shutdown signal received — draining active runs");
+async function shutdown(signal: string): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+
+  app.log.info({ signal }, "Shutdown signal received — draining active runs");
+
+  // Drain runs before Fastify's onClose hooks release persistence resources.
   let cleanupFailed = false;
   try {
     await drain();
   } catch (closeError) {
-    logApp.log.error(closeError, "Error while draining or closing the server");
     cleanupFailed = true;
+    app.log.error(closeError, "Error while draining or closing the server");
   }
   logApp.log.info("Shutdown complete");
   return cleanupFailed ? 1 : 0;
 }
 
-async function shutdown(signal: string): Promise<void> {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  const code = await shutdownLogic(app, () => closeAfterDrain(app, DRAIN_TIMEOUT_MS), signal);
-  process.exit(code);
+  if (cleanupFailed) {
+    app.log.error("Shutdown cleanup failed — exiting with code 1");
+    process.exit(1);
+  }
+
+  app.log.info("Shutdown complete");
+  process.exit(0);
 }
 
 process.once("SIGTERM", () => { shutdown("SIGTERM").catch((err) => { app.log.error(err, "Fatal during SIGTERM shutdown"); process.exit(1); }); });
