@@ -62,11 +62,15 @@ button { color:inherit; }
 .print-report-header,.print-only,.print-status-label { display:none; }
 .scenario-count { font:500 10px var(--font-mono); letter-spacing:.12em; color:var(--muted); }
 .scenario-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:14px; min-height:240px; }
+.scenario-card-wrap { position:relative; min-width:0; }
 .scenario-card { position:relative; min-height:240px; padding:26px; text-align:left; display:flex; flex-direction:column; align-items:flex-start; background:transparent; border:1px solid var(--line); border-radius:3px; cursor:pointer; transition:.2s ease; }
 .scenario-card:hover { transform:translateY(-3px); border-color:#868d82; }
 .scenario-card.selected { background:var(--deep); border-color:var(--deep); color:white; box-shadow:0 18px 45px #173f2d22; }
-.card-index { position:absolute; right:20px; top:18px; font:500 10px var(--font-mono); color:var(--muted); }
+.card-index { position:absolute; right:54px; top:18px; font:500 10px var(--font-mono); color:var(--muted); }
 .selected .card-index,.selected .scenario-description,.selected .version { color:#b8c5bc; }
+.favorite-toggle { position:absolute; z-index:1; top:12px; right:12px; width:34px; height:34px; display:grid; place-items:center; border:1px solid var(--line); border-radius:50%; background:var(--paper); color:var(--deep); font-size:20px; line-height:1; cursor:pointer; }
+.favorite-toggle.active { background:var(--green); border-color:var(--green); }
+.favorite-toggle:focus-visible { outline:2px solid var(--deep); outline-offset:2px; }
 .scenario-icon { width:42px; height:42px; margin-bottom:30px; stroke:currentColor; stroke-width:1.5; }
 .selected .scenario-icon { stroke:var(--green); }
 .scenario-name { font-size:20px; font-weight:750; letter-spacing:-.03em; }
@@ -362,3 +366,39 @@ button.download:focus-visible {
 
 /* ── Run button rate-limit note (#39) ───────────────────────────────────── */
 .rate-limit-note { font:400 12px var(--font-mono); color:var(--muted); margin:6px 0 0; }
+
+/* ── Forced-colors (Windows High Contrast) support (#206) ──────────────── */
+@media (forced-colors: active) {
+  .scenario-card.selected {
+    background: Highlight;
+    border-color: ButtonText;
+    color: HighlightText;
+    forced-color-adjust: none;
+  }
+  .scenario-card:focus-visible {
+    outline: 3px solid ButtonText;
+    outline-offset: 2px;
+  }
+  .step-dot.passed {
+    background: transparent;
+    border: 2px solid ButtonText;
+    forced-color-adjust: none;
+  }
+  .step-dot.failed {
+    background: transparent;
+    border: 2px solid ButtonText;
+    color: ButtonText;
+    forced-color-adjust: none;
+  }
+  .status-badge.passed {
+    border-color: ButtonText;
+  }
+  .status-badge.failed span,
+  .status-badge.running span,
+  .status-badge.validating span,
+  .status-badge.requested span {
+    background: ButtonText;
+    box-shadow: none;
+    forced-color-adjust: none;
+  }
+}

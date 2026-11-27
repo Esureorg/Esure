@@ -1,0 +1,61 @@
+schemaVersion: 1
+id: trustlines-without-selling-balance
+version: 1
+name: Trustlines created without issuing selling balance
+description: >
+  Verify that a manageSellOffer fails with op_underfunded when the required
+  trustlines exist but no selling balance has been issued to the account.
+  The trustlines are established via changeTrust, but the issuer never sends
+  any tokens, so the offer has nothing to sell.
+network: testnet
+accounts:
+  - id: issuer
+    generate: true
+    fund: true
+  - id: seller
+    generate: true
+    fund: true
+  - id: buyer
+    generate: true
+    fund: true
+assets:
+  - id: xlm
+    type: native
+  - id: test-usd
+    type: issued
+    code: TESTUSD
+    issuer: issuer
+steps:
+  - id: seller-trusts-testusd
+    type: changeTrust
+    account: seller
+    asset: test-usd
+    limit: "1000"
+  - id: buyer-trusts-testusd
+    type: changeTrust
+    account: buyer
+    asset: test-usd
+    limit: "1000"
+  - id: offer-without-balance
+    type: manageSellOffer
+    account: seller
+    sellingAsset: test-usd
+    buyingAsset: xlm
+    amount: "50"
+    price: "1"
+assertions:
+  - type: trustlineExists
+    account: seller
+    asset: test-usd
+  - type: trustlineExists
+    account: buyer
+    asset: test-usd
+  - type: balanceEquals
+    account: seller
+    asset: test-usd
+    amount: "0"
+  - type: stepFailedWith
+    step: offer-without-balance
+    transactionCode: tx_failed
+    operationCodes:
+      - op_underfunded

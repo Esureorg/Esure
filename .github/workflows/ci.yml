@@ -8,6 +8,12 @@ on:
 permissions:
   contents: read
 
+# One run per workflow and ref. Superseded pull request runs are cancelled;
+# pushes to main are never cancelled, so each push keeps its own result.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   backend:
     name: Backend checks
