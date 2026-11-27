@@ -26,6 +26,7 @@ import { RunService, type RunLifecycleLogger } from "./run-service.js";
 import { InMemoryRunStore } from "./run-store.js";
 import { parseScenario, prepareScenario, canonicalJson } from "./scenario-loader.js";
 import { scenarioSchemaV1, ScenarioValidationError } from "./scenario-schema.js";
+import { runReportSchemaV1 } from "./report-schema.js";
 import { createScenarioRegistry } from "./scenarios.js";
 import { StellarTestnetGateway } from "./stellar-gateway.js";
 import { PersistenceCoordinator } from "./persistence.js";
@@ -219,6 +220,13 @@ export function buildApp(options: BuildAppOptions): AppInstance {
     if (ifNoneMatch && matchesETag(ifNoneMatch, etag)) return reply.code(304).send();
     return reply.type("application/json").send(body);
   });
+
+  // ── Issue #231: canonical run-report schema endpoint ─────────────────────
+  app.get("/api/v1/schemas/run-report-v1.json", async (_request, reply) => {
+    return reply.type("application/json").send(runReportSchemaV1);
+  });
+
+  // ── Issue #69: conditional GET for scenario catalogue ─────────────────────
   app.get("/api/v1/scenarios", async (request, reply) => {
     const items = persistence.repository ? await persistence.repository.list() : registry.list();
     const etag = catalogueETag(items);
@@ -405,7 +413,7 @@ export function buildApp(options: BuildAppOptions): AppInstance {
  * regardless of the order in which items are returned from the database.
  */
 function catalogueETag(items: { id: string; version: number; contentHash: string }[]): string {
-  const sorted = [...items].sort((a, b) => a.id.localeCompare(b.id));
+  const sorted = [...items].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   const digest = createHash("sha256")
     .update(canonicalJson(sorted.map(({ id, version, contentHash }) => ({ id, version, contentHash }))))
     .digest("hex");
