@@ -1346,100 +1346,103 @@ describe("Issue #94 — trustlineLimitEquals assertion", () => {
   });
 });
 
-// Issue #288 — strict-receive path payment that exceeds sendMax
-describe("Issue #288 — path payment sendMax exceeded", () => {
+// Issues #289/#290/#293 — expected-failure path-payment fixtures
+describe("expected-failure path-payment fixtures", () => {
   afterEach(() => vi.restoreAllMocks());
 
-  const recipientUsdcBalance = "0";
+  const fixtureIds = ["path-payment-strict-send-below-dest-min", "path-payment-no-liquidity", "path-payment-trustline-limit-exceeded"] as const;
 
-  function sendMaxScenario(): ValidatedScenario {
-    return {
-      schemaVersion: 1,
-      id: "path-payment-sendmax-exceeded",
-      version: 1,
-      name: "Path payment sendMax exceeded",
-      description: "Strict-receive path payment whose sendMax is insufficient.",
-      network: "testnet",
-      contentHash: "sha256:" + "0".repeat(64),
-      accounts: [
-        { id: "sender", generate: true, fund: false },
-        { id: "recipient", generate: true, fund: false },
-        { id: "issuer", generate: true, fund: false },
-      ],
-      assets: [
-        { id: "xlm", type: "native" },
-        { id: "usdc", type: "issued", code: "USDC", issuer: "issuer" },
-        { id: "eur", type: "issued", code: "EUR", issuer: "issuer" },
-      ],
-      steps: [
-        { id: "trust-usdc", type: "changeTrust", account: "recipient", asset: "usdc" },
-        { id: "trust-eur", type: "changeTrust", account: "sender", asset: "eur" },
-        { id: "fund-sender", type: "payment", from: "issuer", to: "sender", asset: "eur", amount: "100" },
-        { id: "make-market", type: "manageSellOffer", account: "issuer", selling: "eur", buying: "usdc", amount: "100", price: "1" },
-        {
-          id: "pay-usdc-through-eur",
-          type: "pathPaymentStrictReceive",
-          from: "sender",
-          to: "recipient",
-          sendAsset: "eur",
-          sendMax: "0.5",
-          destAsset: "usdc",
-          destAmount: "10",
-          path: [],
-        },
-      ],
-      assertions: [
-        { type: "stepFailedWith", step: "pay-usdc-through-eur", transactionCode: "tx_failed", operationCodes: ["op_too_few_offers"] },
-        { type: "balanceEquals", account: "recipient", asset: "usdc", amount: recipientUsdcBalance },
-      ],
-    };
+  function fixture(id: (typeof fixtureIds)[number]): ValidatedScenario {
+    const scenario = createScenarioRegistry().find(id);
+    expect(scenario, `fixture ${id} should be registered`).toBeDefined();
+    return scenario!;
   }
 
-  function setupSendMaxMocks(resultCodes: { transaction: string; operations: string[] }) {
-    vi.spyOn(Horizon.Server.prototype, "loadAccount").mockImplementation(async (key) =>
-      Object.assign(new Account(key, "1"), {
-        balances: [{ asset_type: "credit_alphanum4", asset_code: "USDC", asset_issuer: STUB_PUBKEY, balance: recipientUsdcBalance, limit: "1000" }],
-      }) as unknown as Awaited<ReturnType<Horizon.Server["loadAccount"]>>,
-    );
+  function issuedBalance(asset: { code: string; issuer: string }, balance: string) {
+    return { asset_type: "credit_alphanum4", asset_code: asset.code, asset_issuer: asset.issuer, balance, limit: "1000000" };
+  }
+
+  function setupExpectedFailure(
+    scenario: ValidatedScenario,
+    failure: { transaction: string; operations: string[] },
+    balances: Record<string, Array<Record<string, unknown>>>,
+  ) {
     vi.spyOn(Horizon.Server.prototype, "fetchTimebounds").mockResolvedValue({ minTime: 0, maxTime: 2_000_000_000 });
-    return vi.spyOn(Horizon.Server.prototype, "submitTransaction").mockImplementation(async (transaction) => {
+    vi.spyOn(Horizon.Server.prototype, "loadAccount").mockImplementation(async (key) =>
+      Object.assign(new Account(key, "1"), { balances: balances[key] ?? [] }) as unknown as Awaited<ReturnType<Horizon.Server["loadAccount"]>>,
+    );
+    const submit = vi.spyOn(Horizon.Server.prototype, "submitTransaction").mockImplementation(async (transaction) => {
       const types = transaction.operations.map((operation) => operation.type);
-      if (types.includes("pathPaymentStrictReceive")) {
-        throw horizonError(resultCodes.transaction, resultCodes.operations);
+      if (types.includes("pathPaymentStrictSend") || types.includes("pathPaymentStrictReceive")) {
+        throw horizonError(failure.transaction, failure.operations);
       }
       return { hash: "a".repeat(64), ledger: 100 } as Horizon.HorizonApi.SubmitTransactionResponse;
     });
+    return submit;
   }
 
-  it("fails the strict-receive step with the expected result codes and leaves the destination balance unchanged", async () => {
-    const submit = setupSendMaxMocks({ transaction: "tx_failed", operations: ["op_too_few_offers"] });
-    const gateway = new StellarTestnetGateway("https://horizon.example", "https://friendbot.example");
+  it("fails strict-send below destMin with op_under_dest_min and unchanged issued balances", async () => {
+    const scenario = fixture("path-payment-strict-send-below-dest-min");
+    const recipient = scenario.accounts.find((account) => account.id === "recipient")!;
+    const marketMaker = scenario.accounts.find((account) => account.id === "market-maker")!;
+    const usd = { code: "USD", issuer: "issuer" };
+    const balances = {
+      [recipient.publicKey!]: [issuedBalance(usd, "0")],
+      [marketMaker.publicKey!]: [issuedBalance(usd, "1000")],
+    };
+    setupExpectedFailure(scenario, { transaction: "tx_failed", operations: ["op_under_dest_min"] }, balances);
 
-    const { steps, assertions } = await gateway.execute(sendMaxScenario());
+    const execution = await new StellarTestnetGateway("https://horizon.example", "https://friendbot.example").execute(scenario);
 
-    const pathStep = steps.find((step) => step.id === "pay-usdc-through-eur");
-    expect(pathStep).toMatchObject({
-      status: "failed",
-      stellarTransactionCode: "tx_failed",
-      stellarOperationCodes: ["op_too_few_offers"],
-    });
-    expect(submit).toHaveBeenCalledTimes(5);
-
-    const failureAssertion = assertions.find((assertion) => assertion.type === "stepFailedWith");
-    expect(failureAssertion).toMatchObject({ status: "passed" });
-
-    const balanceAssertion = assertions.find((assertion) => assertion.type === "balanceEquals");
-    expect(balanceAssertion).toMatchObject({ status: "passed", expected: recipientUsdcBalance, actual: recipientUsdcBalance });
+    const pathStep = execution.steps.find((step) => step.type === "pathPaymentStrictSend")!;
+    expect(pathStep).toMatchObject({ status: "failed" });
+    expect(pathStep.error).toMatchObject({ stellarTransactionCode: "tx_failed", stellarOperationCodes: ["op_under_dest_min"] });
+    expect(execution.assertions.find((assertion) => assertion.type === "stepFailedWith")).toMatchObject({ status: "passed" });
+    const recipientBalance = execution.assertions.find((assertion) => assertion.type === "balanceEquals" && assertion.account === "recipient");
+    expect(recipientBalance).toMatchObject({ status: "passed", actual: "0" });
+    const marketMakerBalance = execution.assertions.find((assertion) => assertion.type === "balanceEquals" && assertion.account === "market-maker");
+    expect(marketMakerBalance).toMatchObject({ status: "passed", actual: "1000" });
   });
 
-  it("does not accept a mismatched result code as the expected failure", async () => {
-    setupSendMaxMocks({ transaction: "tx_failed", operations: ["op_underfunded"] });
-    const gateway = new StellarTestnetGateway("https://horizon.example", "https://friendbot.example");
+  it("fails path payment with no liquidity and continues past the expected failure", async () => {
+    const scenario = fixture("path-payment-no-liquidity");
+    const recipient = scenario.accounts.find((account) => account.id === "recipient")!;
+    const usd = { code: "USD", issuer: "issuer" };
+    setupExpectedFailure(scenario, { transaction: "tx_failed", operations: ["op_no_issuer"] }, { [recipient.publicKey!]: [issuedBalance(usd, "0")] });
 
-    const { assertions } = await gateway.execute(sendMaxScenario());
+    const execution = await new StellarTestnetGateway("https://horizon.example", "https://friendbot.example").execute(scenario);
 
-    const failureAssertion = assertions.find((assertion) => assertion.type === "stepFailedWith");
-    expect(failureAssertion).toMatchObject({ status: "failed" });
+    const pathStep = execution.steps.find((step) => step.type === "pathPaymentStrictReceive")!;
+    expect(pathStep).toMatchObject({ status: "failed" });
+    expect(pathStep.error).toMatchObject({ stellarTransactionCode: "tx_failed", stellarOperationCodes: ["op_no_issuer"] });
+    expect(execution.assertions.find((assertion) => assertion.type === "stepFailedWith")).toMatchObject({ status: "passed" });
+    const recipientBalance = execution.assertions.find((assertion) => assertion.type === "balanceEquals" && assertion.account === "recipient");
+    expect(recipientBalance).toMatchObject({ status: "passed", actual: "0" });
+    // Expected-failure continuation: the run completes and evaluates later assertions instead of throwing.
+    expect(execution.assertions.every((assertion) => assertion.status === "passed")).toBe(true);
+  });
+
+  it("fails path payment exceeding the destination trustline limit with op_line_full", async () => {
+    const scenario = fixture("path-payment-trustline-limit-exceeded");
+    const recipient = scenario.accounts.find((account) => account.id === "recipient")!;
+    const marketMaker = scenario.accounts.find((account) => account.id === "market-maker")!;
+    const usd = { code: "USD", issuer: "issuer" };
+    const balances = {
+      [recipient.publicKey!]: [issuedBalance(usd, "0")],
+      [marketMaker.publicKey!]: [issuedBalance(usd, "1000")],
+    };
+    setupExpectedFailure(scenario, { transaction: "tx_failed", operations: ["op_line_full"] }, balances);
+
+    const execution = await new StellarTestnetGateway("https://horizon.example", "https://friendbot.example").execute(scenario);
+
+    const pathStep = execution.steps.find((step) => step.type === "pathPaymentStrictReceive")!;
+    expect(pathStep).toMatchObject({ status: "failed" });
+    expect(pathStep.error).toMatchObject({ stellarTransactionCode: "tx_failed", stellarOperationCodes: ["op_line_full"] });
+    expect(execution.assertions.find((assertion) => assertion.type === "stepFailedWith")).toMatchObject({ status: "passed" });
+    const recipientBalance = execution.assertions.find((assertion) => assertion.type === "balanceEquals" && assertion.account === "recipient");
+    expect(recipientBalance).toMatchObject({ status: "passed", actual: "0" });
+    const marketMakerBalance = execution.assertions.find((assertion) => assertion.type === "balanceEquals" && assertion.account === "market-maker");
+    expect(marketMakerBalance).toMatchObject({ status: "passed", actual: "1000" });
   });
 });
 
