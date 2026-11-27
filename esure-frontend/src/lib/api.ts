@@ -385,18 +385,12 @@ export function compareReports(a: RunReport, b: RunReport): ReportComparison {
     }
   }
 
-  // Assertion comparison: use references for matching, with documented fallback to occurrence keys
-  function getAssertionReferenceKey(assertion: AssertionResult): string {
-    const refKeys: string[] = [];
-    if (typeof assertion.account === "string") refKeys.push(`account:${assertion.account}`);
-    if (typeof assertion.asset === "string") refKeys.push(`asset:${assertion.asset}`);
-    if (typeof assertion.step === "string") refKeys.push(`step:${assertion.step}`);
-    return refKeys.length > 0 ? refKeys.join("|") : "";
-  }
-
+  // Assertion comparison using documented stable occurrence keys: `${type}#${index}`
+  // index is occurrence count of this assertion type in the report.
+  // The type is stored alongside the key (rather than re-derived via split("#"))
+  // so assertion types containing "#" cannot corrupt the reported type.
   function getAssertionKeyMap(assertions: AssertionResult[]) {
-    const keyMap = new Map<string, AssertionResult>();
-    const refMap = new Map<string, AssertionResult[]>();
+    const keyMap = new Map<string, { type: string; assertion: AssertionResult }>();
     const counts = new Map<string, number>();
 
     for (const assertion of assertions) {
@@ -408,8 +402,8 @@ export function compareReports(a: RunReport, b: RunReport): ReportComparison {
 
       const count = counts.get(assertion.type) ?? 0;
       counts.set(assertion.type, count + 1);
-      const occurrenceKey = `${assertion.type}#${count}`;
-      keyMap.set(occurrenceKey, assertion);
+      const key = `${assertion.type}#${count}`;
+      keyMap.set(key, { type: assertion.type, assertion });
     }
 
     return { keyMap, refMap };
@@ -492,11 +486,11 @@ export function compareReports(a: RunReport, b: RunReport): ReportComparison {
   ]);
 
   for (const key of allAssertKeys) {
-    if (assertionComparisons.some((c) => c.key === key)) continue;
-
-    const assertA = assertMapA.get(key);
-    const assertB = assertMapB.get(key);
-    const type = key.split("#")[0];
+    const entryA = assertMapA.get(key);
+    const entryB = assertMapB.get(key);
+    const assertA = entryA?.assertion;
+    const assertB = entryB?.assertion;
+    const type = (entryB ?? entryA)!.type;
 
     if (assertA && assertB) {
       const change = assertA.status === assertB.status ? "unchanged" : "changed";

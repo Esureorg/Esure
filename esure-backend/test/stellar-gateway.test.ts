@@ -13,6 +13,11 @@ import {
   StellarTestnetGateway,
 } from "../src/stellar-gateway.js";
 import { SafeRunError } from "../src/errors.js";
+import {
+  ControllableClock,
+  createFakeSleep,
+  createSeededRandom,
+} from "./helpers/controllable-clock.js";
 
 
 
@@ -119,6 +124,19 @@ describe("Friendbot retry delay calculation", () => {
     random: () => 1,
   };
 
+  it("uses the seeded PRNG helper for deterministic jitter", () => {
+    const seeded = createSeededRandom(42);
+    const first = seeded();
+    const second = seeded();
+    expect(first).toBeGreaterThanOrEqual(0);
+    expect(first).toBeLessThan(1);
+    expect(second).toBeGreaterThanOrEqual(0);
+    expect(second).toBeLessThan(1);
+    // Re-seeding with the same value reproduces the same sequence.
+    const replay = createSeededRandom(42);
+    expect([replay(), replay()]).toEqual([first, second]);
+  });
+
   it("calculates exponential backoff", () => {
     expect(calculateRetryDelay(1, deterministicConfig)).toBe(1_000);
     expect(calculateRetryDelay(2, deterministicConfig)).toBe(2_000);
@@ -137,6 +155,58 @@ describe("Friendbot retry delay calculation", () => {
 
     const zeroJitter = { ...deterministicConfig, random: () => 0 };
     expect(calculateRetryDelay(1, zeroJitter)).toBe(0);
+  });
+});
+
+describe("ControllableClock", () => {
+  it("advances monotonic and ISO time deterministically", () => {
+    const clock = new ControllableClock(1_000);
+    expect(clock.monotonicNow()).toBe(1_000);
+    clock.advance(250);
+    expect(clock.monotonicNow()).toBe(1_250);
+    expect(clock.isoNow()).toBe(new Date(1_250).toISOString());
+    clock.set(5_000);
+    expect(clock.monotonicNow()).toBe(5_000);
+    expect(clock.isoNow()).toBe(new Date(5_000).toISOString());
+  });
+});
+
+describe("createFakeSleep", () => {
+  it("records requested delays and resolves only when advanced", async () => {
+    const clock = new ControllableClock();
+    const sleep = createFakeSleep(clock);
+    let resolved = false;
+    const promise = sleep(500).then(() => {
+      resolved = true;
+    });
+    expect(sleep.delays).toEqual([500]);
+    expect(resolved).toBe(false);
+    clock.advance(499);
+    await Promise.resolve();
+    expect(resolved).toBe(false);
+    clock.advance(1);
+    await promise;
+    expect(resolved).toBe(true);
+  });
+
+  it("rejects with the abort reason when the signal aborts during backoff", async () => {
+    const clock = new ControllableClock();
+    const sleep = createFakeSleep(clock);
+    const controller = new AbortController();
+    const promise = sleep(1_000, controller.signal);
+    const reason = new Error("Run aborted by client");
+    controller.abort(reason);
+    await expect(promise).rejects.toBe(reason);
+    expect(sleep.delays).toEqual([1_000]);
+  });
+
+  it("rejects immediately when the signal is already aborted", async () => {
+    const clock = new ControllableClock();
+    const sleep = createFakeSleep(clock);
+    const controller = new AbortController();
+    const reason = new Error("pre-aborted");
+    controller.abort(reason);
+    await expect(sleep(1_000, controller.signal)).rejects.toBe(reason);
   });
 });
 
@@ -370,17 +440,22 @@ describe("StellarTestnetGateway Friendbot bounded retry", () => {
       const loadAccount = vi.spyOn(Horizon.Server.prototype, "loadAccount")
         .mockRejectedValueOnce(horizonResponseError(status))
         .mockImplementation(async (publicKey) => mockAccount(publicKey));
-      const sleep = vi.fn(async (_ms: number) => {});
+      const clock = new ControllableClock();
+      const sleep = createFakeSleep(clock);
       const gateway = new StellarTestnetGateway("https://horizon.example", "https://friendbot.example", {
-        horizonRetry: { random: () => 1 },
+        horizonRetry: { random: createSeededRandom(7) },
         sleep,
       });
 
-      const result = await gateway.execute(accountScenario);
+      const promise = gateway.execute(accountScenario);
+      // Drive the backoff window deterministically instead of relying on real timers.
+      await vi.advanceTimersByTimeAsync(0);
+      clock.advance(1_000);
+      const result = await promise;
 
       expect(result.assertions[0]).toMatchObject({ type: "accountExists", status: "passed" });
       expect(loadAccount).toHaveBeenCalledTimes(2);
-      expect(sleep).toHaveBeenCalledExactlyOnceWith(1_000);
+      expect(sleep.delays).toEqual([1_000]);
     });
 
     it("retries transaction submission after 503 and returns success", async () => {
@@ -434,13 +509,22 @@ describe("StellarTestnetGateway Friendbot bounded retry", () => {
     it("retries timeout errors and reports exhaustion after three retries", async () => {
       const timeoutError = Object.assign(new Error("request timed out"), { code: "ETIMEDOUT" });
       const loadAccount = vi.spyOn(Horizon.Server.prototype, "loadAccount").mockRejectedValue(timeoutError);
-      const sleep = vi.fn(async (_ms: number) => {});
+      const clock = new ControllableClock();
+      const sleep = createFakeSleep(clock);
       const gateway = new StellarTestnetGateway("https://horizon.example", "https://friendbot.example", {
-        horizonRetry: { random: () => 1 },
+        horizonRetry: { random: createSeededRandom(7) },
         sleep,
       });
 
-      await expect(gateway.execute(accountScenario)).rejects.toMatchObject({
+      const promise = gateway.execute(accountScenario).catch((err: unknown) => err);
+      // Advance through each backoff window in turn.
+      for (const delay of [1_000, 2_000, 4_000]) {
+        await vi.advanceTimersByTimeAsync(0);
+        clock.advance(delay);
+      }
+      const error = await promise;
+
+      expect(error).toMatchObject({
         name: "SafeRunError",
         report: {
           code: "HORIZON_UNAVAILABLE",
@@ -450,7 +534,7 @@ describe("StellarTestnetGateway Friendbot bounded retry", () => {
         },
       });
       expect(loadAccount).toHaveBeenCalledTimes(4);
-      expect(sleep.mock.calls.map(([delay]) => delay)).toEqual([1_000, 2_000, 4_000]);
+      expect(sleep.delays).toEqual([1_000, 2_000, 4_000]);
     });
 
     it("reports a service-specific timeout when Horizon transaction submission times out", async () => {
@@ -699,23 +783,30 @@ describe("StellarTestnetGateway Friendbot bounded retry", () => {
       .fn<typeof fetch>()
       .mockResolvedValueOnce(new Response(null, { status: 429 }));
 
+    const clock = new ControllableClock();
+    const sleep = createFakeSleep(clock);
     const gateway = new StellarTestnetGateway(
       "https://horizon-testnet.stellar.org",
       "https://friendbot.stellar.org",
       {
         fetch: fetchMock,
+        sleep,
         friendbotRetry: {
           maxAttempts: 3,
           baseDelayMs: 1_000,
-          random: () => 1,
+          random: createSeededRandom(7),
         },
       },
     );
 
     const promise = gateway.fundAccount(publicKey, controller.signal);
-    // Abort before the backoff timer elapses
-    controller.abort(new Error("Run aborted by client"));
-    await expect(promise).rejects.toThrow("Run aborted by client");
+    // Let the first request settle and the backoff sleep begin.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sleep.delays).toEqual([1_000]);
+    // Abort inside the backoff window without advancing the clock.
+    const reason = new Error("Run aborted by client");
+    controller.abort(reason);
+    await expect(promise).rejects.toBe(reason);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
@@ -1041,14 +1132,16 @@ describe("StellarTestnetGateway Friendbot bounded retry", () => {
 
     it("records start/completion timestamps and monotonic duration for a successful step", async () => {
       const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 200 }));
-      let monotonic = 1_000;
-      const clock = {
-        monotonicNow: () => { monotonic += 50; return monotonic; },
-        isoNow: () => new Date(monotonic).toISOString(),
-      };
+      const clock = new ControllableClock(1_000);
       const gateway = new StellarTestnetGateway("https://horizon-testnet.stellar.org", "https://friendbot.stellar.org", {
         fetch: fetchMock,
-        clock,
+        clock: {
+          monotonicNow: () => {
+            clock.advance(50);
+            return clock.monotonicNow();
+          },
+          isoNow: () => clock.isoNow(),
+        },
       });
 
       const result = await gateway.execute(fundingScenarioFor("timing-success-scenario"));
@@ -1078,15 +1171,19 @@ describe("StellarTestnetGateway Friendbot bounded retry", () => {
 
     it("records timing for a step that times out, without waiting for a real delay", async () => {
       vi.useFakeTimers();
-      let monotonic = 0;
-      const clock = {
-        monotonicNow: () => { monotonic += 10; return monotonic; },
-        isoNow: () => new Date(monotonic).toISOString(),
-      };
+      const clock = new ControllableClock();
       const neverResolves = () => new Promise<never>(() => {});
       vi.spyOn(Horizon.Server.prototype, "loadAccount").mockImplementation(neverResolves as never);
 
-      const gateway = new StellarTestnetGateway("https://horizon-testnet.stellar.org", "https://friendbot.stellar.org", { clock });
+      const gateway = new StellarTestnetGateway("https://horizon-testnet.stellar.org", "https://friendbot.stellar.org", {
+        clock: {
+          monotonicNow: () => {
+            clock.advance(10);
+            return clock.monotonicNow();
+          },
+          isoNow: () => clock.isoNow(),
+        },
+      });
       const scenario: ValidatedScenario = {
         schemaVersion: 1,
         id: "timing-timeout-scenario",

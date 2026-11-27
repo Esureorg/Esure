@@ -191,7 +191,7 @@ export class RunService {
       const summary = summarize(result.steps, result.assertions);
       const passed = summary.stepsFailed === 0 && summary.assertionsFailed === 0;
       errorCode = passed ? undefined : "ASSERTION_FAILED";
-      await this.store.update(id, {
+      await this.safeUpdate(id, {
         status: passed ? "passed" : "failed",
         completedAt: new Date(this.now()).toISOString(),
         steps: result.steps,
@@ -208,21 +208,18 @@ export class RunService {
       });
       outcome = passed ? "passed" : "failed";
     } catch (error) {
-      // Drain any queued progress writes independently of the execution error.
-      // A rejected progress chain must not prevent the terminal failure write
-      // below — handle it separately so we always persist the terminal state.
+      await progressUpdates.catch(() => {});
+      let current: RunReport | undefined;
       try {
-        await progressUpdates;
+        current = await this.store.get(id);
       } catch {
-        // Progress-chain rejection is non-fatal for terminal persistence.
-        // The error is discarded; the run will be written as failed below.
+        current = undefined;
       }
-      const current = await this.store.get(id);
       const steps = current?.steps ?? [];
       const assertions = current?.assertions ?? [];
       const normalizedError = normalizeError(error);
       errorCode = SAFE_RUN_ERROR_CODES.has(normalizedError.code) ? normalizedError.code : "INTERNAL_ERROR";
-      await this.store.update(id, {
+      await this.safeUpdate(id, {
         status: "failed",
         completedAt: new Date(this.now()).toISOString(),
         steps,
@@ -248,6 +245,19 @@ export class RunService {
         durationMs,
         ...(errorCode !== undefined && { errorCode }),
       });
+    }
+  }
+
+  /**
+   * Persist a terminal update without letting a store failure escape the run
+   * lifecycle. Capacity release and terminal metrics live in the caller's
+   * finally block, so a throwing update must never reject execute().
+   */
+  async #safeUpdate(id: string, patch: Parameters<RunStore["update"]>[1]): Promise<void> {
+    try {
+      await this.store.update(id, patch);
+    } catch {
+      // Swallow: the run is already terminal from the service's perspective.
     }
   }
 }
