@@ -55,6 +55,23 @@ export class InMemoryRunStore implements RunStore {
     return structuredClone(updated);
   }
 
+  markOrphaned({ ageThresholdMs, activeRunIds = new Set(), dryRun = false }: { ageThresholdMs: number; activeRunIds?: ReadonlySet<string>; dryRun?: boolean } = { ageThresholdMs: 0 }): number {
+    const cutoff = this.now() - ageThresholdMs;
+    let count = 0;
+    for (const [, run] of this.#runs) {
+      if (isTerminal(run)) continue;
+      if (activeRunIds.has(run.id)) continue;
+      if (Date.parse(run.createdAt) > cutoff) continue;
+      if (!dryRun) {
+        run.status = "failed";
+        run.completedAt = new Date(this.now()).toISOString();
+        run.error = { code: "SERVER_SHUTDOWN", message: "Run marked failed by orphan cleanup.", category: "internal", retryable: false };
+      }
+      count++;
+    }
+    return count;
+  }
+
   private removeExpired(): void {
     const cutoff = this.now() - this.retentionMs;
     for (const [id, run] of this.#runs) {
