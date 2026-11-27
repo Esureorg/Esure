@@ -145,6 +145,10 @@ export function buildApp(options: BuildAppOptions): AppInstance {
   if (options.config.metricsEnabled) {
     app.get("/metrics", async (_request, reply) => {
       const metrics = runs.getMetrics();
+      // Issue #224: gateway retry counters — only available when using the real gateway.
+      const retryMetrics = ledger instanceof StellarTestnetGateway ? ledger.getRetryMetrics() : undefined;
+      // Issue #225: pool health — only available when a database is wired up.
+      const pool = persistence.database?.poolHealth();
       const body = [
         "# HELP esure_active_runs Number of currently admitted active runs.",
         "# TYPE esure_active_runs gauge",
@@ -163,6 +167,30 @@ export function buildApp(options: BuildAppOptions): AppInstance {
         "# HELP esure_run_duration_seconds_count Number of terminal runs included in duration.",
         "# TYPE esure_run_duration_seconds_count counter",
         `esure_run_duration_seconds_count ${metrics.runDuration.count}`,
+        // Issue #224: gateway retry counters with fixed service+outcome labels only.
+        ...(retryMetrics ? [
+          "# HELP esure_gateway_retries_total Retry attempts by fixed service and outcome labels.",
+          "# TYPE esure_gateway_retries_total counter",
+          `esure_gateway_retries_total{service="friendbot",outcome="succeeded"} ${retryMetrics.retries.friendbot.succeeded}`,
+          `esure_gateway_retries_total{service="friendbot",outcome="exhausted"} ${retryMetrics.retries.friendbot.exhausted}`,
+          `esure_gateway_retries_total{service="horizon",outcome="succeeded"} ${retryMetrics.retries.horizon.succeeded}`,
+          `esure_gateway_retries_total{service="horizon",outcome="exhausted"} ${retryMetrics.retries.horizon.exhausted}`,
+        ] : []),
+        // Issue #225: sanitized pool health counters — no connection string or query data.
+        ...(pool ? [
+          "# HELP esure_db_pool_total Total clients in the connection pool.",
+          "# TYPE esure_db_pool_total gauge",
+          `esure_db_pool_total ${pool.totalCount}`,
+          "# HELP esure_db_pool_idle Idle clients in the connection pool.",
+          "# TYPE esure_db_pool_idle gauge",
+          `esure_db_pool_idle ${pool.idleCount}`,
+          "# HELP esure_db_pool_waiting Requests waiting for a pool client.",
+          "# TYPE esure_db_pool_waiting gauge",
+          `esure_db_pool_waiting ${pool.waitingCount}`,
+          "# HELP esure_db_pool_errors_total Pool idle-error events (sanitized count only).",
+          "# TYPE esure_db_pool_errors_total counter",
+          `esure_db_pool_errors_total ${pool.poolErrorCount}`,
+        ] : []),
         "",
       ].join("\n");
       return reply
