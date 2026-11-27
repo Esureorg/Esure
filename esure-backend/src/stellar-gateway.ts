@@ -33,6 +33,23 @@ import { isTextMemo } from "./text-memo.js";
 
 export type { FriendbotRetryConfig };
 
+/** Issue #224: low-cardinality retry counter keyed by fixed service + outcome labels. */
+export interface GatewayRetryMetrics {
+  /** Total retry attempts (not initial attempts) by service. Excludes run/account IDs. */
+  retries: {
+    friendbot: { succeeded: number; exhausted: number };
+    horizon: { succeeded: number; exhausted: number };
+  };
+}
+
+/** Mutable retry counters shared by a gateway instance (issue #224). */
+export interface GatewayRetryCounters {
+  friendbotSucceeded: number;
+  friendbotExhausted: number;
+  horizonSucceeded: number;
+  horizonExhausted: number;
+}
+
 export interface StellarGatewayOptions {
   maxConcurrentFriendbotRequests?: number;
   friendbotRetry?: FriendbotRetryConfig;
@@ -134,6 +151,13 @@ interface StepOutcome {
 export class StellarTestnetGateway implements LedgerGateway {
   readonly #server: Horizon.Server;
   readonly #options: StellarGatewayOptions;
+  /** Issue #224: low-cardinality retry counters. Never contain account or run IDs. */
+  readonly #retryCounters: GatewayRetryCounters = {
+    friendbotSucceeded: 0,
+    friendbotExhausted: 0,
+    horizonSucceeded: 0,
+    horizonExhausted: 0,
+  };
 
   constructor(
     horizonUrl: string,
@@ -146,6 +170,16 @@ export class StellarTestnetGateway implements LedgerGateway {
     }
     this.#server = new Horizon.Server(horizonUrl);
     this.#options = { ...options, maxConcurrentFriendbotRequests };
+  }
+
+  /** Issue #224: return a snapshot of retry counters with no connection or ID data. */
+  getRetryMetrics(): GatewayRetryMetrics {
+    return {
+      retries: {
+        friendbot: { succeeded: this.#retryCounters.friendbotSucceeded, exhausted: this.#retryCounters.friendbotExhausted },
+        horizon: { succeeded: this.#retryCounters.horizonSucceeded, exhausted: this.#retryCounters.horizonExhausted },
+      },
+    };
   }
 
   async execute(scenario: ValidatedScenario, options: LedgerExecutionOptions = {}): Promise<LedgerExecution> {
@@ -428,6 +462,7 @@ export class StellarTestnetGateway implements LedgerGateway {
       } catch (error) {
         if (signal?.aborted) throw error;
         if (attempt >= retryConfig.maxAttempts) {
+          this.#retryCounters.friendbotExhausted += 1;
           if (isTimeoutError(error)) throw friendbotTimeoutError("fund-accounts");
           throw new SafeRunError({
             code: "FRIENDBOT_UNAVAILABLE",
@@ -443,11 +478,14 @@ export class StellarTestnetGateway implements LedgerGateway {
       }
 
       if (response.ok) {
+        // Issue #224: a retry succeeded — count it only when attempt > 1.
+        if (attempt > 1) this.#retryCounters.friendbotSucceeded += 1;
         return;
       }
 
       const isRetryable = response.status === 429 || response.status >= 500;
       if (!isRetryable || attempt >= retryConfig.maxAttempts) {
+        if (attempt > 1) this.#retryCounters.friendbotExhausted += 1;
         if (response.status === 408 || response.status === 504) {
           throw friendbotTimeoutError("fund-accounts");
         }
@@ -551,13 +589,18 @@ export class StellarTestnetGateway implements LedgerGateway {
 
     while (true) {
       try {
-        return await operation();
+        const result = await operation();
+        // Issue #224: if we retried at least once and eventually succeeded, count it.
+        if (retries > 0) this.#retryCounters.horizonSucceeded += 1;
+        return result;
       } catch (error) {
         if (!isRetryableHorizonError(error)) {
           if (isTimeoutError(error)) throw horizonTimeoutError(request);
           throw error;
         }
         if (retries >= config.maxRetries) {
+          // Issue #224: retries were attempted but all exhausted.
+          if (retries > 0) this.#retryCounters.horizonExhausted += 1;
           if (isTimeoutError(error)) throw horizonTimeoutError(request);
           throw new SafeRunError({
             code: "HORIZON_UNAVAILABLE",

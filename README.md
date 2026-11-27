@@ -33,7 +33,7 @@ take longer than subsequent requests.
 
 ## Capabilities
 
-- **13 Bundled Scenarios**: XLM payments, issued assets, trustlines, expected failures, multi-op transactions (Testnet only)
+- **23 Bundled Scenarios**: XLM payments, issued assets, trustlines, expected failures, multi-op transactions (Testnet only)
 - **Developer-Friendly Errors**: Plain-English explanations for 30+ Stellar error codes with causes and fix suggestions
 - **Command-Line Interface**: Run scenarios from terminal or CI pipelines (run from source; not yet published to npm)
 - **CI/CD Integration**: First-class GitHub Actions, GitLab CI, and CircleCI support
@@ -68,7 +68,9 @@ Unlike Stellar Lab, which requires manual step-through and copy/paste workflow, 
 
 ## Bundled scenarios
 
-Esure includes 13 bundled scenarios for Testnet integration testing:
+Esure includes 23 bundled scenarios for Testnet integration testing. The table
+shows a representative subset; the full inventory is in
+[SCENARIOS.md](esure-docs/SCENARIOS.md):
 
 | Scenario | Purpose | Expected result |
 | --- | --- | --- |

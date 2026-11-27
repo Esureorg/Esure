@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ValidatedScenario } from "@esure/backend/src/domain.js";
 import { SCENARIO_LIMITS } from "@esure/backend/src/scenario-schema.js";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 
 const mocks = vi.hoisted(() => ({
   execute: vi.fn(),
@@ -8,11 +9,13 @@ const mocks = vi.hoisted(() => ({
   list: vi.fn(),
   createRegistry: vi.fn(),
   readFile: vi.fn(),
+  writeFile: vi.fn(),
   fsReaddirSync: vi.fn(),
   fsStatSync: vi.fn(),
+  gatewayConstructed: vi.fn(),
 }));
 
-vi.mock("node:fs/promises", () => ({ readFile: mocks.readFile }));
+vi.mock("node:fs/promises", () => ({ readFile: mocks.readFile, writeFile: mocks.writeFile }));
 vi.mock("node:fs", () => ({
   readdirSync: mocks.fsReaddirSync,
   statSync: mocks.fsStatSync,
@@ -20,8 +23,11 @@ vi.mock("node:fs", () => ({
 vi.mock("@esure/backend/src/scenarios.js", () => ({
   createScenarioRegistry: mocks.createRegistry,
 }));
-vi.mock("@esure/backend/stellar-gateway.js", () => ({
+vi.mock("@esure/backend/src/stellar-gateway.js", () => ({
   StellarTestnetGateway: class {
+    constructor() {
+      mocks.gatewayConstructed();
+    }
     execute = mocks.execute;
   },
 }));
@@ -42,6 +48,26 @@ const definition = {
 const scenario: ValidatedScenario = {
   ...definition,
   contentHash: "sha256:test",
+};
+
+const plannedScenario: ValidatedScenario = {
+  ...scenario,
+  accounts: [
+    { id: "alice", generate: true, fund: true },
+    { id: "bob", generate: true, fund: false },
+  ],
+  assets: [
+    { id: "xlm", type: "native" },
+    { id: "usd", type: "issued", code: "USD", issuer: "alice" },
+  ],
+  steps: [
+    { id: "payment-1", type: "payment", from: "alice", to: "bob", asset: "xlm", amount: "2" },
+    { id: "trust-1", type: "changeTrust", account: "bob", asset: "usd" },
+  ],
+  assertions: [
+    { type: "balanceEquals", account: "bob", asset: "xlm", amount: "2" },
+    { type: "transactionConfirmed", step: "payment-1" },
+  ],
 };
 
 const catalog = [{
@@ -81,6 +107,22 @@ const validYaml = [
 const passedExecution = {
   steps: [{ id: "step-1", type: "payment", status: "passed", message: "Payment confirmed." }],
   assertions: [{ type: "accountExists", status: "passed", expected: true, actual: true, message: "Account exists." }],
+};
+
+const runReport = {
+  id: "run-a",
+  scenarioId: "test-scenario",
+  scenarioVersion: 1,
+  scenarioSchemaVersion: 1,
+  scenarioContentHash: "sha256:scenario",
+  network: "testnet",
+  status: "passed",
+  createdAt: "2026-11-01T12:00:00.000Z",
+  completedAt: "2026-11-01T12:00:10.000Z",
+  expiresAt: "2026-11-02T12:00:10.000Z",
+  steps: [{ id: "payment-1", type: "payment", status: "passed", message: "Payment confirmed." }],
+  assertions: [{ type: "balanceEquals", status: "passed", expected: "2.0000", actual: "2.0000", message: "Balance matches." }],
+  summary: { stepsPassed: 1, stepsFailed: 0, assertionsPassed: 1, assertionsFailed: 0 },
 };
 
 let stdout: string[];
@@ -183,12 +225,14 @@ describe("CLI commands", () => {
     mocks.createRegistry.mockReturnValue({ list: mocks.list, find: mocks.find });
     mocks.execute.mockResolvedValue(passedExecution);
     mocks.readFile.mockReset();
+    mocks.writeFile.mockReset();
     mocks.fsReaddirSync.mockReturnValue([]);
     mocks.fsStatSync.mockReturnValue({ size: 1 });
     mocks.list.mockClear();
     mocks.find.mockClear();
     mocks.createRegistry.mockClear();
     mocks.execute.mockClear();
+    mocks.gatewayConstructed.mockClear();
     mocks.fsReaddirSync.mockClear();
     mocks.fsStatSync.mockClear();
   });
@@ -382,6 +426,178 @@ describe("CLI commands", () => {
     expect(result.definition.accounts).toBeDefined();
   });
 
+  it("plans a bounded scenario file in JSON without constructing the gateway", async () => {
+    const { contentHash: _contentHash, ...scenarioDefinition } = plannedScenario;
+    const content = JSON.stringify(scenarioDefinition);
+    mocks.fsStatSync.mockReturnValue({ size: Buffer.byteLength(content) });
+    mocks.readFile.mockResolvedValueOnce(content);
+
+    expect(await invokeCli("plan", "./scenario.json", "--output", "json")).toBe(0);
+    const result = JSON.parse(stdout.join("\n"));
+    expect(result).toEqual({
+      scenarioId: plannedScenario.id,
+      fundedAccountCount: 1,
+      operations: [
+        { order: 1, id: "payment-1", type: "payment", subject: "alice -> bob" },
+        { order: 2, id: "trust-1", type: "changeTrust", subject: "bob / usd" },
+      ],
+      assertions: [
+        { order: 1, type: "balanceEquals", subject: "bob / xlm" },
+        { order: 2, type: "transactionConfirmed", subject: "step payment-1" },
+      ],
+    });
+    expect(mocks.gatewayConstructed).not.toHaveBeenCalled();
+  });
+
+  it("plans a bundled scenario in human format without constructing the gateway", async () => {
+    mocks.find.mockImplementation((id: string) => id === plannedScenario.id ? structuredClone(plannedScenario) : undefined);
+
+    expect(await invokeCli("plan", plannedScenario.id)).toBe(0);
+    expect(stdout.join("\n")).toContain("Funded accounts: 1");
+    expect(stdout.join("\n")).toContain("1. payment-1 (payment) — alice -> bob");
+    expect(stdout.join("\n")).toContain("balanceEquals — bob / xlm");
+    expect(mocks.gatewayConstructed).not.toHaveBeenCalled();
+  });
+
+  it("rejects an oversized plan file before reading it", async () => {
+    mocks.fsStatSync.mockReturnValue({ size: SCENARIO_LIMITS.definitionBytes + 1 });
+
+    expect(await invokeCli("plan", "./oversized.json")).toBe(1);
+    expect(mocks.readFile).not.toHaveBeenCalled();
+    expect(mocks.gatewayConstructed).not.toHaveBeenCalled();
+  });
+
+  it("validates and converts a scenario to YAML on stdout without its derived hash", async () => {
+    const sourceScenario = structuredClone(plannedScenario);
+    (sourceScenario.steps[0] as { amount: string }).amount = "2.5000";
+    const { contentHash: _contentHash, ...definition } = sourceScenario;
+    mocks.readFile.mockResolvedValueOnce(JSON.stringify(definition));
+
+    expect(await invokeCli("format", "./scenario.json", "--to", "yaml")).toBe(0);
+    const result = parseYaml(stdout.join("\n")) as Record<string, any>;
+    expect(result.contentHash).toBeUndefined();
+    expect(result.steps[0].amount).toBe("2.5000");
+    expect(typeof result.steps[0].amount).toBe("string");
+    expect(mocks.writeFile).not.toHaveBeenCalled();
+
+    stdout = [];
+    mocks.readFile.mockResolvedValueOnce(stringifyYaml(definition));
+    expect(await invokeCli("format", "./scenario.yaml", "--to", "json")).toBe(0);
+    const jsonResult = JSON.parse(stdout.join("\n"));
+    expect(jsonResult.contentHash).toBeUndefined();
+    expect(jsonResult.steps[0].amount).toBe("2.5000");
+  });
+
+  it("validates before writing and uses the existing overwrite safeguard", async () => {
+    const { contentHash: _contentHash, ...definition } = plannedScenario;
+    const source = JSON.stringify(definition);
+    mocks.readFile.mockResolvedValueOnce("not valid json");
+
+    expect(await invokeCli("format", "./scenario.json", "--to", "json", "--output-file", "./out.json")).toBe(1);
+    expect(mocks.writeFile).not.toHaveBeenCalled();
+
+    stderr = [];
+    mocks.readFile.mockResolvedValueOnce(source);
+    mocks.writeFile.mockRejectedValueOnce(Object.assign(new Error("exists"), { code: "EEXIST" }));
+    expect(await invokeCli("format", "./scenario.json", "--to", "json", "--output-file", "./out.json")).toBe(1);
+    expect(mocks.writeFile).toHaveBeenLastCalledWith(
+      "./out.json",
+      expect.stringContaining('"schemaVersion": 1'),
+      { encoding: "utf8", flag: "wx" },
+    );
+    expect(stderr.join("\n")).toContain('Use --overwrite to replace it.');
+
+    mocks.readFile.mockResolvedValueOnce(source);
+    mocks.writeFile.mockResolvedValueOnce(undefined);
+    expect(await invokeCli("format", "./scenario.json", "--to", "json", "--output-file", "./out.json", "--overwrite")).toBe(0);
+    expect(mocks.writeFile).toHaveBeenLastCalledWith(
+      "./out.json",
+      expect.stringContaining('"schemaVersion": 1'),
+      { encoding: "utf8", flag: "w" },
+    );
+    expect(stdout).toEqual([]);
+  });
+
+  it("rejects oversized format input before reading it", async () => {
+    mocks.fsStatSync.mockReturnValue({ size: SCENARIO_LIMITS.definitionBytes + 1 });
+    expect(await invokeCli("format", "./oversized.json", "--to", "yaml")).toBe(1);
+    expect(mocks.readFile).not.toHaveBeenCalled();
+    expect(mocks.writeFile).not.toHaveBeenCalled();
+  });
+
+  it("compares valid reports as JSON and returns zero when equal", async () => {
+    mocks.readFile.mockResolvedValueOnce(JSON.stringify(runReport));
+    mocks.readFile.mockResolvedValueOnce(JSON.stringify(runReport));
+
+    expect(await invokeCli("report", "compare", "left.json", "right.json", "--output", "json")).toBe(0);
+    const result = JSON.parse(stdout.join("\n"));
+    expect(result.equal).toBe(true);
+    expect(result.exitCode).toBe(0);
+    expect(result.provenance.left.scenarioContentHash).toBe("sha256:scenario");
+    expect(result.status).toEqual({ same: true, left: "passed", right: "passed" });
+    expect(result.evidence.steps.changed).toEqual([]);
+    expect(result.evidence.assertions.changed).toEqual([]);
+    expect(mocks.gatewayConstructed).not.toHaveBeenCalled();
+  });
+
+  it("reports status and evidence differences with exit code two", async () => {
+    const changedReport = {
+      ...runReport,
+      id: "run-b",
+      status: "failed",
+      steps: [{ ...runReport.steps[0], status: "failed", message: "Payment rejected." }],
+      assertions: [{ ...runReport.assertions[0], status: "failed", actual: "0.0000" }],
+      summary: { stepsPassed: 0, stepsFailed: 1, assertionsPassed: 0, assertionsFailed: 1 },
+    };
+    mocks.readFile.mockResolvedValueOnce(JSON.stringify(runReport));
+    mocks.readFile.mockResolvedValueOnce(JSON.stringify(changedReport));
+
+    expect(await invokeCli("report", "compare", "left.json", "right.json", "--output", "json")).toBe(2);
+    const result = JSON.parse(stdout.join("\n"));
+    expect(result.equal).toBe(false);
+    expect(result.exitCode).toBe(2);
+    expect(result.provenance.same).toBe(false);
+    expect(result.status.same).toBe(false);
+    expect(result.evidence.steps.changed).toHaveLength(1);
+    expect(result.evidence.assertions.changed).toHaveLength(1);
+    expect(mocks.gatewayConstructed).not.toHaveBeenCalled();
+  });
+
+  it("shows provenance, status, and evidence differences in human output", async () => {
+    const changedReport = {
+      ...runReport,
+      id: "run-b",
+      status: "failed",
+      steps: [{ ...runReport.steps[0], status: "failed", message: "Payment rejected." }],
+    };
+    mocks.readFile.mockResolvedValueOnce(JSON.stringify(runReport));
+    mocks.readFile.mockResolvedValueOnce(JSON.stringify(changedReport));
+
+    expect(await invokeCli("report", "compare", "left.json", "right.json")).toBe(2);
+    expect(stdout.join("\n")).toContain("Run IDs: run-a -> run-b");
+    expect(stdout.join("\n")).toContain("Status: passed -> failed (different)");
+    expect(stdout.join("\n")).toContain("step 1:");
+    expect(mocks.gatewayConstructed).not.toHaveBeenCalled();
+  });
+
+  it("rejects invalid reports with exit code one", async () => {
+    const invalid = JSON.stringify({ ...runReport, network: "mainnet" });
+    mocks.readFile.mockResolvedValueOnce(invalid);
+    mocks.readFile.mockResolvedValueOnce(invalid);
+
+    expect(await invokeCli("report", "compare", "left.json", "right.json", "--output", "json")).toBe(1);
+    expect(JSON.parse(stderr.join("\n")).error.message).toContain("/network");
+    expect(mocks.gatewayConstructed).not.toHaveBeenCalled();
+  });
+
+  it("rejects oversized reports before reading them", async () => {
+    mocks.fsStatSync.mockReturnValue({ size: 5 * 1024 * 1024 + 1 });
+
+    expect(await invokeCli("report", "compare", "left.json", "right.json")).toBe(1);
+    expect(mocks.readFile).not.toHaveBeenCalled();
+    expect(mocks.gatewayConstructed).not.toHaveBeenCalled();
+  });
+
   it("reports an unknown scenario id for show", async () => {
     mocks.find.mockReturnValue(undefined);
     expect(await invokeCli("show", "missing-scenario", "--output", "json")).toBe(1);
@@ -540,7 +756,7 @@ describe("CLI commands", () => {
     expect(stdout.join("\n")).toContain("Usage:");
 
     stdout = [];
-    expect(await invokeCli("--help")).toBe(1);
+    expect(await invokeCli("--help")).toBe(0);
     expect(stdout.join("\n")).toContain("Usage:");
 
     stdout = [];
@@ -781,8 +997,32 @@ describe("#68 ASCII status markers", () => {
 
   it("--ascii appears in help text", async () => {
     stdout = [];
-    expect(await invokeCli("--help")).toBe(1);
+    expect(await invokeCli("run", "--help")).toBe(0);
     expect(stdout.join("\n")).toContain("--ascii");
+  });
+
+  it.each([
+    ["list", "--search", "--output"],
+    ["show", "--output", "--search"],
+    ["validate", "--stdin", "--search"],
+    ["validate-directory", "--output", "--stdin"],
+    ["plan", "--output", "--stdin"],
+    ["format", "--to", "--stdin"],
+    ["report", "report compare", "--search"],
+    ["run", "--timeout-ms", "--stdin"],
+    ["run-suite", "--fail-fast", "--stdin"],
+    ["completions", "bash|zsh", "--output"],
+    ["doctor", "Usage: esure doctor", "--search"],
+  ])("provides side-effect-free command help for %s", async (command, supported, unsupported) => {
+    expect(await invokeCli(command, "--help")).toBe(0);
+    const output = stdout.join("\n");
+    expect(output).toContain("Usage:");
+    expect(output).toContain(supported);
+    expect(output).not.toContain(unsupported);
+    expect(stderr).toEqual([]);
+    expect(mocks.createRegistry).not.toHaveBeenCalled();
+    expect(mocks.execute).not.toHaveBeenCalled();
+    expect(mocks.readFile).not.toHaveBeenCalled();
   });
 
   it("completions bash emits a bash completion script", async () => {

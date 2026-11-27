@@ -1,0 +1,60 @@
+version: 2
+
+# Dependency updates are proposed as pull requests only. Nothing here enables
+# auto-merge: every update must pass the required Monorepo CI checks and a
+# maintainer review before it lands on main.
+#
+# Minor and patch updates are grouped per ecosystem and directory so each
+# package produces at most one grouped pull request per schedule. Major
+# updates stay as separate pull requests so breaking changes are reviewed
+# individually. open-pull-requests-limit bounds the number of open pull
+# requests per entry.
+
+updates:
+  - package-ecosystem: npm
+    directory: /esure-backend
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      backend-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: npm
+    directory: /esure-frontend
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      frontend-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: npm
+    directory: /esure-cli
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      cli-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      actions-minor-and-patch:
+        update-types:
+          - minor
+          - patch

@@ -1,0 +1,21 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+# Markdown uses two trailing spaces as a hard line break.
+[*.md]
+trim_trailing_whitespace = false
+
+# Applied migrations are checksummed over their exact bytes (see
+# esure-backend/src/database.ts). Editors must not add a final newline or trim
+# whitespace when a migration file is opened and saved. Only the encoding and
+# line-ending rules above apply to these files.
+[esure-backend/migrations/*.sql]
+insert_final_newline = false
+trim_trailing_whitespace = false

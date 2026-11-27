@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { LedgerGateway, RunError, RunReport, RunSummary, ValidatedScenario } from "./domain.js";
 import type { RunStore } from "./run-store.js";
-import { RunCapacityError, RunTimeoutError, SafeRunError, ShutdownError, withTimeout } from "./errors.js";
+import { RunCapacityError, RunDrainingError, RunTimeoutError, SafeRunError, ShutdownError, withTimeout } from "./errors.js";
 
 const emptySummary = (): RunSummary => ({
   stepsPassed: 0,
@@ -62,6 +62,11 @@ export class RunService {
     private readonly options: { maxConcurrentRuns: number; runTimeoutMs: number; stepTimeoutMs: number },
     private readonly now: () => number = Date.now,
     private readonly logger?: RunLifecycleLogger,
+    // Monotonic clock for duration measurement (#213). Defaults to
+    // performance.now() so wall-clock adjustments (NTP, DST, leap seconds)
+    // cannot make a duration appear negative or artificially large. The
+    // existing `now` parameter continues to supply wall-clock timestamps.
+    private readonly hrNow: () => number = () => performance.now(),
   ) {}
 
   /** True once drain() has been called; new starts are rejected after this point. */
@@ -93,7 +98,7 @@ export class RunService {
   async start(scenario: ValidatedScenario, requestId?: string): Promise<RunReport> {
     if (this.#draining) {
       this.#drainingRejectedStarts += 1;
-      throw new RunCapacityError("The server is shutting down. No new runs are accepted.");
+      throw new RunDrainingError();
     }
     if (this.#activeRuns >= this.options.maxConcurrentRuns) {
       this.#capacityRejectedStarts += 1;
@@ -127,7 +132,7 @@ export class RunService {
       resolveExecution();
       throw error;
     }
-    const startedAt = this.now();
+    const startedAt = this.hrNow();
     this.logger?.info({
       event: "run.started",
       runId: run.id,
@@ -145,7 +150,7 @@ export class RunService {
     return Promise.resolve(this.store.get(id));
   }
 
-  async execute(id: string, scenario: ValidatedScenario, startedAt = this.now(), requestId?: string): Promise<void> {
+  async execute(id: string, scenario: ValidatedScenario, startedAt = this.hrNow(), requestId?: string): Promise<void> {
     const controller = new AbortController();
     let progressUpdates = Promise.resolve();
     let outcome: "passed" | "failed" = "failed";
@@ -203,7 +208,15 @@ export class RunService {
       });
       outcome = passed ? "passed" : "failed";
     } catch (error) {
-      await progressUpdates;
+      // Drain any queued progress writes independently of the execution error.
+      // A rejected progress chain must not prevent the terminal failure write
+      // below — handle it separately so we always persist the terminal state.
+      try {
+        await progressUpdates;
+      } catch {
+        // Progress-chain rejection is non-fatal for terminal persistence.
+        // The error is discarded; the run will be written as failed below.
+      }
       const current = await this.store.get(id);
       const steps = current?.steps ?? [];
       const assertions = current?.assertions ?? [];

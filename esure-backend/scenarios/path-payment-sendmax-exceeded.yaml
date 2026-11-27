@@ -1,0 +1,120 @@
+# Scenario: path-payment-sendmax-exceeded
+#
+# Strict-receive path payment where the caller's sendMax is insufficient to
+# cover the required source amount for the requested destination amount.
+# The route exists (EUR->XLM and USDC->EUR offers are present), but the
+# sendMax bound cannot be satisfied, so the operation must fail and the
+# destination balance must remain unchanged.
+#
+# This fixture is deterministic and intended to run against fakes. Live
+# network verification remains opt-in.
+#
+# Accounts:
+#   - sender:        funds the path payment
+#   - market-maker:  provides the EUR->XLM and USDC->EUR orderbook
+#   - recipient:     receives the destination asset (must stay at 0)
+#   - issuer:        issues eur and usdc, funds trustlines
+#
+# Assets:
+#   - xlm:  native
+#   - eur:  issued by issuer
+#   - usdc: issued by issuer
+
+accounts:
+  - id: sender
+    keypair: "sender"
+  - id: market-maker
+    keypair: "market-maker"
+  - id: recipient
+    keypair: "recipient"
+  - id: issuer
+    keypair: "issuer"
+
+assets:
+  - id: xlm
+    type: native
+  - id: eur
+    code: EUR
+    issuer: issuer
+  - id: usdc
+    code: USDC
+    issuer: issuer
+
+trustlines:
+  - account: sender
+    asset: eur
+  - account: sender
+    asset: usdc
+  - account: market-maker
+    asset: eur
+  - account: market-maker
+    asset: usdc
+  - account: recipient
+    asset: eur
+  - account: recipient
+    asset: usdc
+
+funding:
+  - account: issuer
+    asset: xlm
+    amount: "1000"
+  - account: sender
+    asset: xlm
+    amount: "100"
+  - account: market-maker
+    asset: xlm
+    amount: "100"
+  - account: market-maker
+    asset: eur
+    amount: "1000"
+  - account: market-maker
+    asset: usdc
+    amount: "1000"
+
+steps:
+  # Build the EUR->XLM orderbook: market-maker sells EUR for XLM at price 1.
+  - id: offer-eur-for-xlm
+    type: manageSellOffer
+    account: market-maker
+    selling: eur
+    buying: xlm
+    amount: "100"
+    price: "1"
+
+  # Build the USDC->EUR orderbook: market-maker sells USDC for EUR at price 1.
+  - id: offer-usdc-for-eur
+    type: manageSellOffer
+    account: market-maker
+    selling: usdc
+    buying: eur
+    amount: "100"
+    price: "1"
+
+  # Strict-receive path payment: recipient should receive 5 USDC via EUR.
+  # The route requires ~5 XLM at price 1, but sendMax is set to "1", which is
+  # strictly below the required source amount. The operation must fail with
+  # op_too_few_offers because the sendMax bound cannot be satisfied.
+  - id: pay-usdc-exceeding-sendmax
+    type: pathPaymentStrictReceive
+    account: sender
+    sendAsset: xlm
+    sendMax: "1"
+    destAsset: usdc
+    destAmount: "5"
+    destination: recipient
+    path:
+      - eur
+
+assertions:
+  # The failing step must report tx_failed with op_too_few_offers.
+  - type: stepFailedWith
+    step: pay-usdc-exceeding-sendmax
+    transactionCode: tx_failed
+    operationCodes:
+      - op_too_few_offers
+
+  # The destination balance must be unchanged (recipient received nothing).
+  - type: balanceEquals
+    account: recipient
+    asset: usdc
+    amount: "0"

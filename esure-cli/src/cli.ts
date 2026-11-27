@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 
-import { readFile as readFilePromises } from "node:fs/promises";
-import { readdirSync, statSync } from "node:fs";
+import { readFile as readFilePromises, writeFile as writeFilePromises } from "node:fs/promises";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 
-import { extname, resolve } from "node:path";
+import { dirname, extname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { createScenarioRegistry } from "@esure/backend/src/scenarios.js";
 import { StellarTestnetGateway } from "@esure/backend/src/stellar-gateway.js";
@@ -23,6 +24,13 @@ interface CliOptions {
   sort?: string;
   stdin?: boolean;
   format?: "json" | "yaml";
+  file?: string;
+  ascii?: boolean;
+  timeoutMs?: number;
+  failFast?: boolean;
+  targetFormat?: "json" | "yaml";
+  outputFile?: string;
+  overwrite?: boolean;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -68,17 +76,85 @@ Options:
 
 Examples:
   esure list
-  esure list --search payment --sort id --output json
-  esure show xlm-payment
+  esure list --search payment --sort id --output json`,
+  show: `Usage: esure show <scenario-id>
+
+Show a bundled scenario definition.
+
+Options:
+  --output <format>  Output format: human (default) or json
+
+Example:
+  esure show xlm-payment`,
+  validate: `Usage: esure validate <file>
+       esure validate --stdin --format <json|yaml>
+
+Validate a scenario file or a definition read from standard input.
+
+Options:
+  --stdin            Read the definition from standard input
+  --format <format>  Input format for standard input: json or yaml (required with --stdin)
+  --output <format>  Output format: human (default) or json
+
+Examples:
   esure validate ./my-scenario.yaml
   esure validate --stdin --format yaml
   esure run xlm-payment
   esure run ./my-scenario.yaml --output json
-  esure run xlm-payment --timeout-ms 30000
-  esure run-suite xlm-payment path-payment --fail-fast
+  esure run --file ./my-scenario.json --timeout-ms 30000`,
+  "run-suite": `Usage: esure run-suite <scenario-id> [<scenario-id>...]
 
-Documentation: https://github.com/Esureorg/Esure
-`);
+Run bundled scenarios sequentially on Stellar Testnet.
+
+Options:
+  --fail-fast         Stop after the first failed scenario
+  --timeout-ms <ms>   Overall timeout (1–600000; default 120000)
+  --ascii             Use ASCII progress markers
+  --output <format>   Output format: human (default) or json
+
+Example:
+  esure run-suite xlm-payment path-payment --fail-fast`,
+  completions: `Usage: esure completions <bash|zsh>
+
+Print shell completions for bash or zsh.
+
+Example:
+  esure completions bash`,
+  doctor: `Usage: esure doctor
+
+Check local CLI prerequisites and Testnet service availability.
+
+Options:
+  --output <format>  Output format: human (default) or json
+
+Example:
+  esure doctor`,
+};
+
+function showHelp(command?: string): void {
+  if (command) {
+    console.log(HELP_TEXT[command] ?? `Usage: esure ${command} --help`);
+    return;
+  }
+  console.log(`esure - Stellar Testnet scenario testing toolkit
+
+Usage: esure <command> [options]
+
+Commands:
+  list                 List bundled scenarios
+  show                 Show a bundled scenario definition
+  validate             Validate a scenario file or standard input
+  validate-directory   Validate scenario files in a directory
+  plan                 Inspect a local execution plan without running it
+  format               Convert a validated scenario between JSON and YAML
+  report               Compare exported run reports
+  run                  Run one bundled scenario or file
+  run-suite            Run bundled scenarios sequentially
+  completions          Print bash or zsh completions
+  doctor               Check local prerequisites and Testnet connectivity
+
+Use "esure <command> --help" for command-specific options and examples.
+Global options: --help, --version`);
 }
 
 function showVersion(): void {
@@ -97,6 +173,13 @@ function parseCliArgs(): { command?: string; args: string[]; options: CliOptions
       sort: { type: "string" },
       stdin: { type: "boolean" },
       format: { type: "string" },
+      file: { type: "string" },
+      ascii: { type: "boolean" },
+      "timeout-ms": { type: "string" },
+      "fail-fast": { type: "boolean" },
+      to: { type: "string" },
+      "output-file": { type: "string" },
+      overwrite: { type: "boolean" },
     },
     allowPositionals: true,
     strict: false,
@@ -115,8 +198,14 @@ function parseCliArgs(): { command?: string; args: string[]; options: CliOptions
       sort: typeof values.sort === "string" ? values.sort : undefined,
       stdin: Boolean(values.stdin),
       format: values.format === "json" || values.format === "yaml" ? values.format : undefined,
+      file: typeof values.file === "string" ? values.file : undefined,
+      ascii: Boolean(values.ascii),
+      timeoutMs: typeof values["timeout-ms"] === "string" ? Number(values["timeout-ms"]) : undefined,
+      failFast: Boolean(values["fail-fast"]),
+      targetFormat: values.to === "json" || values.to === "yaml" ? values.to : undefined,
+      outputFile: typeof values["output-file"] === "string" ? values["output-file"] : undefined,
+      overwrite: Boolean(values.overwrite),
     },
-    failFast: Boolean(values["fail-fast"]),
   };
 }
 
@@ -136,7 +225,14 @@ async function loadScenarioFile(filePath: string): Promise<ValidatedScenario> {
   }
 
   const absolutePath = resolve(filePath);
+  if (statSync(absolutePath).size > SCENARIO_LIMITS.definitionBytes) {
+    throw new ScenarioValidationError([
+      `definition exceeds ${SCENARIO_LIMITS.definitionBytes} bytes`,
+    ]);
+  }
   const content = await readFilePromises(absolutePath, "utf-8");
+  return parseScenario(content, format);
+}
 
   let format: ScenarioInputFormat;
   if (filePath.endsWith(".json")) {
@@ -240,6 +336,209 @@ async function validateFileCommand(filePath: string, options: CliOptions): Promi
     return 0;
   } catch (error) {
     renderValidationError(error, options);
+    return 1;
+  }
+}
+
+async function formatCommand(inputPath: string, options: CliOptions): Promise<number> {
+  try {
+    if (!options.targetFormat) {
+      throw new Error('Missing required --to option. Choose "json" or "yaml".');
+    }
+    if (options.outputFile !== undefined && !options.outputFile.trim()) {
+      throw new Error("Missing output file path for --output-file.");
+    }
+    if (options.overwrite && options.outputFile === undefined) {
+      throw new Error("--overwrite requires --output-file.");
+    }
+    const { contentHash: _contentHash, ...definition } = await loadScenarioFile(inputPath);
+    const formatted = options.targetFormat === "json"
+      ? `${JSON.stringify(definition, null, 2)}\n`
+      : stringifyYaml(definition, { lineWidth: 0 });
+
+    if (Buffer.byteLength(formatted, "utf8") > SCENARIO_LIMITS.definitionBytes) {
+      throw new ScenarioValidationError([
+        `formatted definition exceeds ${SCENARIO_LIMITS.definitionBytes} bytes`,
+      ]);
+    }
+
+    if (!options.outputFile) {
+      console.log(formatted.trimEnd());
+      return 0;
+    }
+
+    await writeFilePromises(options.outputFile, formatted, {
+      encoding: "utf8",
+      flag: options.overwrite ? "w" : "wx",
+    });
+    return 0;
+  } catch (error) {
+    const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
+    const message = code === "EEXIST" && options.outputFile
+      ? `Scenario file "${options.outputFile}" already exists. Use --overwrite to replace it.`
+      : error instanceof Error ? error.message : String(error);
+    if (options.output === "json") {
+      console.error(JSON.stringify({ error: { message } }));
+    } else {
+      console.error(`Error: ${message}`);
+    }
+    return 1;
+  }
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+      .map(([key, item]) => `${JSON.stringify(key)}:${stableJson(item)}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "undefined";
+}
+
+interface EvidenceChanges {
+  added: { index: number; value: unknown }[];
+  removed: { index: number; value: unknown }[];
+  changed: { index: number; before: unknown; after: unknown }[];
+}
+
+function compareEvidence(left: unknown[], right: unknown[]): EvidenceChanges {
+  const changes: EvidenceChanges = { added: [], removed: [], changed: [] };
+  const sharedLength = Math.min(left.length, right.length);
+  for (let index = 0; index < sharedLength; index++) {
+    if (stableJson(left[index]) !== stableJson(right[index])) {
+      changes.changed.push({ index, before: left[index], after: right[index] });
+    }
+  }
+  for (let index = sharedLength; index < right.length; index++) {
+    changes.added.push({ index, value: right[index] });
+  }
+  for (let index = sharedLength; index < left.length; index++) {
+    changes.removed.push({ index, value: left[index] });
+  }
+  return changes;
+}
+
+function reportProvenance(report: RunReport) {
+  return {
+    id: report.id,
+    scenarioId: report.scenarioId,
+    scenarioVersion: report.scenarioVersion,
+    scenarioSchemaVersion: report.scenarioSchemaVersion,
+    scenarioContentHash: report.scenarioContentHash,
+    network: report.network,
+    createdAt: report.createdAt,
+    completedAt: report.completedAt,
+    expiresAt: report.expiresAt,
+  };
+}
+
+function compareRunReports(left: RunReport, right: RunReport) {
+  const leftProvenance = reportProvenance(left);
+  const rightProvenance = reportProvenance(right);
+  const provenance = {
+    same: stableJson(leftProvenance) === stableJson(rightProvenance),
+    left: leftProvenance,
+    right: rightProvenance,
+  };
+  const status = { same: left.status === right.status, left: left.status, right: right.status };
+  const evidence = {
+    steps: compareEvidence(left.steps, right.steps),
+    assertions: compareEvidence(left.assertions, right.assertions),
+    summary: {
+      same: stableJson(left.summary) === stableJson(right.summary),
+      left: left.summary,
+      right: right.summary,
+    },
+    error: {
+      same: stableJson(left.error ?? null) === stableJson(right.error ?? null),
+      left: left.error ?? null,
+      right: right.error ?? null,
+    },
+  };
+  const equal = provenance.same && status.same &&
+    evidence.steps.added.length === 0 && evidence.steps.removed.length === 0 && evidence.steps.changed.length === 0 &&
+    evidence.assertions.added.length === 0 && evidence.assertions.removed.length === 0 && evidence.assertions.changed.length === 0 &&
+    evidence.summary.same && evidence.error.same;
+  return { equal, exitCode: equal ? 0 : 2, provenance, status, evidence };
+}
+
+async function readRunReport(filePath: string): Promise<RunReport> {
+  if (extname(filePath).toLowerCase() !== ".json") {
+    throw new Error(`Run report file "${filePath}" must have a .json extension.`);
+  }
+  const absolutePath = resolve(filePath);
+  if (statSync(absolutePath).size > MAX_REPORT_FILE_BYTES) {
+    throw new Error(`Run report file exceeds the maximum size of ${MAX_REPORT_FILE_BYTES} bytes.`);
+  }
+  const source = await readFilePromises(absolutePath, "utf-8");
+  if (Buffer.byteLength(source, "utf8") > MAX_REPORT_FILE_BYTES) {
+    throw new Error(`Run report file exceeds the maximum size of ${MAX_REPORT_FILE_BYTES} bytes.`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(source);
+  } catch {
+    throw new Error(`Run report file "${filePath}" contains invalid JSON.`);
+  }
+  try {
+    return validateRunReport(parsed);
+  } catch (error) {
+    if (error instanceof RunReportValidationError) {
+      throw new Error(`Run report file "${filePath}" is invalid: ${error.issues.join("; ")}`);
+    }
+    throw error;
+  }
+}
+
+async function compareReportsCommand(leftPath: string, rightPath: string, options: CliOptions): Promise<number> {
+  try {
+    const [left, right] = await Promise.all([readRunReport(leftPath), readRunReport(rightPath)]);
+    const comparison = compareRunReports(left, right);
+    if (options.output === "json") {
+      console.log(JSON.stringify(comparison, null, 2));
+    } else {
+      console.log(`Report comparison: ${comparison.equal ? "EQUAL" : "DIFFERENT"}`);
+      console.log(`Run IDs: ${comparison.provenance.left.id} -> ${comparison.provenance.right.id}`);
+      console.log(`Scenarios: ${comparison.provenance.left.scenarioId} v${comparison.provenance.left.scenarioVersion} -> ${comparison.provenance.right.scenarioId} v${comparison.provenance.right.scenarioVersion}`);
+      console.log(`Scenario hashes: ${comparison.provenance.left.scenarioContentHash} -> ${comparison.provenance.right.scenarioContentHash}`);
+      console.log(`Network: ${comparison.provenance.left.network} -> ${comparison.provenance.right.network}`);
+      console.log(`Created: ${comparison.provenance.left.createdAt} -> ${comparison.provenance.right.createdAt}`);
+      console.log(`Completed: ${comparison.provenance.left.completedAt ?? "(none)"} -> ${comparison.provenance.right.completedAt ?? "(none)"}`);
+      console.log(`Expires: ${comparison.provenance.left.expiresAt ?? "(none)"} -> ${comparison.provenance.right.expiresAt ?? "(none)"}`);
+      console.log(`Provenance: ${comparison.provenance.same ? "equal" : "different"}`);
+      console.log(`Status: ${comparison.status.left} -> ${comparison.status.right}${comparison.status.same ? " (equal)" : " (different)"}`);
+      console.log(`Steps: ${comparison.evidence.steps.changed.length} changed, ${comparison.evidence.steps.added.length} added, ${comparison.evidence.steps.removed.length} removed`);
+      for (const change of comparison.evidence.steps.changed) {
+        console.log(`  step ${change.index + 1}: ${stableJson(change.before)} -> ${stableJson(change.after)}`);
+      }
+      for (const change of comparison.evidence.steps.added) {
+        console.log(`  step ${change.index + 1} added: ${stableJson(change.value)}`);
+      }
+      for (const change of comparison.evidence.steps.removed) {
+        console.log(`  step ${change.index + 1} removed: ${stableJson(change.value)}`);
+      }
+      console.log(`Assertions: ${comparison.evidence.assertions.changed.length} changed, ${comparison.evidence.assertions.added.length} added, ${comparison.evidence.assertions.removed.length} removed`);
+      for (const change of comparison.evidence.assertions.changed) {
+        console.log(`  assertion ${change.index + 1}: ${stableJson(change.before)} -> ${stableJson(change.after)}`);
+      }
+      for (const change of comparison.evidence.assertions.added) {
+        console.log(`  assertion ${change.index + 1} added: ${stableJson(change.value)}`);
+      }
+      for (const change of comparison.evidence.assertions.removed) {
+        console.log(`  assertion ${change.index + 1} removed: ${stableJson(change.value)}`);
+      }
+      console.log(`Summary: ${stableJson(comparison.evidence.summary.left)} -> ${stableJson(comparison.evidence.summary.right)}`);
+      console.log(`Error evidence: ${stableJson(comparison.evidence.error.left)} -> ${stableJson(comparison.evidence.error.right)}`);
+    }
+    return comparison.exitCode;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (options.output === "json") {
+      console.error(JSON.stringify({ error: { message } }));
+    } else {
+      console.error(`Error: ${message}`);
+    }
     return 1;
   }
 }
@@ -715,6 +1014,9 @@ async function runSuiteCommand(
 const COMPLETION_COMMANDS = [
   "list",
   "validate",
+  "format",
+  "plan",
+  "report",
   "init",
   "run",
   "run-suite",
@@ -731,6 +1033,8 @@ const COMPLETION_OPTIONS = [
   "--junit",
   "--overwrite",
   "--fail-fast",
+  "--to",
+  "--output-file",
 ];
 
 function generateCompletions(shell: "bash" | "zsh"): string {
@@ -812,8 +1116,8 @@ export async function main(): Promise<number> {
   }
 
   if (options.help || !command) {
-    showHelp();
-    return command ? 0 : 1;
+    showHelp(command);
+    return 0;
   }
 
   if ((options.stdin || options.format !== undefined) && command !== "validate") {
@@ -836,6 +1140,26 @@ export async function main(): Promise<number> {
         return 1;
       }
       return showCommand(args[0], options);
+    case "plan":
+      if (args.length !== 1) {
+        console.error("Error: Expected one bundled scenario ID or file path");
+        console.error("Usage: esure plan <scenario-id|file>");
+        return 1;
+      }
+      return planCommand(args[0], options);
+    case "format":
+      if (args.length !== 1) {
+        console.error("Error: Expected one input scenario file");
+        console.error("Usage: esure format <input-file> --to <json|yaml> [--output-file <path>] [--overwrite]");
+        return 1;
+      }
+      return formatCommand(args[0], options);
+    case "report":
+      if (args[0] !== "compare" || args.length !== 3) {
+        console.error("Usage: esure report compare <left.json> <right.json> [--output <human|json>]");
+        return 1;
+      }
+      return compareReportsCommand(args[1], args[2], options);
     case "validate":
       if (options.stdin) {
         if (args.length > 0) {
@@ -901,7 +1225,7 @@ export async function main(): Promise<number> {
         );
         return 1;
       }
-      return runSuiteCommand(args, options, failFast);
+      return runSuiteCommand(args, options, options.failFast ?? false);
     case "completions":
       if (args.length === 0) {
         console.error('Error: Missing shell argument');
