@@ -118,6 +118,7 @@ export function Dashboard() {
   const [previewScenario, setPreviewScenario] = useState<ScenarioDetail | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
+  const [previewExpandedSection, setPreviewExpandedSection] = useState<"steps" | "assertions" | null>(null);
   const previewAbortRef = useRef<AbortController | null>(null);
 
   // #39 — Rate-limit countdown (seconds remaining before retry is allowed)
@@ -805,6 +806,55 @@ export function Dashboard() {
                   <div><dt>Assertions</dt><dd>{previewScenario.assertions.length}</dd></div>
                 </dl>
                 <p className="preview-description">{previewScenario.description}</p>
+
+                {previewScenario.steps.length > 0 && (
+                  <div className="preview-section">
+                    <button
+                      type="button"
+                      className={`preview-section-toggle ${previewExpandedSection === "steps" ? "expanded" : ""}`}
+                      aria-expanded={previewExpandedSection === "steps"}
+                      onClick={() => setPreviewExpandedSection(previewExpandedSection === "steps" ? null : "steps")}
+                    >
+                      <span>Steps</span>
+                      <span className="toggle-icon">›</span>
+                    </button>
+                    {previewExpandedSection === "steps" && (
+                      <ul className="preview-items">
+                        {previewScenario.steps.map((step, idx) => (
+                          <li key={idx} className="preview-item">
+                            <span className="item-type">{step.type}</span>
+                            {step.id && <span className="item-id">{step.id}</span>}
+                            <code className="item-data">{JSON.stringify(step, null, 2)}</code>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )}
+
+                {previewScenario.assertions.length > 0 && (
+                  <div className="preview-section">
+                    <button
+                      type="button"
+                      className={`preview-section-toggle ${previewExpandedSection === "assertions" ? "expanded" : ""}`}
+                      aria-expanded={previewExpandedSection === "assertions"}
+                      onClick={() => setPreviewExpandedSection(previewExpandedSection === "assertions" ? null : "assertions")}
+                    >
+                      <span>Assertions</span>
+                      <span className="toggle-icon">›</span>
+                    </button>
+                    {previewExpandedSection === "assertions" && (
+                      <ul className="preview-items">
+                        {previewScenario.assertions.map((assertion, idx) => (
+                          <li key={idx} className="preview-item">
+                            <span className="item-type">{assertion.type}</span>
+                            <code className="item-data">{JSON.stringify(assertion, null, 2)}</code>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )}
               </div>
             )}
           </div>

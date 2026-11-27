@@ -32,7 +32,7 @@ import { PersistenceCoordinator } from "./persistence.js";
 import { ScenarioIntegrityError } from "./published-scenarios.js";
 import { IdempotencyStore } from "./idempotency-store.js";
 
-interface BuildAppOptions { config: AppConfig; ledger?: LedgerGateway; logger?: boolean; runLogger?: RunLifecycleLogger; clock?: () => number; }
+interface BuildAppOptions { config: AppConfig; ledger?: LedgerGateway; logger?: boolean | { level: string }; runLogger?: RunLifecycleLogger; clock?: () => number; }
 
 const runBodySchema = {
   type: "object", additionalProperties: false, required: ["scenarioId"],
