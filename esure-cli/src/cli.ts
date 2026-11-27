@@ -6,65 +6,18 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { validateScenarioDefinition } from "@esure/backend/src/scenario-schema.js";
-import { SCENARIO_LIMITS, ScenarioValidationError } from "@esure/backend/src/scenario-schema.js";
-import { validateRunReport, RunReportValidationError } from "@esure/backend/src/report-schema.js";
-import { parseScenario, prepareScenario, contentHash } from "@esure/backend/src/scenario-loader.js";
 import { createScenarioRegistry } from "@esure/backend/src/scenarios.js";
 import { StellarTestnetGateway } from "@esure/backend/src/stellar-gateway.js";
-import { SafeRunError } from "@esure/backend/src/errors.js";
-import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import type { ValidatedScenario } from "@esure/backend/src/domain.js";
-import type { LedgerExecution, LedgerExecutionOptions, RunReport } from "@esure/backend/src/domain.js";
-
-// Re-export extracted modules so existing test imports remain stable.
-export { escapeXml, generateJunitXml, writeArtifactFile } from "./serializers.js";
-export type { JunitRunInput } from "./serializers.js";
-export { parseCliArgs, DEFAULT_CLI_TIMEOUT_MS, MIN_CLI_TIMEOUT_MS, MAX_CLI_TIMEOUT_MS } from "./args.js";
-export type { ParsedArgs, CommonOptions, RunOptions, OutputFormat } from "./args.js";
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Version resolution (#57)
-// ─────────────────────────────────────────────────────────────────────────────
-
-export function resolveVersion(): string {
-  try {
-    let dir = dirname(fileURLToPath(import.meta.url));
-    for (let i = 0; i < 4; i++) {
-      const candidate = join(dir, "package.json");
-      if (existsSync(candidate)) {
-        try {
-          const pkg = JSON.parse(readFileSync(candidate, "utf8"));
-          if (pkg.name === "@esure/cli" && typeof pkg.version === "string") {
-            return pkg.version;
-          }
-        } catch {
-          // ignore JSON parse error and keep walking up
-        }
-      }
-      const parent = dirname(dir);
-      if (parent === dir) break;
-      dir = parent;
-    }
-  } catch {
-    // fallback if import.meta.url is unavailable
-  }
-  return "0.1.0";
-}
-
-const VERSION = resolveVersion();
-const BUNDLED_SCENARIO_DIR_TIMEOUT_MS = 30_000;
-const MAX_REPORT_FILE_BYTES = 5 * 1024 * 1024;
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Shared types
-// ─────────────────────────────────────────────────────────────────────────────
+import { loadScenarioStdin, parseScenarioContent, type ScenarioInputFormat } from "./scenario-input.js";
 
 const supportedExtensions = new Set([".json", ".yaml", ".yml"]);
 const maxFilesPerDirectory = 100;
 
 interface CliOptions {
   output?: "human" | "json";
+  stdin?: boolean;
+  format?: string;
   help?: boolean;
   version?: boolean;
   search?: string;
@@ -103,15 +56,23 @@ function reportArgumentError(
 // Help & version
 // ─────────────────────────────────────────────────────────────────────────────
 
-const HELP_TEXT: Record<string, string> = {
-  list: `Usage: esure list
+function showHelp(): void {
+  console.log(`
+esure - Stellar Testnet scenario testing toolkit
 
-List bundled scenarios.
+Usage:
+  esure list                              List bundled scenarios
+  esure validate <file>                   Validate a scenario file
+  esure validate --stdin --format <format> Validate a scenario from standard input
+  esure run <scenario-id>                 Run a bundled scenario
+  esure run <file>                        Run a scenario from file
 
 Options:
-  --search <term>    Filter by scenario ID, name, or description
-  --sort id          Sort results by ID
-  --output <format>  Output format: human (default) or json
+  --output <format>   Output format: human (default) or json
+  --stdin             Read a scenario from standard input (validate only)
+  --format <format>   Standard input format: json or yaml
+  --help              Show this help message
+  --version           Show version information
 
 Examples:
   esure list
@@ -137,64 +98,7 @@ Options:
 
 Examples:
   esure validate ./my-scenario.yaml
-  cat ./my-scenario.json | esure validate --stdin --format json`,
-  "validate-directory": `Usage: esure validate-directory <directory>
-
-Validate supported scenario files in a directory.
-
-Options:
-  --output <format>  Output format: human (default) or json
-
-Example:
-  esure validate-directory ./scenarios`,
-  plan: `Usage: esure plan <scenario-id|file>
-
-Show the local execution plan for a bundled scenario or scenario file. Planning
-validates and inspects the scenario without sending network requests.
-
-Options:
-  --output <format>  Output format: human (default) or json
-
-Examples:
-  esure plan xlm-payment
-  esure plan ./my-scenario.yaml --output json`,
-  format: `Usage: esure format <input-file> --to <json|yaml> [--output-file <path>] [--overwrite]
-
-Validate a scenario definition and convert it to JSON or YAML. Writes to stdout
-unless --output-file is provided. Existing files require --overwrite.
-
-Options:
-  --to <format>          Target format: json or yaml
-  --output-file <path>   Write the converted definition to a file
-  --overwrite            Replace the output file if it already exists
-
-Examples:
-  esure format ./scenario.json --to yaml
-  esure format ./scenario.yaml --to json --output-file ./scenario.json`,
-  report: `Usage: esure report compare <left.json> <right.json> [--output <human|json>]
-
-Validate and compare two exported run reports offline.
-
-Exit codes:
-  0  Reports are equal
-  1  A report is invalid or cannot be read
-  2  Reports are valid but differ
-
-Example:
-  esure report compare before.json after.json --output json`,
-  run: `Usage: esure run <scenario-id>
-       esure run <file>
-       esure run --file <file>
-
-Run a bundled scenario or a local scenario file on Stellar Testnet.
-
-Options:
-  --file <path>       Treat the target as a local file
-  --timeout-ms <ms>   Overall run timeout (1–600000; default 120000)
-  --ascii             Use ASCII progress markers
-  --output <format>   Output format: human (default) or json
-
-Examples:
+  esure validate --stdin --format yaml
   esure run xlm-payment
   esure run ./my-scenario.yaml --output json
   esure run --file ./my-scenario.json --timeout-ms 30000`,
@@ -261,6 +165,8 @@ function parseCliArgs(): { command?: string; args: string[]; options: CliOptions
   const { values, positionals } = parseArgs({
     options: {
       output: { type: "string" },
+      stdin: { type: "boolean" },
+      format: { type: "string" },
       help: { type: "boolean", short: "h" },
       version: { type: "boolean", short: "v" },
       search: { type: "string" },
@@ -283,7 +189,9 @@ function parseCliArgs(): { command?: string; args: string[]; options: CliOptions
     command: positionals[0],
     args: positionals.slice(1),
     options: {
-      output: values.output === "json" ? "json" : values.output === "human" ? "human" : undefined,
+      output: values.output === "json" ? "json" : "human",
+      stdin: Boolean(values.stdin),
+      format: typeof values.format === "string" ? values.format : undefined,
       help: Boolean(values.help),
       version: Boolean(values.version),
       search: typeof values.search === "string" ? values.search : undefined,
@@ -326,174 +234,11 @@ async function loadScenarioFile(filePath: string): Promise<ValidatedScenario> {
   return parseScenario(content, format);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Execution helpers
-// ─────────────────────────────────────────────────────────────────────────────
-
-/** Build a LedgerExecutionOptions object that prints progress in human mode (#66). */
-function buildExecutionOptions(
-  options: CliOptions,
-  signal?: AbortSignal,
-): LedgerExecutionOptions {
-  const execOptions: LedgerExecutionOptions = {
-    stepTimeoutMs: BUNDLED_SCENARIO_DIR_TIMEOUT_MS,
-    signal,
-  };
-  if (options.output === "human") {
-    const m = markers(options.ascii ?? false);
-    execOptions.onStep = (step) => {
-      console.log(`  ${statusMarker(step.status, m)} step  ${step.id}: ${step.message}`);
-    };
-    execOptions.onAssertion = (assertion) => {
-      console.log(
-        `  ${statusMarker(assertion.status, m)} check ${assertion.type}: ${assertion.message}`,
-      );
-    };
-  }
-  return execOptions;
-}
-
-interface ExecutionPlan {
-  scenarioId: string;
-  fundedAccountCount: number;
-  operations: { order: number; id: string; type: string; subject: string }[];
-  assertions: { order: number; type: string; subject: string }[];
-}
-
-function planSubject(value: object): string {
-  const fields = value as Record<string, unknown>;
-  if (typeof fields.from === "string" && typeof fields.to === "string") {
-    return `${fields.from} -> ${fields.to}`;
-  }
-  if (
-    typeof fields.account === "string" &&
-    typeof fields.sellingAsset === "string" &&
-    typeof fields.buyingAsset === "string"
-  ) {
-    return `${fields.account}: ${fields.sellingAsset} -> ${fields.buyingAsset}`;
-  }
-  if (typeof fields.account === "string" && typeof fields.asset === "string") {
-    return `${fields.account} / ${fields.asset}`;
-  }
-  if (typeof fields.account === "string") return fields.account;
-  if (typeof fields.step === "string") return `step ${fields.step}`;
-  return "scenario";
-}
-
-function createExecutionPlan(scenario: ValidatedScenario): ExecutionPlan {
-  return {
-    scenarioId: scenario.id,
-    fundedAccountCount: scenario.accounts.filter((account) => account.fund).length,
-    operations: scenario.steps.map((step, index) => ({
-      order: index + 1,
-      id: step.id,
-      type: step.type,
-      subject: planSubject(step),
-    })),
-    assertions: scenario.assertions.map((assertion, index) => ({
-      order: index + 1,
-      type: assertion.type,
-      subject: planSubject(assertion),
-    })),
-  };
-}
-
-async function loadPlanScenario(target: string): Promise<ValidatedScenario> {
-  const ext = extname(target).toLowerCase();
-  if (ext === ".json" || ext === ".yaml" || ext === ".yml") {
-    const absolutePath = resolve(target);
-    const size = statSync(absolutePath).size;
-    if (size > SCENARIO_LIMITS.definitionBytes) {
-      throw new ScenarioValidationError([
-        `definition exceeds ${SCENARIO_LIMITS.definitionBytes} bytes`,
-      ]);
-    }
-    const content = await readFilePromises(absolutePath, "utf-8");
-    return parseScenario(content, ext === ".json" ? "json" : "yaml");
-  }
-
-  const bundled = createScenarioRegistry().find(target);
-  if (!bundled) {
-    throw new Error(`Scenario "${target}" not found. Use a bundled scenario ID or a .json, .yaml, or .yml file.`);
-  }
-  return bundled;
-}
-
-async function planCommand(target: string, options: CliOptions): Promise<number> {
-  try {
-    const plan = createExecutionPlan(await loadPlanScenario(target));
-    if (options.output === "json") {
-      console.log(JSON.stringify(plan, null, 2));
-    } else {
-      console.log(`Execution plan: ${plan.scenarioId}`);
-      console.log(`Funded accounts: ${plan.fundedAccountCount}`);
-      console.log("Operations:");
-      if (plan.operations.length === 0) console.log("  (none)");
-      for (const operation of plan.operations) {
-        console.log(`  ${operation.order}. ${operation.id} (${operation.type}) — ${operation.subject}`);
-      }
-      console.log("Assertions:");
-      if (plan.assertions.length === 0) console.log("  (none)");
-      for (const assertion of plan.assertions) {
-        console.log(`  ${assertion.order}. ${assertion.type} — ${assertion.subject}`);
-      }
-    }
-    return 0;
-  } catch (error) {
-    if (options.output === "json") {
-      console.error(JSON.stringify({ error: { message: error instanceof Error ? error.message : String(error) } }));
-    } else {
-      console.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
-    }
-    return 1;
-  }
-}
-
-function buildRunReport(
-  scenario: ValidatedScenario,
-  execution: LedgerExecution,
-): {
-  scenarioId: string;
-  scenarioVersion: number;
-  status: "passed" | "failed";
-  steps: LedgerExecution["steps"];
-  assertions: LedgerExecution["assertions"];
-  summary: {
-    stepsPassed: number;
-    stepsFailed: number;
-    assertionsPassed: number;
-    assertionsFailed: number;
-  };
-} {
-  const passed =
-    execution.steps.every((s) => s.status === "passed") &&
-    execution.assertions.every((a) => a.status === "passed");
-  const stepsPassed = execution.steps.filter((s) => s.status === "passed").length;
-  const assertionsPassed = execution.assertions.filter((a) => a.status === "passed").length;
-  return {
-    scenarioId: scenario.id,
-    scenarioVersion: scenario.version,
-    status: passed ? "passed" : "failed",
-    steps: execution.steps,
-    assertions: execution.assertions,
-    summary: {
-      stepsPassed,
-      stepsFailed: execution.steps.length - stepsPassed,
-      assertionsPassed,
-      assertionsFailed: execution.assertions.length - assertionsPassed,
-    },
-  };
-}
-
-function renderValidationSuccess(scenario: ValidatedScenario, options: CliOptions): void {
-  if (options.output === "json") {
-    console.log(JSON.stringify({
-      valid: true,
-      scenarioId: scenario.id,
-      version: scenario.version,
-      schemaVersion: scenario.schemaVersion,
-      contentHash: scenario.contentHash,
-    }, null, 2));
+  let format: ScenarioInputFormat;
+  if (filePath.endsWith(".json")) {
+    format = "json";
+  } else if (filePath.endsWith(".yaml") || filePath.endsWith(".yml")) {
+    format = "yaml";
   } else {
     console.log(`✓ Scenario is valid`);
     console.log(`  ID: ${scenario.id}`);
@@ -502,28 +247,7 @@ function renderValidationSuccess(scenario: ValidatedScenario, options: CliOption
     console.log(`  Schema: v${scenario.schemaVersion}`);
     console.log(`  Hash: ${scenario.contentHash}`);
   }
-}
-
-function renderValidationError(error: unknown, options: CliOptions): void {
-  if (options.output === "json") {
-    const errorObj: { message: string; issues?: string[] } = {
-      message: error instanceof Error ? error.message : String(error),
-    };
-    if (error && typeof error === "object" && "issues" in error && Array.isArray(error.issues)) {
-      errorObj.issues = error.issues as string[];
-    }
-    console.error(JSON.stringify({
-      valid: false,
-      error: errorObj,
-    }, null, 2));
-  } else {
-    console.error(`✗ Validation failed: ${error instanceof Error ? error.message : String(error)}`);
-    if (error && typeof error === "object" && "issues" in error && Array.isArray(error.issues)) {
-      for (const issue of error.issues) {
-        console.error(`  - ${issue}`);
-      }
-    }
-  }
+  return parseScenarioContent(content, format);
 }
 
 async function listCommand(options: CliOptions): Promise<number> {
@@ -580,29 +304,9 @@ async function listCommand(options: CliOptions): Promise<number> {
   }
 }
 
-async function showCommand(scenarioId: string, options: CliOptions): Promise<number> {
+async function validateCommand(loadScenario: () => Promise<ValidatedScenario>, options: CliOptions): Promise<number> {
   try {
-    const registry = createScenarioRegistry();
-    const found = registry.find(scenarioId);
-    if (!found) {
-      throw new Error(`Bundled scenario "${scenarioId}" not found. Run "esure list" to see available scenarios.`);
-    }
-
-    const payload = {
-      id: found.id,
-      version: found.version,
-      name: found.name,
-      description: found.description,
-      contentHash: found.contentHash,
-      definition: {
-        schemaVersion: found.schemaVersion,
-        network: found.network,
-        accounts: found.accounts,
-        assets: found.assets,
-        steps: found.steps,
-        assertions: found.assertions,
-      },
-    };
+    const scenario = await loadScenario();
 
     if (options.output === "json") {
       console.log(JSON.stringify(payload, null, 2));
@@ -1416,6 +1120,11 @@ export async function main(): Promise<number> {
     return 0;
   }
 
+  if ((options.stdin || options.format !== undefined) && command !== "validate") {
+    console.error("Error: --stdin and --format are only supported by validate");
+    return 1;
+  }
+
   switch (command) {
     case "list":
       if (args.length > 0) {
@@ -1453,21 +1162,32 @@ export async function main(): Promise<number> {
       return compareReportsCommand(args[1], args[2], options);
     case "validate":
       if (options.stdin) {
-        return validateStdinCommand(options);
+        if (args.length > 0) {
+          console.error("Error: Do not provide a file path when using --stdin");
+          console.error("Usage: esure validate --stdin --format <json|yaml>");
+          return 1;
+        }
+        const format = options.format;
+        if (format !== "json" && format !== "yaml") {
+          console.error("Error: --stdin requires --format json or --format yaml");
+          return 1;
+        }
+        return validateCommand(() => loadScenarioStdin(format), options);
+      }
+      if (options.format !== undefined) {
+        console.error("Error: --format can only be used with --stdin");
+        return 1;
       }
       if (args.length === 0) {
         console.error("Error: Missing file path argument");
         console.error("Usage: esure validate <file> or esure validate --stdin --format <json|yaml>");
         return 1;
       }
-      return validateFileCommand(args[0], options);
-    case "validate-directory":
-      if (args.length === 0) {
-        console.error("Error: Missing directory path");
-        console.error('Usage: esure validate-directory <directory>');
+      if (args.length > 1) {
+        console.error("Error: Provide only one scenario file");
         return 1;
       }
-      return validateDirectoryCommand(args[0], options);
+      return validateCommand(() => loadScenarioFile(args[0]), options);
     case "run":
       if (options.file !== undefined && args.length > 0) {
         console.error("Error: Cannot specify both --file and a positional target");

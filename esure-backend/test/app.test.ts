@@ -17,7 +17,6 @@ const config: AppConfig = {
   runTimeoutMs: 5_000,
   stepTimeoutMs: 1_000,
   maxConcurrentRuns: 2,
-  metricsEnabled: false,
   maxConcurrentFriendbotRequests: 5,
   maxStoredRuns: 100,
   runRetentionMs: 60_000,

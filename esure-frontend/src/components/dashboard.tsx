@@ -2,63 +2,30 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
-import { ApiError, downloadReport, getRun, listScenarios, startRun, type JsonValue, type ReportComparison, type RunReport, type ScenarioSummary } from "@/lib/api";
-import { ApiError, RateLimitError, getRun, getScenario, listScenarios, startRun, type JsonValue, type RunReport, type ScenarioDetail, type ScenarioSummary } from "@/lib/api";
+import { ApiError, getRun, listScenarios, startRun, type RunReport, type ScenarioSummary } from "@/lib/api";
+import { readFavorites, writeFavorites } from "@/lib/favorites";
 
 import { parseFavorites } from "@/lib/favorites";
 
 const terminalStatuses = new Set(["passed", "failed"]);
 
-export type ScenarioFilter = "all" | "xlm" | "issued-asset" | "expected-failure";
-export type SortOrder = "name-asc" | "name-desc" | "id-asc";
-export type ReportFilter = "all" | "failed";
-
-const FAVORITES_STORAGE_KEY = "esure:favorite-scenarios";
-
-function getFavorites(): Set<string> {
-  try {
-    // Validated: valid JSON of the wrong shape must not become favorites (#188).
-    return parseFavorites(localStorage.getItem(FAVORITES_STORAGE_KEY));
-  } catch {
-    return new Set();
-  }
-}
-
-function saveFavorites(favorites: Set<string>): void {
-  try {
-    localStorage.setItem(FAVORITES_STORAGE_KEY, JSON.stringify(Array.from(favorites)));
-  } catch {
-    // ignore storage errors
-  }
-}
+export type ScenarioFilter = "all" | "xlm" | "issued-asset" | "expected-failure" | "favorites";
 
 export const FILTER_OPTIONS: { key: ScenarioFilter; label: string }[] = [
   { key: "all", label: "All" },
   { key: "xlm", label: "XLM" },
   { key: "issued-asset", label: "Issued Asset" },
   { key: "expected-failure", label: "Expected Failure" },
+  { key: "favorites", label: "Favorites" },
 ];
 
-
-export type ReportFilter = "all" | "failed";
-
-export const REPORT_FILTER_OPTIONS: { key: ReportFilter; label: string }[] = [
-  { key: "all", label: "All" },
-  { key: "failed", label: "Failed" },
-];
-
-export const SORT_OPTIONS: { key: SortOrder; label: string }[] = [
-  { key: "name-asc", label: "Name A–Z" },
-  { key: "name-desc", label: "Name Z–A" },
-  { key: "id-asc", label: "ID A–Z" },
-];
-
-export function filterScenario(scenario: ScenarioSummary, filter: ScenarioFilter): boolean {
+export function filterScenario(scenario: ScenarioSummary, filter: ScenarioFilter, favorites: Set<string> = new Set()): boolean {
   if (filter === "all") return true;
   const text = `${scenario.id} ${scenario.name} ${scenario.description}`.toLowerCase();
   if (filter === "xlm") return text.includes("xlm");
   if (filter === "issued-asset") return text.includes("issued") || text.includes("testusd") || scenario.id === "issued-asset-payment";
   if (filter === "expected-failure") return text.includes("fail") || text.includes("missing-trustline") || scenario.id === "missing-trustline";
+  if (filter === "favorites") return favorites.has(scenario.id);
   return true;
 }
 
@@ -98,6 +65,9 @@ function parseCategory(value: string | null): ScenarioFilter {
 
 export function Dashboard() {
   const [scenarios, setScenarios] = useState<ScenarioSummary[]>([]);
+  const [filter, setFilter] = useState<ScenarioFilter>("all");
+  const [favorites, setFavorites] = useState<string[]>([]);
+  const [favoritesLoaded, setFavoritesLoaded] = useState(false);
   const [selectedId, setSelectedId] = useState<string>("");
   const [run, setRun] = useState<RunReport | null>(null);
   const [reportFilter, setReportFilter] = useState<ReportFilter>("all");
@@ -230,6 +200,15 @@ export function Dashboard() {
   const [restorationError, setRestorationError] = useState<string | null>(null);
 
   useEffect(() => {
+    setFavorites(readFavorites());
+    setFavoritesLoaded(true);
+  }, []);
+
+  useEffect(() => {
+    if (favoritesLoaded) writeFavorites(favorites);
+  }, [favorites, favoritesLoaded]);
+
+  useEffect(() => {
     if (!runIdParam || run) return;
     
     let active = true;
@@ -357,13 +336,10 @@ export function Dashboard() {
     return loadScenarios();
   }, [loadScenarios]);
 
-  // Apply filter, search, and sort (#29, #30)
+  const favoriteIds = useMemo(() => new Set(favorites), [favorites]);
   const filteredScenarios = useMemo(() => {
-    const filtered = scenarios.filter(
-      (s) => filterScenario(s, filter) && searchScenario(s, searchQuery),
-    );
-    return sortScenarios(filtered, sortOrder);
-  }, [scenarios, filter, searchQuery, sortOrder]);
+    return scenarios.filter((s) => filterScenario(s, filter, favoriteIds));
+  }, [scenarios, filter, favoriteIds]);
 
   useEffect(() => {
     if (filteredScenarios.length > 0) {
@@ -468,6 +444,12 @@ export function Dashboard() {
   }, [run, isOffline, isBrowserOffline, consecutiveFailures]);
 
   const selected = useMemo(() => scenarios.find((scenario) => scenario.id === selectedId), [scenarios, selectedId]);
+
+  function toggleFavorite(scenarioId: string) {
+    setFavorites((current) => current.includes(scenarioId)
+      ? current.filter((id) => id !== scenarioId)
+      : [...current, scenarioId]);
+  }
 
   async function handleRun() {
     if (!selectedId) return;
@@ -729,48 +711,26 @@ export function Dashboard() {
             </div>
           ) : (
             filteredScenarios.map((scenario, index) => (
-              <div
-                role="button"
-                tabIndex={0}
-                className={`scenario-card ${selectedId === scenario.id ? "selected" : ""}`}
-                key={scenario.id}
-                id={`scenario-card-${scenario.id}`}
-                onClick={() => setSelectedId(scenario.id)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") {
-                    e.preventDefault();
-                    setSelectedId(scenario.id);
-                  }
-                }}
-              >
-                <span className="card-index">0{index + 1}</span>
-                <ScenarioIcon kind={scenario.id} />
-                <span className="scenario-name">{scenario.name}</span>
-                <span className="scenario-description">{scenario.description}</span>
-                <span className="version">V{scenario.version}</span>
+              <div className="scenario-card-wrap" key={scenario.id}>
                 <button
                   type="button"
-                  className={`favorite-btn ${favorites.has(scenario.id) ? "active" : ""}`}
-                  aria-label={
-                    // Scenario name keeps each card's button distinct for
-                    // screen readers (#191); aria-pressed carries the state.
-                    favorites.has(scenario.id)
-                      ? `Remove ${scenario.name} from favorites`
-                      : `Add ${scenario.name} to favorites`
-                  }
-                  aria-pressed={favorites.has(scenario.id)}
-                  onClick={(e) => { e.stopPropagation(); toggleFavorite(scenario.id); }}
+                  className={`scenario-card ${selectedId === scenario.id ? "selected" : ""}`}
+                  onClick={() => setSelectedId(scenario.id)}
                 >
-                  ★
+                  <span className="card-index">0{index + 1}</span>
+                  <ScenarioIcon kind={scenario.id} />
+                  <span className="scenario-name">{scenario.name}</span>
+                  <span className="scenario-description">{scenario.description}</span>
+                  <span className="version">V{scenario.version}</span>
                 </button>
                 <button
                   type="button"
-                  className="preview-btn"
-                  aria-label={`Preview definition for ${scenario.name}`}
-                  aria-expanded={previewId === scenario.id}
-                  onClick={(e) => { e.stopPropagation(); setPreviewId(previewId === scenario.id ? null : scenario.id); }}
+                  className={`favorite-toggle ${favorites.includes(scenario.id) ? "active" : ""}`}
+                  aria-label={`${favorites.includes(scenario.id) ? "Remove" : "Add"} ${scenario.name} ${favorites.includes(scenario.id) ? "from" : "to"} favorites`}
+                  aria-pressed={favorites.includes(scenario.id)}
+                  onClick={() => toggleFavorite(scenario.id)}
                 >
-                  {previewId === scenario.id ? "Close" : "Details"}
+                  {favorites.includes(scenario.id) ? "★" : "☆"}
                 </button>
               </div>
             ))

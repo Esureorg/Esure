@@ -1,33 +1,30 @@
-/**
- * Favorites are read back from localStorage, which any script or older build
- * can write to. Never trust its shape: accept only an array of scenario IDs
- * that the backend itself would accept (`scenarioId` in esure-backend/src/app.ts:
- * 1–64 chars of `[a-z0-9-]`), drop everything else, and deduplicate.
- */
-export const SCENARIO_ID_PATTERN = /^[a-z0-9-]{1,64}$/;
+export const FAVORITES_STORAGE_KEY = "esure:favorites:v1";
+const MAX_FAVORITES = 100;
+const MAX_STORED_FAVORITES_LENGTH = 8_192;
+const SCENARIO_ID_PATTERN = /^[a-z][a-z0-9-]{0,63}$/;
 
-/** Upper bound on stored favorites so a tampered value cannot grow the set without limit. */
-export const MAX_FAVORITES = 200;
-
-export function isScenarioId(value: unknown): value is string {
-  return typeof value === "string" && SCENARIO_ID_PATTERN.test(value);
+function validFavorites(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.filter(
+    (id): id is string => typeof id === "string" && SCENARIO_ID_PATTERN.test(id),
+  ))].slice(0, MAX_FAVORITES);
 }
 
-/** Parses a raw localStorage value into a validated, deduplicated favorites set. */
-export function parseFavorites(raw: string | null): Set<string> {
-  if (!raw) return new Set();
-  let parsed: unknown;
+export function readFavorites(): string[] {
   try {
-    parsed = JSON.parse(raw);
+    const stored = window.localStorage.getItem(FAVORITES_STORAGE_KEY);
+    if (!stored || stored.length > MAX_STORED_FAVORITES_LENGTH) return [];
+    const parsed: unknown = JSON.parse(stored);
+    return validFavorites(parsed);
   } catch {
-    return new Set();
+    return [];
   }
-  if (!Array.isArray(parsed)) return new Set();
+}
 
-  const favorites = new Set<string>();
-  for (const entry of parsed) {
-    if (favorites.size >= MAX_FAVORITES) break;
-    if (isScenarioId(entry)) favorites.add(entry);
+export function writeFavorites(favorites: string[]): void {
+  try {
+    window.localStorage.setItem(FAVORITES_STORAGE_KEY, JSON.stringify(validFavorites(favorites)));
+  } catch {
+    // Favorites remain available for the current page session.
   }
-  return favorites;
 }

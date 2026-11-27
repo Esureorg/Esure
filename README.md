@@ -27,7 +27,9 @@ failure explanations.
 The Render free service may sleep after inactivity, so its first response can
 take longer than subsequent requests.
 
-<!-- TODO: Add dashboard screenshot or demo GIF here -->
+![Illustrative Esure execution report showing a passed Stellar Testnet XLM payment, two completed steps, one successful balance assertion, and a three-check summary.](esure-frontend/public/dashboard-report.png)
+
+*Illustrative sample report rendered with local mock data; it does not show a live run or transaction identifier.*
 
 ## Capabilities
 
@@ -302,51 +304,24 @@ Restart the local frontend or redeploy it after changing `ESURE_BACKEND_URL`.
 
 ### Backend
 
-The accepted integer bounds are inclusive. Backend settings are derived from
-[`loadConfig`](esure-backend/src/config.ts) and take effect when the backend
-starts; restart it after changing them.
+| Variable | Default | Description |
+| --- | --- | --- |
+| `HOST` | `127.0.0.1` | Bind address; use `0.0.0.0` on Render |
+| `PORT` | `3001` | HTTP port; Render supplies this automatically |
+| `LOG_LEVEL` | `info` | Fastify application log level |
+| `RUN_TIMEOUT_MS` | `120000` | Maximum duration of a complete run |
+| `STEP_TIMEOUT_MS` | `30000` | Maximum duration of one scenario step |
+| `MAX_CONCURRENT_RUNS` | `2` | Maximum simultaneous executions |
+| `MAX_CONCURRENT_FRIENDBOT_REQUESTS` | `5` | Maximum concurrent Friendbot funding requests per run (1-50); across concurrent runs, the global peak can reach `MAX_CONCURRENT_RUNS` * this value |
+| `MAX_STORED_RUNS` | `500` | Hard limit for retained in-memory runs |
+| `RUN_RETENTION_MS` | `3600000` | Retention time for terminal in-memory runs |
+| `RATE_LIMIT_MAX` | `120` | General request limit per rate-limit window |
+| `RUN_RATE_LIMIT_MAX` | `10` | Stricter run-creation limit per window |
+| `PERSISTENCE_MODE` | `disabled` | Use `published` only after configuring PostgreSQL |
+| `DATABASE_URL` | unset | Runtime application connection for published persistence |
 
-| Variable | Default | Accepted value / bounds | Effect and applicability |
-| --- | --- | --- | --- |
-| `HOST` | `127.0.0.1` | String; not validated | Backend bind address. Use `0.0.0.0` where the host must accept external connections. All modes. |
-| `PORT` | `3001` | Integer, `1`-`65535` | Backend HTTP port. Render supplies this automatically. All modes. |
-| `LOG_LEVEL` | `info` | String; not validated | Currently read by `loadConfig` but not applied by the server; changing it has no logging effect. |
-| `STELLAR_HORIZON_URL` | `https://horizon-testnet.stellar.org` | Valid HTTPS URL containing `testnet` | Horizon endpoint. Mainnet URLs are rejected. All modes. |
-| `STELLAR_FRIENDBOT_URL` | `https://friendbot.stellar.org` | Must be this exact HTTPS URL | Friendbot endpoint. Other URLs are rejected. All modes. |
-| `RUN_TIMEOUT_MS` | `120000` | Milliseconds; integer, `1000`-`600000` | Maximum total duration of one run. All modes. |
-| `STEP_TIMEOUT_MS` | `30000` | Milliseconds; integer, `500`-`120000` | Maximum duration of one scenario step. All modes. |
-| `MAX_CONCURRENT_RUNS` | `2` | Active runs; integer, `1`-`20` | Maximum simultaneous executions; excess starts are rejected, not queued. All modes. |
-| `METRICS_ENABLED` | `false` | Literal `true` or `false` | Enables the process-local aggregate `GET /metrics` endpoint. Disabled by default; when enabled, restrict access to trusted monitoring systems on a private network or behind an authenticated/allowlisted reverse proxy. Metrics reset on restart and are per process. |
-| `MAX_STORED_RUNS` | `500` | Runs; integer, `10`-`10000` | In-memory run-store capacity only; ignored by the PostgreSQL run store. |
-| `RUN_RETENTION_MS` | `3600000` | Milliseconds; integer, `60000`-`86400000` | Retention for completed run reports in either run store. PostgreSQL reports past this age are hidden from reads but not deleted by this setting. |
-| `RATE_LIMIT_MAX` | `120` | Requests per window; integer, `1`-`10000` | Per-IP fixed-window limit for requests other than run creation. All modes. |
-| `RUN_RATE_LIMIT_MAX` | `10` | Requests per window; integer, `1`-`1000` | Per-IP fixed-window limit for run-creation endpoints. All modes. |
-| `RATE_LIMIT_WINDOW_MS` | `60000` | Milliseconds; integer, `1000`-`3600000` | Shared fixed-window duration for both rate limits. All modes. |
-| `BODY_LIMIT_BYTES` | `16384` | Bytes; integer, `1024`-`1048576` | Maximum request-body size. All modes. |
-| `SCENARIO_DIRECTORY` | Unset | Directory path; not validated | Optional directory of additional bounded JSON/YAML scenarios, loaded at startup. All modes. |
-| `PERSISTENCE_MODE` | `disabled` | `disabled` or `published` | `published` enables the PostgreSQL scenario catalogue and requires `DATABASE_URL`; startup fails if migrations are not current. |
-| `RUN_PERSISTENCE_ENABLED` | `false` | Literal `true` or `false` | `true` persists run reports in PostgreSQL and requires `PERSISTENCE_MODE=published`; otherwise reports use the in-memory store. |
-| `DATABASE_URL` | Unset | PostgreSQL connection URL | Application login used by the running backend; required in `published` mode. Do not use migration credentials here. |
-| `DATABASE_MIGRATION_URL` | Unset | PostgreSQL connection URL | Migration login used only by the explicit `db:migrate` and `db:reconcile` commands; not used by the running backend. |
-| `DATABASE_POOL_MAX` | `5` | Connections; integer, `1`-`20` | Maximum PostgreSQL pool size. Used only in `published` mode. |
-| `DATABASE_CONNECTION_TIMEOUT_MS` | `5000` | Milliseconds; integer, `500`-`30000` | PostgreSQL connection timeout. Used only in `published` mode. |
-| `DATABASE_QUERY_TIMEOUT_MS` | `5000` | Milliseconds; integer, `100`-`30000` | PostgreSQL statement and query timeout. Used only in `published` mode. |
-| `DATABASE_IDLE_TIMEOUT_MS` | `10000` | Milliseconds; integer, `1000`-`60000` | Time before an idle PostgreSQL pool connection is closed. Used only in `published` mode. |
-
-`RUN_TIMEOUT_MS` limits the whole run while `STEP_TIMEOUT_MS` limits each
-individual step; either timeout can end execution first. `MAX_CONCURRENT_RUNS`
-limits active executions, while `MAX_STORED_RUNS` separately limits only the
-in-memory report store. When that store is full it evicts a terminal report; it
-does not evict active runs. `RUN_RETENTION_MS` applies to completed reports in
-memory and PostgreSQL, but PostgreSQL rows remain stored. The two rate limits
-share `RATE_LIMIT_WINDOW_MS` and are process-local.
-
-`DATABASE_URL` is for the application role only. Set `DATABASE_MIGRATION_URL`
-for the one-shot migration commands, using the separate migration role; it does
-not require a backend restart because those commands read it when invoked.
-Replace credential placeholders with local or provider-managed credentials and
-never commit them. See [`esure-backend/.env.example`](esure-backend/.env.example)
-and the [persistence guide](esure-docs/PERSISTENCE.md) for setup details.
+Review [`esure-backend/.env.example`](esure-backend/.env.example) for every
+supported setting and its safe default.
 
 ## Development and testing
 

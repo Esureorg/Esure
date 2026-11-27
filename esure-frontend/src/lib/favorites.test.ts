@@ -1,46 +1,38 @@
-import { describe, expect, it } from "vitest";
-import { MAX_FAVORITES, isScenarioId, parseFavorites } from "./favorites";
+import { afterEach, describe, expect, it } from "vitest";
+import { FAVORITES_STORAGE_KEY, readFavorites, writeFavorites } from "./favorites";
 
-describe("parseFavorites", () => {
-  it("returns an empty set for missing or empty storage", () => {
-    expect(parseFavorites(null).size).toBe(0);
-    expect(parseFavorites("").size).toBe(0);
+describe("browser favorites storage", () => {
+  afterEach(() => {
+    window.localStorage.clear();
   });
 
-  it("returns an empty set for malformed JSON", () => {
-    expect(parseFavorites("{not json").size).toBe(0);
+  it("accepts bounded scenario IDs, removes duplicates, and ignores invalid entries", () => {
+    window.localStorage.setItem(FAVORITES_STORAGE_KEY, JSON.stringify([
+      "xlm-payment",
+      "xlm-payment",
+      "invalid id",
+      42,
+      null,
+      "a".repeat(65),
+      "issued-asset-payment",
+    ]));
+    expect(readFavorites()).toEqual(["xlm-payment", "issued-asset-payment"]);
   });
 
-  it("rejects valid JSON that is not an array", () => {
-    // A JSON string would otherwise be split into a set of its characters.
-    expect(parseFavorites(JSON.stringify("xlm-payment")).size).toBe(0);
-    expect(parseFavorites(JSON.stringify({ "xlm-payment": true })).size).toBe(0);
-    expect(parseFavorites("null").size).toBe(0);
-    expect(parseFavorites("42").size).toBe(0);
+  it.each(["null", "{}", '"xlm-payment"', "invalid json"])("returns no favorites for malformed stored value %s", (value) => {
+    window.localStorage.setItem(FAVORITES_STORAGE_KEY, value);
+    expect(readFavorites()).toEqual([]);
   });
 
-  it("keeps only valid scenario IDs from a mixed array", () => {
-    const raw = JSON.stringify(["xlm-payment", 1, null, { id: "x" }, ["nested"], "", "Bad ID", "a".repeat(65), "missing-trustline"]);
-    expect([...parseFavorites(raw)]).toEqual(["xlm-payment", "missing-trustline"]);
+  it("writes favorites as a JSON array under the versioned origin-local key", () => {
+    writeFavorites(["xlm-payment"]);
+    expect(window.localStorage.getItem(FAVORITES_STORAGE_KEY)).toBe('["xlm-payment"]');
   });
 
-  it("deduplicates entries", () => {
-    expect([...parseFavorites(JSON.stringify(["xlm-payment", "xlm-payment"]))]).toEqual(["xlm-payment"]);
-  });
-
-  it("caps the number of favorites", () => {
-    const ids = Array.from({ length: MAX_FAVORITES + 50 }, (_, i) => `scenario-${i}`);
-    expect(parseFavorites(JSON.stringify(ids)).size).toBe(MAX_FAVORITES);
-  });
-});
-
-describe("isScenarioId", () => {
-  it("matches the backend scenarioId rule", () => {
-    expect(isScenarioId("issued-asset-payment")).toBe(true);
-    expect(isScenarioId("a".repeat(64))).toBe(true);
-    expect(isScenarioId("a".repeat(65))).toBe(false);
-    expect(isScenarioId("UPPER")).toBe(false);
-    expect(isScenarioId("../etc")).toBe(false);
-    expect(isScenarioId(7)).toBe(false);
+  it("bounds and validates favorites written to browser storage", () => {
+    writeFavorites(["valid-id", "invalid id", ...Array.from({ length: 105 }, (_, index) => `scenario-${index}`)]);
+    const stored = JSON.parse(window.localStorage.getItem(FAVORITES_STORAGE_KEY) ?? "null") as unknown[];
+    expect(stored).toHaveLength(100);
+    expect(stored).not.toContain("invalid id");
   });
 });

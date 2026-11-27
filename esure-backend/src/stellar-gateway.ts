@@ -15,6 +15,7 @@ import type {
   LedgerExecutionOptions,
   LedgerGateway,
   ScenarioAssertion,
+  ScenarioAccount,
   ScenarioAsset,
   ScenarioStep,
   StepResult,
@@ -50,6 +51,7 @@ export interface GatewayRetryCounters {
 }
 
 export interface StellarGatewayOptions {
+  maxConcurrentFriendbotRequests?: number;
   friendbotRetry?: FriendbotRetryConfig;
   horizonRetry?: HorizonRetryConfig;
   fetch?: typeof fetch;
@@ -97,6 +99,8 @@ export const DEFAULT_HORIZON_RETRY_CONFIG = {
   maxDelayMs: 4_000,
   factor: 2,
 } as const;
+
+const DEFAULT_MAX_CONCURRENT_FRIENDBOT_REQUESTS = 5;
 
 export function calculateRetryDelay(
   attempt: number,
@@ -160,8 +164,12 @@ export class StellarTestnetGateway implements LedgerGateway {
     private readonly friendbotUrl: string,
     options: StellarGatewayOptions = {},
   ) {
+    const maxConcurrentFriendbotRequests = options.maxConcurrentFriendbotRequests ?? DEFAULT_MAX_CONCURRENT_FRIENDBOT_REQUESTS;
+    if (!Number.isInteger(maxConcurrentFriendbotRequests) || maxConcurrentFriendbotRequests < 1 || maxConcurrentFriendbotRequests > 50) {
+      throw new Error("MAX_CONCURRENT_FRIENDBOT_REQUESTS must be an integer between 1 and 50");
+    }
     this.#server = new Horizon.Server(horizonUrl);
-    this.#options = options;
+    this.#options = { ...options, maxConcurrentFriendbotRequests };
   }
 
   /** Issue #224: return a snapshot of retry counters with no connection or ID data. */
@@ -184,7 +192,7 @@ export class StellarTestnetGateway implements LedgerGateway {
     const funded = scenario.accounts.filter((account) => account.fund);
     if (funded.length) {
       await this.performRequiredStep("fund-accounts", "fundAccounts", options, steps, async (signal) => {
-        await this.fundAll(funded.map((account) => required(accounts, account.id)), signal, options.friendbotRetry);
+        await this.fundAccounts(funded, accounts, signal, options.friendbotRetry);
         return basicStep("fund-accounts", "fundAccounts", "Test accounts funded.");
       });
     }
@@ -387,45 +395,39 @@ export class StellarTestnetGateway implements LedgerGateway {
     }
   }
 
-  /**
-   * Issue #82: fund every account requiring Friendbot funding using a
-   * bounded work queue instead of an unbounded Promise.all. At most
-   * `fundingConcurrency` (default DEFAULT_FUNDING_CONCURRENCY) requests
-   * are in flight at once for this run. If any required funding operation
-   * fails, remaining siblings are cancelled (via an internal AbortSignal)
-   * rather than left to fund accounts that will never be used, and no
-   * promise is left unhandled: every worker is awaited through
-   * Promise.all.
-   */
-  private async fundAll(keypairs: Keypair[], signal: AbortSignal, retryOverrides?: FriendbotRetryConfig): Promise<void> {
-    if (!keypairs.length) return;
-    const concurrency = Math.max(1, this.#options.fundingConcurrency ?? DEFAULT_FUNDING_CONCURRENCY);
-    const queue = [...keypairs];
+  private async fundAccounts(
+    funded: ScenarioAccount[],
+    accounts: Map<string, Keypair>,
+    signal: AbortSignal,
+    retryOverrides?: FriendbotRetryConfig,
+  ): Promise<void> {
     const controller = new AbortController();
-    const combinedSignal = signal.aborted ? signal : AbortSignal.any([signal, controller.signal]);
+    const fundingSignal = AbortSignal.any([signal, controller.signal]);
+    const concurrency = this.#options.maxConcurrentFriendbotRequests ?? DEFAULT_MAX_CONCURRENT_FRIENDBOT_REQUESTS;
+    let nextAccount = 0;
     let firstError: unknown;
+    let failed = false;
 
-    const worker = async (): Promise<void> => {
-      while (!combinedSignal.aborted) {
-        const keypair = queue.shift();
-        if (!keypair) return;
+    const worker = async () => {
+      while (!fundingSignal.aborted) {
+        const account = funded[nextAccount++];
+        if (!account) return;
         try {
-          await this.fund(keypair, combinedSignal, retryOverrides);
+          await this.fund(required(accounts, account.id), fundingSignal, retryOverrides);
         } catch (error) {
-          if (firstError === undefined) firstError = error;
-          controller.abort();
+          if (!failed) {
+            failed = true;
+            firstError = error;
+            controller.abort(error);
+          }
           return;
         }
       }
     };
 
-    const workerCount = Math.min(concurrency, keypairs.length);
-    await Promise.all(Array.from({ length: workerCount }, () => worker()));
-    if (firstError !== undefined) throw firstError;
-    // An external abort (not caused by a sibling failure) may have stopped
-    // dequeuing before every account was funded. Surface that explicitly
-    // rather than silently reporting a successful funding step.
-    if (signal.aborted && queue.length) throw signal.reason ?? new Error("The operation was aborted.");
+    await Promise.all(Array.from({ length: Math.min(concurrency, funded.length) }, () => worker()));
+    if (failed) throw firstError;
+    if (signal.aborted) throw signal.reason ?? new Error("The operation was aborted.");
   }
 
   async fundAccount(
