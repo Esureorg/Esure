@@ -6,13 +6,7 @@ describe("loadConfig", () => {
     const config = loadConfig({});
     expect(config.horizonUrl).toContain("testnet");
     expect(config.friendbotUrl).toBe("https://friendbot.stellar.org");
-    expect(config.metricsEnabled).toBe(false);
-  });
-
-  it("enables metrics only for an explicit boolean setting", () => {
-    expect(loadConfig({ METRICS_ENABLED: "true" }).metricsEnabled).toBe(true);
-    expect(loadConfig({ METRICS_ENABLED: "false" }).metricsEnabled).toBe(false);
-    expect(() => loadConfig({ METRICS_ENABLED: "yes" })).toThrow(/METRICS_ENABLED/);
+    expect(config.maxConcurrentFriendbotRequests).toBe(5);
   });
 
   it("rejects Mainnet configuration", () => {
@@ -21,6 +15,11 @@ describe("loadConfig", () => {
 
   it("rejects unsafe resource-limit configuration", () => {
     expect(() => loadConfig({ MAX_CONCURRENT_RUNS: "0" })).toThrow(/MAX_CONCURRENT_RUNS/);
+    expect(loadConfig({ MAX_CONCURRENT_FRIENDBOT_REQUESTS: "1" }).maxConcurrentFriendbotRequests).toBe(1);
+    expect(loadConfig({ MAX_CONCURRENT_FRIENDBOT_REQUESTS: "50" }).maxConcurrentFriendbotRequests).toBe(50);
+    expect(() => loadConfig({ MAX_CONCURRENT_FRIENDBOT_REQUESTS: "0" })).toThrow(/MAX_CONCURRENT_FRIENDBOT_REQUESTS/);
+    expect(() => loadConfig({ MAX_CONCURRENT_FRIENDBOT_REQUESTS: "51" })).toThrow(/MAX_CONCURRENT_FRIENDBOT_REQUESTS/);
+    expect(() => loadConfig({ MAX_CONCURRENT_FRIENDBOT_REQUESTS: "1.5" })).toThrow(/MAX_CONCURRENT_FRIENDBOT_REQUESTS/);
     expect(() => loadConfig({ BODY_LIMIT_BYTES: "99999999" })).toThrow(/BODY_LIMIT_BYTES/);
   });
 
@@ -43,5 +42,23 @@ describe("loadConfig", () => {
       DATABASE_URL: "postgres://localhost/esure",
       RUN_PERSISTENCE_ENABLED: "yes",
     })).toThrow(/RUN_PERSISTENCE_ENABLED/);
+  });
+
+  it("exposes idempotency capacity and retention as bounded settings with correct defaults", () => {
+    const config = loadConfig({});
+    expect(config.idempotencyMaxEntries).toBe(1_000);
+    expect(config.idempotencyRetentionMs).toBe(86_400_000);
+  });
+
+  it("accepts explicit idempotency overrides within their bounds", () => {
+    expect(loadConfig({ IDEMPOTENCY_MAX_ENTRIES: "500" }).idempotencyMaxEntries).toBe(500);
+    expect(loadConfig({ IDEMPOTENCY_RETENTION_MS: "3600000" }).idempotencyRetentionMs).toBe(3_600_000);
+  });
+
+  it("rejects out-of-range idempotency configuration", () => {
+    expect(() => loadConfig({ IDEMPOTENCY_MAX_ENTRIES: "0" })).toThrow(/IDEMPOTENCY_MAX_ENTRIES/);
+    expect(() => loadConfig({ IDEMPOTENCY_MAX_ENTRIES: "100001" })).toThrow(/IDEMPOTENCY_MAX_ENTRIES/);
+    expect(() => loadConfig({ IDEMPOTENCY_RETENTION_MS: "1000" })).toThrow(/IDEMPOTENCY_RETENTION_MS/);
+    expect(() => loadConfig({ IDEMPOTENCY_RETENTION_MS: "999999999" })).toThrow(/IDEMPOTENCY_RETENTION_MS/);
   });
 });

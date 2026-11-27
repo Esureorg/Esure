@@ -277,6 +277,7 @@ export interface AssertionComparison {
   statusA?: "passed" | "failed";
   statusB?: "passed" | "failed";
   statusChange: "unchanged" | "added" | "removed" | "changed";
+  evidenceChanged?: boolean;
 }
 
 export interface ReportComparison {
@@ -391,28 +392,98 @@ export function compareReports(a: RunReport, b: RunReport): ReportComparison {
   function getAssertionKeyMap(assertions: AssertionResult[]) {
     const keyMap = new Map<string, { type: string; assertion: AssertionResult }>();
     const counts = new Map<string, number>();
+
     for (const assertion of assertions) {
+      const refKey = getAssertionReferenceKey(assertion);
+      if (refKey) {
+        if (!refMap.has(refKey)) refMap.set(refKey, []);
+        refMap.get(refKey)!.push(assertion);
+      }
+
       const count = counts.get(assertion.type) ?? 0;
       counts.set(assertion.type, count + 1);
       const key = `${assertion.type}#${count}`;
       keyMap.set(key, { type: assertion.type, assertion });
     }
-    return keyMap;
+
+    return { keyMap, refMap };
   }
 
-  const assertMapA = getAssertionKeyMap(a.assertions);
-  const assertMapB = getAssertionKeyMap(b.assertions);
+  const { keyMap: assertMapA, refMap: refMapA } = getAssertionKeyMap(a.assertions);
+  const { keyMap: assertMapB, refMap: refMapB } = getAssertionKeyMap(b.assertions);
 
-  const allAssertKeys = new Set<string>([
-    ...assertMapA.keys(),
-    ...assertMapB.keys(),
-  ]);
+  const matchedRefs = new Set<string>();
 
   const assertionComparisons: AssertionComparison[] = [];
   let assertionsAdded = 0;
   let assertionsRemoved = 0;
   let assertionsChanged = 0;
   let assertionsUnchanged = 0;
+
+  for (const refKey of refMapA.keys()) {
+    const assertsA = refMapA.get(refKey) || [];
+    const assertsB = refMapB.get(refKey) || [];
+    matchedRefs.add(refKey);
+
+    for (let i = 0; i < Math.max(assertsA.length, assertsB.length); i++) {
+      const assertA = assertsA[i];
+      const assertB = assertsB[i];
+      const type = assertA?.type || assertB?.type || "";
+
+      if (assertA && assertB) {
+        const statusChange = assertA.status === assertB.status ? "unchanged" : "changed";
+        const evidenceChanged = JSON.stringify(canonicalJson(assertA)) !== JSON.stringify(canonicalJson(assertB));
+
+        if (statusChange === "unchanged" && !evidenceChanged) assertionsUnchanged++;
+        else assertionsChanged++;
+
+        assertionComparisons.push({
+          key: refKey,
+          type,
+          statusA: assertA.status,
+          statusB: assertB.status,
+          statusChange: statusChange === "unchanged" && evidenceChanged ? "changed" : statusChange,
+          evidenceChanged: evidenceChanged && statusChange === "unchanged",
+        });
+      } else if (assertA && !assertB) {
+        assertionsRemoved++;
+        assertionComparisons.push({
+          key: refKey,
+          type,
+          statusA: assertA.status,
+          statusChange: "removed",
+        });
+      } else if (!assertA && assertB) {
+        assertionsAdded++;
+        assertionComparisons.push({
+          key: refKey,
+          type,
+          statusB: assertB.status,
+          statusChange: "added",
+        });
+      }
+    }
+  }
+
+  for (const refKey of refMapB.keys()) {
+    if (matchedRefs.has(refKey)) continue;
+    const assertsB = refMapB.get(refKey) || [];
+
+    for (const assertB of assertsB) {
+      assertionsAdded++;
+      assertionComparisons.push({
+        key: refKey,
+        type: assertB.type,
+        statusB: assertB.status,
+        statusChange: "added",
+      });
+    }
+  }
+
+  const allAssertKeys = new Set<string>([
+    ...assertMapA.keys(),
+    ...assertMapB.keys(),
+  ]);
 
   for (const key of allAssertKeys) {
     const entryA = assertMapA.get(key);
@@ -520,6 +591,17 @@ export function parseRetryAfter(value: string | null, maxSeconds = 60): number |
     return Math.min(Math.max(seconds, 0), maxSeconds);
   }
   return null;
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return "[" + value.map((v) => canonicalJson(v)).join(",") + "]";
+  }
+  const keys = Object.keys(value as Record<string, unknown>).sort();
+  return "{" + keys.map((k) => `"${k}":${canonicalJson((value as Record<string, unknown>)[k])}`).join(",") + "}";
 }
 
 export class RateLimitError extends ApiError {

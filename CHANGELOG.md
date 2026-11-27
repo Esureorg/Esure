@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Frontend: favorites read from `localStorage` are validated — only an array of backend-valid scenario IDs (1–64 chars of `[a-z0-9-]`, at most 200) is accepted; other entries are dropped and duplicates removed (#188).
+
 ## [0.2.0] - 2026-10-07
 
 ### Added
