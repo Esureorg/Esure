@@ -16,9 +16,13 @@ concurrency:
 
 jobs:
   backend:
-    name: Backend checks
+    name: Backend checks (Node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [20, 22]
     defaults:
       run:
         working-directory: esure-backend
@@ -26,7 +30,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: ${{ matrix.node-version }}
           cache: npm
           cache-dependency-path: esure-backend/package-lock.json
       - run: npm ci --no-workspaces
@@ -41,9 +45,13 @@ jobs:
           fi
 
   frontend:
-    name: Frontend checks
+    name: Frontend checks (Node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [20, 22]
     defaults:
       run:
         working-directory: esure-frontend
@@ -51,7 +59,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: ${{ matrix.node-version }}
           cache: npm
           cache-dependency-path: esure-frontend/package-lock.json
       - run: npm ci --no-workspaces
@@ -63,26 +71,24 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: playwright-report-${{ matrix.node-version || 'default' }}
-          path: |
-            esure-frontend/playwright-report/
-            esure-frontend/test-results/
+          name: playwright-report-node${{ matrix.node-version }}
+          path: esure-frontend/playwright-report/
           retention-days: 7
           if-no-files-found: ignore
 
   cli:
-    name: CLI checks
+    name: CLI checks (Node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [20, 22]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: |
-            esure-backend/package-lock.json
-            esure-cli/package-lock.json
+          node-version: ${{ matrix.node-version }}
       - name: Install backend dependencies
         working-directory: esure-backend
         run: npm ci --no-workspaces
@@ -98,4 +104,3 @@ jobs:
       - name: Build CLI
         working-directory: esure-cli
         run: npm run build
-
