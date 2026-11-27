@@ -6,7 +6,7 @@ no executable code or credentials and are validated before Testnet access.
 
 ## Bundled Scenarios
 
-ESURE includes 12 bundled scenarios for Testnet integration testing:
+ESURE includes 23 bundled scenarios for Testnet integration testing:
 
 | Scenario ID | Purpose | Expected Result |
 | --- | --- | --- |

@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { Dashboard, filterScenario } from "./dashboard";
 import * as api from "@/lib/api";
 import { type RunReport } from "@/lib/api";
+import { FAVORITES_STORAGE_KEY } from "@/lib/favorites";
 
 // --- URL Restoration Mocks ---
 const mockPush = vi.fn();
@@ -122,10 +123,17 @@ describe("filterScenario helper", () => {
     expect(filterScenario(mockScenarios[1], "expected-failure")).toBe(false);
     expect(filterScenario(mockScenarios[2], "expected-failure")).toBe(true);
   });
+
+  it("filters scenarios to saved favorites", () => {
+    const favorites = new Set(["issued-asset-payment"]);
+    expect(filterScenario(mockScenarios[0], "favorites", favorites)).toBe(false);
+    expect(filterScenario(mockScenarios[1], "favorites", favorites)).toBe(true);
+  });
 });
 
 describe("Dashboard component scenario filtering", () => {
   beforeEach(() => {
+    window.localStorage.clear();
     vi.spyOn(api, "listScenarios").mockResolvedValue(mockScenarios);
   });
 
@@ -261,7 +269,6 @@ describe("Dashboard component scenario filtering", () => {
     await waitFor(() => {
       expect(screen.getByText("03 AVAILABLE")).toBeDefined();
     });
-
     const failureTab = screen.getByRole("tab", { name: "Expected Failure" });
     fireEvent.click(failureTab);
 
@@ -270,6 +277,47 @@ describe("Dashboard component scenario filtering", () => {
     expect(screen.queryByText("XLM payment")).toBeNull();
     expect(screen.queryByText("Issued asset payment")).toBeNull();
     expect(screen.getAllByText("Missing trustline").length).toBeGreaterThan(0);
+  });
+
+  it("persists favorites, filters to them, and removes them", async () => {
+    render(<Dashboard />);
+    await screen.findByText("03 AVAILABLE");
+
+    fireEvent.click(screen.getByRole("button", { name: "Add XLM payment to favorites" }));
+    await waitFor(() => {
+      expect(window.localStorage.getItem(FAVORITES_STORAGE_KEY)).toBe(JSON.stringify(["xlm-payment"]));
+    });
+
+    fireEvent.click(screen.getByRole("tab", { name: "Favorites" }));
+    expect(screen.getByText("01 AVAILABLE")).toBeDefined();
+    expect(screen.getAllByText("XLM payment").length).toBeGreaterThan(0);
+    expect(screen.queryByText("Issued asset payment")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove XLM payment from favorites" }));
+    await waitFor(() => expect(screen.getByText("00 AVAILABLE")).toBeDefined());
+    expect(window.localStorage.getItem(FAVORITES_STORAGE_KEY)).toBe("[]");
+  });
+
+  it("restores favorites and tolerates unavailable browser storage", async () => {
+    window.localStorage.setItem(FAVORITES_STORAGE_KEY, JSON.stringify(["issued-asset-payment"]));
+    const { unmount } = render(<Dashboard />);
+    await screen.findByText("03 AVAILABLE");
+    fireEvent.click(screen.getByRole("tab", { name: "Favorites" }));
+    expect(screen.getAllByText("Issued asset payment").length).toBeGreaterThan(0);
+    unmount();
+
+    const getItem = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+      throw new Error("storage unavailable");
+    });
+    const setItem = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new Error("storage unavailable");
+    });
+    expect(() => render(<Dashboard />)).not.toThrow();
+    await screen.findByText("03 AVAILABLE");
+    fireEvent.click(screen.getByRole("button", { name: "Add XLM payment to favorites" }));
+    expect(screen.getByRole("button", { name: "Remove XLM payment from favorites" })).toBeDefined();
+    getItem.mockRestore();
+    setItem.mockRestore();
   });
 
   it("displays empty results message when no scenarios match filter", async () => {
@@ -1108,5 +1156,59 @@ describe("Dashboard Report Download Feedback (#45)", () => {
       await Promise.resolve();
     });
     expect(screen.getByText("Backend service is temporarily unavailable. Please try again shortly.")).toBeDefined();
+  });
+});
+
+describe("Dashboard favorite button accessible labels (#191)", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    vi.spyOn(api, "listScenarios").mockResolvedValue(mockScenarios);
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+    localStorage.clear();
+  });
+
+  it("gives each card's favorite button a distinct name that includes the scenario", async () => {
+    render(<Dashboard />);
+    const xlm = await screen.findByRole("button", { name: "Add XLM payment to favorites" });
+    const issued = screen.getByRole("button", { name: "Add Issued asset payment to favorites" });
+    screen.getByRole("button", { name: "Add Missing trustline to favorites" });
+
+    expect(xlm).not.toBe(issued);
+    expect(xlm.getAttribute("aria-label")).not.toBe(issued.getAttribute("aria-label"));
+    // No generic, indistinguishable label is left behind.
+    expect(screen.queryByRole("button", { name: "Add to favorites" })).toBeNull();
+  });
+
+  it("switches to a named remove label and keeps aria-pressed when toggled", async () => {
+    const user = userEvent.setup();
+    render(<Dashboard />);
+    const button = await screen.findByRole("button", { name: "Add XLM payment to favorites" });
+    expect(button.getAttribute("aria-pressed")).toBe("false");
+
+    await user.click(button);
+
+    const pressed = screen.getByRole("button", { name: "Remove XLM payment from favorites" });
+    expect(pressed.getAttribute("aria-pressed")).toBe("true");
+    // The other card is unaffected.
+    const other = screen.getByRole("button", { name: "Add Issued asset payment to favorites" });
+    expect(other.getAttribute("aria-pressed")).toBe("false");
+
+    await user.click(pressed);
+    expect(
+      screen.getByRole("button", { name: "Add XLM payment to favorites" }).getAttribute("aria-pressed"),
+    ).toBe("false");
+  });
+
+  it("uses the remove label for favorites restored from storage", async () => {
+    localStorage.setItem("esure:favorite-scenarios", JSON.stringify(["missing-trustline"]));
+    render(<Dashboard />);
+
+    const restored = await screen.findByRole("button", { name: "Remove Missing trustline from favorites" });
+    expect(restored.getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("button", { name: "Add XLM payment to favorites" })).toBeDefined();
   });
 });

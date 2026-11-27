@@ -1,0 +1,89 @@
+schemaVersion: 1
+id: path-payment-direct
+version: 1
+network: testnet
+
+accounts:
+  sender:
+    generate: true
+    fund: true
+  market-maker:
+    generate: true
+    fund: true
+  recipient:
+    generate: true
+    fund: true
+  issuer:
+    generate: true
+    fund: true
+
+assets:
+  xlm:
+    type: native
+  eur:
+    type: issued
+    code: EUR
+    issuer: issuer
+  usdc:
+    type: issued
+    code: USDC
+    issuer: issuer
+
+steps:
+  - type: changeTrust
+    name: mm-trust-eur
+    account: market-maker
+    asset: eur
+  - type: changeTrust
+    name: mm-trust-usdc
+    account: market-maker
+    asset: usdc
+  - type: changeTrust
+    name: recipient-trust-usdc
+    account: recipient
+    asset: usdc
+  - type: payment
+    name: issuer-fund-mm-eur
+    from: issuer
+    to: market-maker
+    asset: eur
+    amount: "1000"
+  - type: payment
+    name: issuer-fund-mm-usdc
+    from: issuer
+    to: market-maker
+    asset: usdc
+    amount: "1000"
+  - type: manageSellOffer
+    name: mm-offer-eur-for-xlm
+    account: market-maker
+    selling: eur
+    buying: xlm
+    amount: "1000"
+    price: "1"
+  - type: manageSellOffer
+    name: mm-offer-usdc-for-eur
+    account: market-maker
+    selling: usdc
+    buying: eur
+    amount: "1000"
+    price: "1"
+  - type: pathPaymentStrictReceive
+    name: pay-usdc-direct
+    from: sender
+    to: recipient
+    sendAsset: xlm
+    sendMax: "10"
+    destAsset: usdc
+    destAmount: "5"
+    path: []
+
+assertions:
+  - type: balanceEquals
+    account: recipient
+    asset: usdc
+    amount: "5"
+  - type: stepSucceeded
+    step: pay-usdc-direct
+  - type: transactionConfirmed
+    step: pay-usdc-direct

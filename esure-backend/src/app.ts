@@ -32,7 +32,7 @@ import { PersistenceCoordinator } from "./persistence.js";
 import { ScenarioIntegrityError } from "./published-scenarios.js";
 import { IdempotencyStore } from "./idempotency-store.js";
 
-interface BuildAppOptions { config: AppConfig; ledger?: LedgerGateway; logger?: boolean; runLogger?: RunLifecycleLogger; clock?: () => number; }
+interface BuildAppOptions { config: AppConfig; ledger?: LedgerGateway; logger?: boolean | { level: string }; runLogger?: RunLifecycleLogger; clock?: () => number; }
 
 const runBodySchema = {
   type: "object", additionalProperties: false, required: ["scenarioId"],
@@ -97,15 +97,6 @@ const exportQuerySchema = {
 /** Maximum Idempotency-Key length accepted (issue #72). */
 const IDEMPOTENCY_KEY_MAX_LENGTH = 128;
 
-/** Maximum number of in-flight idempotency entries (issue #72). */
-const IDEMPOTENCY_MAX_ENTRIES = 1_000;
-
-/**
- * Retention window for idempotency entries: 24 h (issue #72).
- * Entries older than this are pruned lazily on the next lookup.
- */
-const IDEMPOTENCY_RETENTION_MS = 86_400_000;
-
 export function buildApp(options: BuildAppOptions): AppInstance {
   const clock = options.clock ?? Date.now;
   const app = Fastify({ logger: options.logger ?? false, bodyLimit: options.config.bodyLimitBytes, ajv: { customOptions: { removeAdditional: false } } });
@@ -126,8 +117,8 @@ export function buildApp(options: BuildAppOptions): AppInstance {
   // Idempotency store shared across both run-creation endpoints (issue #72).
   // RunService.start returns Promise<RunReport>, so T = RunReport.
   const idempotency = new IdempotencyStore<RunReport>(
-    IDEMPOTENCY_MAX_ENTRIES,
-    IDEMPOTENCY_RETENTION_MS,
+    options.config.idempotencyMaxEntries,
+    options.config.idempotencyRetentionMs,
   );
 
   app.addHook("onRequest", async (request, reply) => {
@@ -144,9 +135,11 @@ export function buildApp(options: BuildAppOptions): AppInstance {
     if (!result.allowed) { reply.header("retry-after", result.retryAfterSeconds); return reply.code(429).send(apiError("RATE_LIMITED", "Request limit exceeded. Try again later.", request.id)); }
   });
   const ledger = options.ledger ?? new StellarTestnetGateway(options.config.horizonUrl, options.config.friendbotUrl, {
-    fundingConcurrency: options.config.maxConcurrentFriendbotRequests,
+    maxConcurrentFriendbotRequests: options.config.maxConcurrentFriendbotRequests,
   });
-  const clock = options.clock ?? Date.now;
+  const runs = new RunService(persistence.runStore ?? new InMemoryRunStore(options.config.maxStoredRuns, options.config.runRetentionMs), ledger, {
+    maxConcurrentRuns: options.config.maxConcurrentRuns, runTimeoutMs: options.config.runTimeoutMs, stepTimeoutMs: options.config.stepTimeoutMs,
+  });
   const runs = new RunService(persistence.runStore ?? new InMemoryRunStore(options.config.maxStoredRuns, options.config.runRetentionMs, clock), ledger, {
     maxConcurrentRuns: options.config.maxConcurrentRuns, runTimeoutMs: options.config.runTimeoutMs, stepTimeoutMs: options.config.stepTimeoutMs,
   }, clock, options.runLogger ?? app.log);
@@ -155,6 +148,10 @@ export function buildApp(options: BuildAppOptions): AppInstance {
   if (options.config.metricsEnabled) {
     app.get("/metrics", async (_request, reply) => {
       const metrics = runs.getMetrics();
+      // Issue #224: gateway retry counters — only available when using the real gateway.
+      const retryMetrics = ledger instanceof StellarTestnetGateway ? ledger.getRetryMetrics() : undefined;
+      // Issue #225: pool health — only available when a database is wired up.
+      const pool = persistence.database?.poolHealth();
       const body = [
         "# HELP esure_active_runs Number of currently admitted active runs.",
         "# TYPE esure_active_runs gauge",
@@ -173,6 +170,30 @@ export function buildApp(options: BuildAppOptions): AppInstance {
         "# HELP esure_run_duration_seconds_count Number of terminal runs included in duration.",
         "# TYPE esure_run_duration_seconds_count counter",
         `esure_run_duration_seconds_count ${metrics.runDuration.count}`,
+        // Issue #224: gateway retry counters with fixed service+outcome labels only.
+        ...(retryMetrics ? [
+          "# HELP esure_gateway_retries_total Retry attempts by fixed service and outcome labels.",
+          "# TYPE esure_gateway_retries_total counter",
+          `esure_gateway_retries_total{service="friendbot",outcome="succeeded"} ${retryMetrics.retries.friendbot.succeeded}`,
+          `esure_gateway_retries_total{service="friendbot",outcome="exhausted"} ${retryMetrics.retries.friendbot.exhausted}`,
+          `esure_gateway_retries_total{service="horizon",outcome="succeeded"} ${retryMetrics.retries.horizon.succeeded}`,
+          `esure_gateway_retries_total{service="horizon",outcome="exhausted"} ${retryMetrics.retries.horizon.exhausted}`,
+        ] : []),
+        // Issue #225: sanitized pool health counters — no connection string or query data.
+        ...(pool ? [
+          "# HELP esure_db_pool_total Total clients in the connection pool.",
+          "# TYPE esure_db_pool_total gauge",
+          `esure_db_pool_total ${pool.totalCount}`,
+          "# HELP esure_db_pool_idle Idle clients in the connection pool.",
+          "# TYPE esure_db_pool_idle gauge",
+          `esure_db_pool_idle ${pool.idleCount}`,
+          "# HELP esure_db_pool_waiting Requests waiting for a pool client.",
+          "# TYPE esure_db_pool_waiting gauge",
+          `esure_db_pool_waiting ${pool.waitingCount}`,
+          "# HELP esure_db_pool_errors_total Pool idle-error events (sanitized count only).",
+          "# TYPE esure_db_pool_errors_total counter",
+          `esure_db_pool_errors_total ${pool.poolErrorCount}`,
+        ] : []),
         "",
       ].join("\n");
       return reply
