@@ -62,11 +62,15 @@ button { color:inherit; }
 .print-report-header,.print-only,.print-status-label { display:none; }
 .scenario-count { font:500 10px var(--font-mono); letter-spacing:.12em; color:var(--muted); }
 .scenario-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:14px; min-height:240px; }
+.scenario-card-wrap { position:relative; min-width:0; }
 .scenario-card { position:relative; min-height:240px; padding:26px; text-align:left; display:flex; flex-direction:column; align-items:flex-start; background:transparent; border:1px solid var(--line); border-radius:3px; cursor:pointer; transition:.2s ease; }
 .scenario-card:hover { transform:translateY(-3px); border-color:#868d82; }
 .scenario-card.selected { background:var(--deep); border-color:var(--deep); color:white; box-shadow:0 18px 45px #173f2d22; }
-.card-index { position:absolute; right:20px; top:18px; font:500 10px var(--font-mono); color:var(--muted); }
+.card-index { position:absolute; right:54px; top:18px; font:500 10px var(--font-mono); color:var(--muted); }
 .selected .card-index,.selected .scenario-description,.selected .version { color:#b8c5bc; }
+.favorite-toggle { position:absolute; z-index:1; top:12px; right:12px; width:34px; height:34px; display:grid; place-items:center; border:1px solid var(--line); border-radius:50%; background:var(--paper); color:var(--deep); font-size:20px; line-height:1; cursor:pointer; }
+.favorite-toggle.active { background:var(--green); border-color:var(--green); }
+.favorite-toggle:focus-visible { outline:2px solid var(--deep); outline-offset:2px; }
 .scenario-icon { width:42px; height:42px; margin-bottom:30px; stroke:currentColor; stroke-width:1.5; }
 .selected .scenario-icon { stroke:var(--green); }
 .scenario-name { font-size:20px; font-weight:750; letter-spacing:-.03em; }
@@ -139,7 +143,13 @@ footer { border-top:1px solid var(--line); min-height:80px; display:flex; justif
   .report-grid { grid-template-columns:1fr; }
   .summary-card { position:static; grid-row:1; }
   .report-meta { grid-template-columns:auto minmax(0,1fr); }
+  .report-meta code { min-width:0; overflow-wrap:anywhere; word-break:break-word; }
   .timeline-row { grid-template-columns:34px minmax(0,1fr); }
+  .timeline-row strong,.timeline-row p,.assertion strong,.running-row strong { overflow-wrap:anywhere; word-break:break-word; }
+  .assertion,.running-row { grid-template-columns:34px minmax(0,1fr); }
+  .assertion-body,.tx-actions { min-width:0; }
+  .summary-card { min-width:0; overflow-wrap:anywhere; }
+  .summary-card dd { min-width:0; overflow-wrap:anywhere; word-break:break-word; }
   .ledger { grid-column:2; justify-self:start; }
   .workspace,.results { padding-block:52px; }
 }
@@ -165,10 +175,13 @@ footer { border-top:1px solid var(--line); min-height:80px; display:flex; justif
   .scenario-icon { margin-bottom:22px; }
   .launch-panel { padding:20px; }
   .report-meta { padding:16px; gap:8px; }
-  .report-meta code { max-width:100%; overflow-wrap:anywhere; }
+  .report-meta code { max-width:100%; min-width:0; overflow-wrap:anywhere; word-break:break-word; }
   .timeline-row,.assertion,.running-row { padding:20px 16px; gap:11px; }
-  .timeline-row p { line-height:1.5; }
-  .summary-card { padding:22px; }
+  .timeline-row p { line-height:1.5; overflow-wrap:anywhere; word-break:break-word; }
+  .timeline-row strong,.assertion strong,.running-row strong { overflow-wrap:anywhere; word-break:break-word; }
+  .summary-card { padding:22px; min-width:0; overflow-wrap:anywhere; }
+  .summary-card dl div { gap:12px; }
+  .summary-card dd { min-width:0; overflow-wrap:anywhere; word-break:break-word; text-align:right; }
   .score { padding:22px 0; }
   .score strong { font-size:46px; }
   .error-banner,.run-error { padding:14px; }
@@ -183,6 +196,9 @@ footer { border-top:1px solid var(--line); min-height:80px; display:flex; justif
   .ledger-card { right:0; }
   .verified-chip { display:none; }
   .section-heading { flex-direction:column; }
+  .report-meta code { overflow-wrap:anywhere; word-break:break-all; }
+  .timeline-row strong,.timeline-row p,.assertion strong,.running-row strong { overflow-wrap:anywhere; word-break:break-word; }
+  .summary-card dd { overflow-wrap:anywhere; word-break:break-word; }
 }
 @media (prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}
 .error-boundary{min-height:100vh;display:grid;place-items:center;padding:24px;background:var(--paper)}
@@ -359,6 +375,71 @@ button.download:focus-visible {
 .preview-meta dd { font:400 11px var(--font-mono); margin:0; }
 .hash-cell code { word-break:break-all; }
 .preview-description { font:400 13px var(--font-sans),sans-serif; color:var(--muted); line-height:1.5; margin:0; }
+.preview-history { margin-top:18px; border-top:1px solid var(--line); padding-top:14px; }
+.preview-history h3 { margin:0 0 10px; font:700 10px var(--font-mono); letter-spacing:.1em; text-transform:uppercase; }
+.preview-version-list,.preview-history-controls { display:flex; flex-wrap:wrap; gap:8px; }
+.preview-version-list button,.preview-history-controls button { border:1px solid var(--line); background:transparent; color:var(--deep); padding:6px 9px; font:500 10px var(--font-mono); cursor:pointer; }
+.preview-version-list button[aria-pressed="true"] { background:#edf3df; border-color:var(--deep); }
+.preview-version-list button:disabled,.preview-history-controls button:disabled { opacity:.5; cursor:not-allowed; }
+.preview-history-controls { margin-top:10px; }
+.preview-history-note,.preview-history p { color:var(--muted); font-size:12px; }
+.preview-definition-list { margin:16px 0 0; }
+.preview-definition-list h3 { margin:12px 0 6px; font:700 10px var(--font-mono); letter-spacing:.1em; text-transform:uppercase; }
+.preview-definition-list li { margin:8px 0; font-size:12px; }
+.preview-definition-list pre { overflow:auto; padding:8px; background:#f4f4ef; font:400 10px var(--font-mono); }
 
 /* ── Run button rate-limit note (#39) ───────────────────────────────────── */
 .rate-limit-note { font:400 12px var(--font-mono); color:var(--muted); margin:6px 0 0; }
+
+/* ── forced-colors / high-contrast accessibility overrides (issue #206) ─── */
+/* In forced-colors mode the browser substitutes a system palette so custom    */
+/* background/color properties are overridden.  Borders and outlines continue  */
+/* to work, so we use them to communicate status and selection state.          */
+@media (forced-colors: active) {
+  /* Status dot inside a badge: use a solid border instead of a colored disc */
+  .status-badge span {
+    background: ButtonText;
+    box-shadow: none;
+    border: 2px solid ButtonText;
+  }
+  .status-badge.passed span { border-color: Highlight; background: Highlight; }
+  .status-badge.failed span { border-color: LinkText; background: LinkText; }
+  .status-badge.running span,
+  .status-badge.validating span,
+  .status-badge.requested span { border-color: ButtonText; background: ButtonText; }
+
+  /* Step dots: rely on outline so passed/failed remain distinguishable */
+  .step-dot        { border-color: ButtonText; background: ButtonFace; color: ButtonText; }
+  .step-dot.passed { background: Highlight; border-color: Highlight; color: HighlightText; }
+  .step-dot.failed { background: LinkText; border-color: LinkText; color: Canvas; }
+
+  /* Selected scenario card: use system Highlight colours */
+  .scenario-card.selected {
+    background: Highlight;
+    border-color: Highlight;
+    color: HighlightText;
+    box-shadow: none;
+    forced-color-adjust: none;
+  }
+  .selected .card-index,
+  .selected .scenario-description,
+  .selected .version { color: HighlightText; }
+  .selected .scenario-icon { stroke: HighlightText; }
+
+  /* Keyboard focus: ensure outlines are always visible */
+  :focus-visible {
+    outline: 3px solid Highlight;
+    outline-offset: 2px;
+  }
+  .print-button:focus-visible,
+  .copy-button:focus-visible,
+  .filter-pill:focus-visible,
+  .search-clear:focus-visible,
+  .sort-select:focus,
+  .search-input:focus,
+  .diff-toggle-btn:focus-visible,
+  .inline-clear:focus-visible,
+  .preview-btn:focus-visible,
+  .preview-close:focus-visible,
+  button.download:focus-visible { outline: 3px solid Highlight; outline-offset: 2px; }
+}
