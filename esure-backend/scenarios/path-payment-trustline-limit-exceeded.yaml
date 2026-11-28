@@ -1,0 +1,116 @@
+# Path payment trustline limit exceeded
+#
+# This fixture demonstrates a path payment that fails because the delivered
+# amount would exceed the destination trustline limit. It is distinct from a
+# sendMax failure:
+#
+#   - sendMax failure: the sender's sendMax is too low to cover the source
+#     amount plus slippage along the path; the transaction fails before the
+#     destination is credited (e.g. op_too_many_offers / tecPATH_PARTIAL).
+#   - trustline limit failure (this fixture): the path conversion succeeds and
+#     the delivered amount is computed, but crediting the destination would
+#     push its trustline balance above the configured limit. The operation
+#     fails with op_line_full and the destination balance is unchanged.
+#
+# Liquidity is isolated: the market-maker is the only source of offers, and
+# the recipient's USDC trustline limit is set below the delivered amount.
+#
+# Testnet only. All amounts are bounded.
+
+name: path-payment-trustline-limit-exceeded
+description: >
+  A path payment that would deliver more than the destination trustline limit
+  allows. The path conversion succeeds but crediting the destination fails with
+  op_line_full, leaving the destination balance unchanged.
+
+network: testnet
+
+accounts:
+  sender:
+    generate: true
+    fund: true
+  market-maker:
+    generate: true
+    fund: true
+  recipient:
+    generate: true
+    fund: true
+  issuer:
+    generate: true
+    fund: true
+
+assets:
+  xlm:
+    type: native
+  eur:
+    type: issued
+    code: EUR
+    issuer: issuer
+  usdc:
+    type: issued
+    code: USDC
+    issuer: issuer
+
+trustlines:
+  # Recipient holds a USDC trustline with a small limit, below the amount the
+  # path payment below would deliver.
+  - account: recipient
+    asset: usdc
+    limit: "1"
+  # Market-maker needs trustlines to hold the assets it offers.
+  - account: market-maker
+    asset: eur
+  - account: market-maker
+    asset: usdc
+
+balances:
+  # Fund the market-maker with the assets it will offer.
+  - account: market-maker
+    asset: eur
+    amount: "1000"
+  - account: market-maker
+    asset: usdc
+    amount: "1000"
+
+offers:
+  # Isolated liquidity: EUR/XLM and USDC/EUR sell offers provide the path
+  # XLM -> EUR -> USDC.
+  - account: market-maker
+    selling: eur
+    buying: xlm
+    amount: "100"
+    price: "1"
+  - account: market-maker
+    selling: usdc
+    buying: eur
+    amount: "100"
+    price: "1"
+
+steps:
+  - action: pathPaymentStrictReceive
+    name: path-payment-exceeds-destination-trustline-limit
+    from: sender
+    to: recipient
+    sendAsset: xlm
+    sendMax: "10"
+    destAsset: usdc
+    destAmount: "5"
+    path:
+      - eur
+
+assertions:
+  # Setup steps should have succeeded.
+  - type: stepSucceeded
+    step: path-payment-exceeds-destination-trustline-limit
+    expect: false
+  # The path payment must fail because the destination trustline is full.
+  - type: stepFailedWith
+    step: path-payment-exceeds-destination-trustline-limit
+    transactionCode: tx_failed
+    operationCodes:
+      - op_line_full
+  # The destination balance must be unchanged (still zero).
+  - type: balanceEquals
+    account: recipient
+    asset: usdc
+    amount: "0"

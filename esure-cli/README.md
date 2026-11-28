@@ -35,9 +35,54 @@ npx esure report validate ./run-report.json
 npx esure report validate ./run-report.json --output json
 ```
 
-This command reads at most 5 MiB, checks the backend's maintained run-report
-contract, and never executes imported content or makes network requests.
-`--output json` writes successful results to stdout and failures to stderr.
+### Validate scenario input from a PowerShell pipeline
+
+The CLI can validate JSON or YAML piped through standard input. `--format`
+specifies the input syntax; `--output json` independently selects the CLI
+response format. Stdin definitions use the same 16 KiB bound and validation
+rules as other scenario definitions.
+
+PowerShell reads the file as UTF-8, and `$OutputEncoding` tells PowerShell how
+to encode text sent to native programs. The example below captures and
+propagates the CLI exit code (`0` for valid input, `1` for invalid input).
+
+Run these commands from the `esure-cli` directory.
+
+**Run from source** (uses the installed `tsx` development dependency):
+
+```powershell
+$previousOutputEncoding = $OutputEncoding
+try {
+    $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+    Get-Content -Raw -Encoding UTF8 .\my-scenario.yaml |
+        .\node_modules\.bin\tsx.cmd .\src\cli.ts validate --stdin --format yaml
+    $validationExitCode = $LASTEXITCODE
+}
+finally {
+    $OutputEncoding = $previousOutputEncoding
+}
+if ($validationExitCode -ne 0) { exit $validationExitCode }
+```
+
+**Run the compiled CLI entry point** (build it first, then run from `esure-cli`).
+The `tsx` loader resolves the backend's TypeScript source imports used by the CLI:
+
+```powershell
+$previousOutputEncoding = $OutputEncoding
+try {
+    $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+    Get-Content -Raw -Encoding UTF8 .\my-scenario.yaml |
+        node --import tsx .\dist\cli.js validate --stdin --format yaml
+    $validationExitCode = $LASTEXITCODE
+}
+finally {
+    $OutputEncoding = $previousOutputEncoding
+}
+if ($validationExitCode -ne 0) { exit $validationExitCode }
+```
+
+Use `--format json` for JSON input. Standard input is supported for validation;
+running a scenario still takes a bundled scenario ID or a file path.
 
 ### Run a bundled scenario
 
@@ -239,6 +284,7 @@ Validates a scenario file without executing it.
 **Options:**
 
 - `--output json`: Output validation result in JSON format
+- `--stdin --format <json|yaml>`: Read bounded scenario input from standard input
 
 **Exit codes:**
 

@@ -101,6 +101,74 @@ Scenario Schema v1 definition, POST the raw JSON or YAML document to
 `/api/v1/runs/definitions` using `application/json`, `application/yaml`, or
 `text/yaml`. The `Idempotency-Key` header is also supported on this route. Validate without execution at `/api/v1/scenarios/validate`.
 
+## Idempotency and report retention
+
+The `Idempotency-Key` header (optional, 1–128 characters) deduplicates run
+creation. The store is **process-local and in-memory**: entries are keyed by the
+header value, bound to a canonical fingerprint of the request, retained for
+24 hours from creation, and capped at 1000 entries. The same store is shared by
+`POST /api/v1/runs` and `POST /api/v1/runs/definitions`.
+
+Request header example:
+
+```bash
+curl -X POST http://localhost:3001/api/v1/runs \
+  -H "content-type: application/json" \
+  -H "Idempotency-Key: 7f3c2a9e-1b4d-4e6f-8a2b-9c0d1e2f3a4b" \
+  -d '{"scenarioId":"issued-asset-payment","inputs":{}}'
+```
+
+The same header works on the definition route:
+
+```bash
+curl -X POST http://localhost:3001/api/v1/runs/definitions \
+  -H "content-type: application/json" \
+  -H "Idempotency-Key: 7f3c2a9e-1b4d-4e6f-8a2b-9c0d1e2f3a4b" \
+  -d '{"schemaVersion":1,"id":"my-scenario","name":"My scenario","steps":[],"assertions":[]}'
+```
+
+### Replay
+
+Sending the same key with an identical request returns the existing run
+(`202`) without re-executing it. The response body is the same run metadata
+that was returned when the run was first created.
+
+### Conflict
+
+Reusing a key with a different request returns `409 IDEMPOTENCY_CONFLICT`. The
+error does not reveal the original request body or any details of the stored
+run beyond the conflict itself. Use a new key for each logically distinct
+request.
+
+### Capacity
+
+If the store already holds 1000 entries, a new key returns
+`503 IDEMPOTENCY_CAPACITY`. Retry after existing entries expire (24 hours) or
+use a key that is already stored.
+
+### Process restart
+
+Entries are lost when the backend process restarts. A request retried after a
+restart with the same key is treated as new and creates a new run; it is not
+deduplicated against the pre-restart run.
+
+### Expired reports
+
+Default in-memory run report retention is 1 hour (`RUN_RETENTION_MS`), while
+idempotency entries last 24 hours. A replay within the idempotency window but
+after the report has expired returns the existing run metadata, but the report
+may no longer be retrievable: `GET /api/v1/runs/{runId}/report` returns `404`
+when the run is unknown and `409` when the run is not complete. Clients that
+need the report should download it promptly after completion rather than rely
+on replay.
+
+### Multi-instance deployments
+
+Multi-instance deduplication is **not currently guaranteed**. Because the store
+is process-local, two requests with the same key routed to different backend
+instances are not deduplicated and may create two runs. Distributed
+idempotency would require a shared store such as a database.
+
 ## Read a run
 
 ### `GET /api/v1/runs/{runId}`

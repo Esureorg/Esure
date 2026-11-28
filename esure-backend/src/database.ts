@@ -1,12 +1,16 @@
 import { createHash } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import pg, { type Pool, type PoolClient, type QueryResultRow } from "pg";
 import type { AppConfig } from "./config.js";
 
 const { Pool: PgPool } = pg;
 const migrationPattern = /^(\d{3})_[a-z0-9_]+\.sql$/;
 const migrationLockKey = 7_235_817_221;
+
+/** Package-relative default migrations directory (issue #227). */
+const packageMigrationsDir = resolve(dirname(fileURLToPath(import.meta.url)), "../../migrations");
 
 export class DatabaseUnavailableError extends Error {
   constructor() { super("Database operation unavailable"); this.name = "DatabaseUnavailableError"; }
@@ -16,9 +20,23 @@ export interface Queryable {
   query<T extends QueryResultRow = QueryResultRow>(text: string, values?: readonly unknown[]): Promise<{ rows: T[]; rowCount: number | null }>;
 }
 
+/** Sanitized pool health counters (issue #225). */
+export interface PoolHealthMetrics {
+  /** Total clients in the pool (idle + active). */
+  totalCount: number;
+  /** Clients currently idle. */
+  idleCount: number;
+  /** Requests waiting for a client. */
+  waitingCount: number;
+  /** Count of idle-error events since the pool was created; never includes error detail. */
+  poolErrorCount: number;
+}
+
 export class Database {
   readonly pool: Pool;
   readonly queryTimeoutMs: number;
+  /** Monotonically increasing count of pool "error" events (issue #225). */
+  #poolErrorCount = 0;
 
   constructor(config: AppConfig) {
     if (!config.databaseUrl) throw new Error("DATABASE_URL is required for database construction");
@@ -33,7 +51,21 @@ export class Database {
       application_name: "esure-backend",
       allowExitOnIdle: true,
     });
-    this.pool.on("error", () => undefined);
+    // Count idle errors instead of discarding them (issue #225).
+    this.pool.on("error", () => { this.#poolErrorCount += 1; });
+  }
+
+  /**
+   * Return bounded pool health counters (issue #225).
+   * No connection string, query text, or client identity is included.
+   */
+  poolHealth(): PoolHealthMetrics {
+    return {
+      totalCount: this.pool.totalCount,
+      idleCount: this.pool.idleCount,
+      waitingCount: this.pool.waitingCount,
+      poolErrorCount: this.#poolErrorCount,
+    };
   }
 
   async query<T extends QueryResultRow = QueryResultRow>(text: string, values: readonly unknown[] = []) {
@@ -59,7 +91,7 @@ export class Database {
   async close(): Promise<void> { await this.pool.end(); }
 }
 
-export async function runMigrations(database: Database, directory = resolve(process.cwd(), "migrations"), role?: "esure_migrations"): Promise<void> {
+export async function runMigrations(database: Database, directory = packageMigrationsDir, role?: "esure_migrations"): Promise<void> {
   const files = await migrationFiles(directory);
   await database.transaction(async (client) => {
     if (role) await client.query(`SET LOCAL ROLE ${role}`);
@@ -84,7 +116,7 @@ export async function runMigrations(database: Database, directory = resolve(proc
   });
 }
 
-export async function assertMigrationsCurrent(database: Database, directory = resolve(process.cwd(), "migrations")): Promise<void> {
+export async function assertMigrationsCurrent(database: Database, directory = packageMigrationsDir): Promise<void> {
   const expected = await migrationFiles(directory);
   const applied = await database.query<{ version: number; filename: string; checksum: string }>("SELECT version, filename, checksum FROM schema_migrations ORDER BY version");
   if (applied.rows.length !== expected.length) throw new Error("Database schema migrations are not current");
@@ -117,7 +149,7 @@ export interface MigrationStatusReport {
  * Handles an uninitialized database (no `schema_migrations` table yet) by
  * reporting every file on disk as pending, rather than crashing.
  */
-export async function migrationStatus(database: Database, directory = resolve(process.cwd(), "migrations")): Promise<MigrationStatusReport> {
+export async function migrationStatus(database: Database, directory = packageMigrationsDir): Promise<MigrationStatusReport> {
   const files = await migrationFiles(directory);
   const byVersion = new Map(files.map((file) => [file.version, file]));
 
@@ -159,7 +191,31 @@ function isUndefinedTableError(error: unknown): boolean {
 }
 
 async function migrationFiles(directory: string) {
-  const filenames = (await readdir(directory)).filter((file) => migrationPattern.test(file)).sort();
+  let filenames: string[];
+  try {
+    filenames = (await readdir(directory)).filter((file) => migrationPattern.test(file)).sort();
+  } catch (error) {
+    // Issue #227: include the resolved path in the diagnostic so callers know
+    // which directory was attempted regardless of their working directory.
+    const cause = error instanceof Error ? error.message : String(error);
+    throw new Error(`Migration directory not found or unreadable: ${directory} (${cause})`);
+  }
+
+  // Issue #226: reject duplicate version prefixes before opening any transaction.
+  const seen = new Map<number, string>();
+  for (const filename of filenames) {
+    const match = migrationPattern.exec(filename)!;
+    const version = Number(match[1]);
+    const prior = seen.get(version);
+    if (prior !== undefined) {
+      throw new Error(
+        `Duplicate migration version ${version}: "${prior}" and "${filename}" share the same numeric prefix. ` +
+        `Rename one file so every migration has a unique version number.`,
+      );
+    }
+    seen.set(version, filename);
+  }
+
   return Promise.all(filenames.map(async (filename) => {
     const match = migrationPattern.exec(filename)!;
     const sql = await readFile(resolve(directory, filename), "utf8");

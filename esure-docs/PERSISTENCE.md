@@ -258,6 +258,51 @@ backup/point-in-time restore for destructive incompatibility and a new forward
 repair migration for ordinary defects; applied migration files are never edited
 and automatic destructive down-migrations are not used.
 
+### Recovering from a checksum mismatch
+
+Startup verification (`assertMigrationsCurrent` in `esure-backend/src/database.ts`)
+and `npm run db:migrate` (`runMigrations`) both fail closed when a file on disk
+does not match the filename or SHA-256 checksum recorded in `schema_migrations`.
+The process does not start and the migration command exits nonzero; neither path
+rewrites the recorded row. Treat the mismatch as a signal that the applied
+migration and the checked-in file have diverged, not as something to silence.
+
+1. **Inspect status (read-only).** Run `npm run db:migrate:status` (backed by
+   `migrationStatus`) with `DATABASE_MIGRATION_URL`. It reports applied, pending,
+   unexpected, and mismatched versions without writing anything. Then compare the
+   recorded checksums with the files on disk:
+
+   ```sh
+   psql "$DATABASE_MIGRATION_URL" -X -v ON_ERROR_STOP=1 -At -F '|' \
+     -c "SELECT version, filename, checksum FROM schema_migrations ORDER BY version"
+   sha256sum migrations/*.sql
+   ```
+
+   A version listed as mismatched has a recorded checksum that differs from the
+   file, or a recorded filename that no longer exists. Note which file changed
+   and whether the database is local and disposable or shared.
+
+2. **Local disposable database.** If the database holds no data you need, drop
+   and recreate it, then rerun `npm run db:migrate` and `npm run db:reconcile`
+   from a clean state. This is the fastest recovery and avoids reasoning about
+   partial history. Never do this to a shared or deployed database.
+
+3. **Shared deployment.** Restore the original applied migration file
+   byte-for-byte so its checksum matches the recorded value, then rerun
+   `npm run db:migrate:status` and startup verification. Recover the original
+   content from version control at the commit that was deployed, not from memory
+   or a reformatted copy; line endings and whitespace are part of the checksum.
+   If the original file cannot be recovered, treat this as a destructive
+   incompatibility and use a pre-migration backup or point-in-time restore.
+
+4. **Prefer forward repair migrations.** For ordinary defects, add a new numbered
+   migration that corrects the schema. Do not edit recorded checksums or
+   `schema_migrations` rows by hand: doing so hides the divergence, defeats the
+   startup guard, and leaves other environments inconsistent. Editing an applied
+   migration file is never acceptable; the only sanctioned fix is a new forward
+   migration (or, for destructive incompatibility, a backup/PITR restore).
+=======
+
 References: [Render database credentials](https://render.com/docs/postgresql-credentials)
 and [Render connection pooling](https://render.com/docs/postgresql-connection-pooling).
 

@@ -2,7 +2,7 @@ import { buildApp, closeAfterDrain } from "./app.js";
 import { loadConfig } from "./config.js";
 
 const config = loadConfig();
-const app = buildApp({ config, logger: true });
+const app = buildApp({ config, logger: { level: config.logLevel } });
 
 try {
   const address = await app.listen({ host: config.host, port: config.port });
@@ -16,11 +16,9 @@ try {
 //
 // SIGTERM and SIGINT each trigger shutdown exactly once.  The sequence is:
 //   1. Mark the RunService as draining — new run POSTs get 503 immediately.
-//   2. Wait for active executions, capped at DRAIN_TIMEOUT_MS.
+//   2. Wait for active executions, capped at SHUTDOWN_TIMEOUT_MS.
 //   3. Close Fastify (which fires onClose hooks, releasing DB pools / timers).
 //   4. Exit.  If anything throws we still exit, just with code 1.
-
-const DRAIN_TIMEOUT_MS = 30_000;
 
 let shuttingDown = false;
 
@@ -31,10 +29,20 @@ async function shutdown(signal: string): Promise<void> {
   app.log.info({ signal }, "Shutdown signal received — draining active runs");
 
   // Drain runs before Fastify's onClose hooks release persistence resources.
+  let cleanupFailed = false;
   try {
-    await closeAfterDrain(app, DRAIN_TIMEOUT_MS);
+    await closeAfterDrain(app, config.shutdownTimeoutMs);
   } catch (closeError) {
+    cleanupFailed = true;
     app.log.error(closeError, "Error while draining or closing the server");
+  }
+  logApp.log.info("Shutdown complete");
+  return cleanupFailed ? 1 : 0;
+}
+
+  if (cleanupFailed) {
+    app.log.error("Shutdown cleanup failed — exiting with code 1");
+    process.exit(1);
   }
 
   app.log.info("Shutdown complete");

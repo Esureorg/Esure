@@ -106,6 +106,31 @@ assertions:
     expect(scenario?.accounts).toHaveLength(4);
   });
 
+  it("loads the bundled direct path payment scenario with an empty path", () => {
+    const scenario = createScenarioRegistry().find("path-payment-direct");
+    expect(scenario).toBeDefined();
+    expect(scenario).toMatchObject({
+      id: "path-payment-direct",
+      steps: expect.arrayContaining([
+        expect.objectContaining({
+          type: "pathPaymentStrictReceive",
+          sendAsset: "xlm",
+          destAsset: "usdc",
+          path: [],
+        }),
+      ]),
+    });
+    const { contentHash: _directHash, ...definition } = structuredClone(scenario!);
+    expect(() => prepareScenario(definition)).not.toThrow();
+    expect(scenario?.assertions).toEqual(
+      expect.arrayContaining([
+        { type: "stepSucceeded", step: "pay-usdc-direct" },
+        { type: "transactionConfirmed", step: "pay-usdc-direct" },
+        { type: "balanceEquals", account: "recipient", asset: "usdc", amount: "5" },
+      ]),
+    );
+  });
+
   it("loads the bundled sender missing-trustline scenario", () => {
     const scenario = createScenarioRegistry().find("sender-missing-trustline");
     expect(scenario?.accounts.map((account) => account.id)).toEqual(["issuer", "sender", "recipient"]);
@@ -117,6 +142,66 @@ assertions:
         { type: "balanceEquals", account: "recipient", asset: "test-usd", amount: "50" },
       ]),
     );
+  });
+
+  it("loads the bundled strict-send below destMin scenario", () => {
+    const scenario = createScenarioRegistry().find("strict-send-below-dest-min");
+    expect(scenario).toBeDefined();
+    const { contentHash: _hash, ...definition } = structuredClone(scenario!);
+    expect(prepareScenario(definition)).toMatchObject({ id: "strict-send-below-dest-min" });
+    expect(scenario?.steps).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "pathPaymentStrictSend", destMin: expect.any(String) }),
+      ]),
+    );
+    expect(scenario?.assertions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "stepFailedWith", operationCodes: expect.arrayContaining(["op_under_dest_min"]) }),
+      ]),
+    );
+  });
+
+  it("loads the bundled path-payment no-liquidity scenario", () => {
+    const scenario = createScenarioRegistry().find("path-payment-no-liquidity");
+    expect(scenario).toBeDefined();
+    const { contentHash: _hash, ...definition } = structuredClone(scenario!);
+    expect(prepareScenario(definition)).toMatchObject({ id: "path-payment-no-liquidity" });
+    expect(scenario?.steps.some((step) => step.type === "manageSellOffer")).toBe(false);
+    expect(scenario?.assertions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "stepFailedWith", operationCodes: expect.arrayContaining(["op_no_issuer"]) }),
+        expect.objectContaining({ type: "balanceEquals", asset: expect.any(String), amount: "0" }),
+      ]),
+    );
+  });
+
+  it("loads the bundled path-payment trustline-limit-exceeded scenario", () => {
+    const scenario = createScenarioRegistry().find("path-payment-trustline-limit-exceeded");
+    expect(scenario).toBeDefined();
+    const { contentHash: _hash, ...definition } = structuredClone(scenario!);
+    expect(prepareScenario(definition)).toMatchObject({ id: "path-payment-trustline-limit-exceeded" });
+    expect(scenario?.steps).toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: "pathPaymentStrictReceive" })]),
+    );
+    expect(scenario?.assertions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "stepFailedWith", operationCodes: expect.arrayContaining(["op_line_full"]) }),
+        expect.objectContaining({ type: "balanceEquals", asset: expect.any(String), amount: "0" }),
+      ]),
+    );
+  });
+
+  it("rejects strict-send steps with missing or non-positive destMin", () => {
+    const scenario = createScenarioRegistry().find("strict-send-below-dest-min")!;
+    const { contentHash: _missingHash, ...missing } = structuredClone(scenario);
+    const missingStep = missing.steps.find((step) => step.type === "pathPaymentStrictSend");
+    if (missingStep?.type === "pathPaymentStrictSend") delete (missingStep as { destMin?: string }).destMin;
+    expect(() => prepareScenario(missing)).toThrow(ScenarioValidationError);
+
+    const { contentHash: _zeroHash, ...zero } = structuredClone(scenario);
+    const zeroStep = zero.steps.find((step) => step.type === "pathPaymentStrictSend");
+    if (zeroStep?.type === "pathPaymentStrictSend") zeroStep.destMin = "0";
+    expect(() => prepareScenario(zero)).toThrow(ScenarioValidationError);
   });
 
   it("rejects unresolved or endpoint assets in path payment paths", () => {
