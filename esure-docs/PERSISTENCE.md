@@ -29,6 +29,76 @@ operators as `npm run prune:runs` — deletes expired terminal runs in bounded
 batches so large backlogs cannot accumulate in a single transaction. Nothing
 invokes it automatically; it runs only on explicit operator request.
 
+## Retention: logical expiry vs. physical pruning
+
+Retention has two independent stages, and conflating them leads to wrong
+expectations about what the database contains.
+
+- **Logical expiry (reads).** Once a terminal report's `completed_at` is older
+  than `RUN_RETENTION_MS`, the store stops returning it. The row is untouched;
+  it is simply filtered out of read results.
+- **Physical pruning (deletes).** Rows are removed only when an operator runs
+  `npm run prune:runs` (backed by `PostgresRunStore.pruneExpired`). The
+  `guard_run_cleanup` trigger from migration 001 enforces a hard 30-day
+  database floor, so even an explicit prune deletes a run only when it is
+  terminal, past the `RUN_RETENTION_MS` cutoff, **and** older than 30 days.
+
+### Concrete timeline
+
+Assume a run completes at `T0` and `RUN_RETENTION_MS` is shorter than 30 days
+(the common configuration):
+
+| Time | State |
+| --- | --- |
+| `T0` | Run completes; visible to reads. |
+| `T0 + RUN_RETENTION_MS` | Hidden from reads. Row still present in `runs`. |
+| `T0 + 30 days` | Earliest moment the row becomes eligible for physical deletion. |
+| First `npm run prune:runs` at or after `T0 + 30 days` | Row is deleted (subject to batch size and the loop completing). |
+
+If `RUN_RETENTION_MS` is configured longer than 30 days, the retention cutoff
+becomes the binding constraint and the earliest deletion is
+`T0 + RUN_RETENTION_MS`. In both cases, deletion only happens when a prune is
+actually invoked; there is no background scheduler.
+
+### Why hidden rows may remain
+
+Between the retention cutoff and the 30-day floor, rows stay in the `runs`
+table but are invisible to the API. A raw `SELECT count(*) FROM runs` can
+therefore exceed the number of reports the API returns, and that gap is
+expected rather than a bug. The gap also persists after the floor passes until
+an operator runs the prune.
+
+### Prerequisites
+
+- The prune must run as a login role with `esure_maintenance` membership; the
+  application and worker roles cannot delete runs.
+- Each batch runs in its own transaction with `SET LOCAL esure.cleanup_mode=on`
+  and a fresh `esure.cleanup_id`, and writes one `cleanup_audit` row per deleted
+  run (`action='delete_run'`) before the DELETE.
+- `--dry-run` reports the eligible count without deleting anything.
+
+### Verifying cleanup
+
+```sh
+# 1. See how many rows are currently eligible (no deletes).
+npm run prune:runs -- --dry-run
+
+# 2. Perform the real prune.
+npm run prune:runs
+
+# 3. Confirm the row is gone and the audit entry exists.
+psql "$DATABASE_MIGRATION_URL" -X -v ON_ERROR_STOP=1 \
+  -c "SELECT run_id FROM runs WHERE run_id = 'REPLACE_WITH_RUN_ID'" \
+  -c "SELECT cleanup_id, action, run_id, created_at FROM cleanup_audit WHERE action = 'delete_run' AND run_id = 'REPLACE_WITH_RUN_ID' ORDER BY created_at"
+```
+
+The first query should return no rows after a successful prune, and the second
+should return the audit entries written for that run. Rerunning the prune is
+idempotent: it reselects whatever remains eligible, so a second run deletes
+nothing new if the first completed. If a batch fails, the loop stops at the
+first failing batch; already-committed batches stay deleted with their audit
+entries, and rerunning resumes from whatever remains eligible.
+
 Deletion follows the audited cleanup contract enforced by the
 `guard_run_cleanup` trigger from migration 001: every batch runs in its own
 transaction as the `esure_maintenance` role with transaction-local
