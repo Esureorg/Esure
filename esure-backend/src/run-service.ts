@@ -49,6 +49,7 @@ export class RunService {
   #activeRuns = 0;
   #draining = false;
   readonly #activePromises = new Set<Promise<void>>();
+  readonly #activeControllers = new Set<AbortController>();
   #passedRuns = 0;
   #failedRuns = 0;
   #capacityRejectedStarts = 0;
@@ -74,6 +75,14 @@ export class RunService {
   /** True once drain() has been called; new starts are rejected after this point. */
   get draining(): boolean {
     return this.#draining;
+  }
+
+  /** Abort all in-flight gateway executions immediately. */
+  cancelActive(): void {
+    for (const controller of this.#activeControllers) {
+      controller.abort();
+    }
+    this.#activeControllers.clear();
   }
 
   getMetrics(): RunMetricsSnapshot {
@@ -154,6 +163,7 @@ export class RunService {
 
   async execute(id: string, scenario: ValidatedScenario, startedAt = this.hrNow(), requestId?: string): Promise<void> {
     const controller = new AbortController();
+    this.#activeControllers.add(controller);
     let progressUpdates = Promise.resolve();
     let outcome: "passed" | "failed" = "failed";
     let errorCode: string | undefined;
@@ -231,6 +241,7 @@ export class RunService {
       });
     } finally {
       controller.abort();
+      this.#activeControllers.delete(controller);
       this.#activeRuns -= 1;
       if (outcome === "passed") this.#passedRuns += 1;
       else this.#failedRuns += 1;

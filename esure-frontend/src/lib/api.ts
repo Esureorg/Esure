@@ -660,44 +660,13 @@ export function getScenario(scenarioId: string, signal?: AbortSignal): Promise<S
   return request(`/api/backend/api/v1/scenarios/${encodeURIComponent(scenarioId)}`, { signal }, isScenarioDetail);
 }
 
-export function getScenarioVersions(
-  scenarioId: string,
-  limit = 10,
-  cursor?: number,
-  signal?: AbortSignal,
-): Promise<ScenarioVersionHistory> {
-  const query = new URLSearchParams({ limit: String(limit) });
-  if (cursor !== undefined) query.set("cursor", String(cursor));
-  return request(
-    `/api/backend/api/v1/scenarios/${encodeURIComponent(scenarioId)}/versions?${query}`,
-    { signal },
-    isScenarioVersionHistory,
-  );
-}
-
-export function getScenarioVersion(scenarioId: string, version: number, signal?: AbortSignal): Promise<ScenarioDetail> {
-  return request(
-    `/api/backend/api/v1/scenarios/${encodeURIComponent(scenarioId)}/versions/${version}`,
-    { signal },
-    isScenarioDetail,
-  );
-}
-
-function isScenarioVersionSummary(value: unknown): value is ScenarioVersionSummary {
-  return isRecord(value)
-    && isNonNegativeInteger(value.version)
-    && value.version > 0
-    && isNonNegativeInteger(value.schemaVersion)
-    && value.schemaVersion > 0
-    && isString(value.contentHash)
-    && isString(value.createdAt);
-}
-
-function isScenarioVersionHistory(value: unknown): value is ScenarioVersionHistory {
-  return isRecord(value)
-    && Array.isArray(value.items)
-    && value.items.every(isScenarioVersionSummary)
-    && (value.nextCursor === undefined || (isNonNegativeInteger(value.nextCursor) && value.nextCursor > 0));
+export async function downloadScenarioDefinition(scenarioId: string, version: number, signal?: AbortSignal): Promise<string> {
+  const url = `/api/backend/api/v1/scenarios/${encodeURIComponent(scenarioId)}/versions/${encodeURIComponent(String(version))}/export?format=json`;
+  const response = await fetch(url, { signal, headers: { accept: "application/json" } });
+  if (!response.ok) {
+    throw new ApiError("Failed to download scenario definition.", "DOWNLOAD_FAILED", response.status);
+  }
+  return response.text();
 }
 
 export function parseRetryAfter(value: string | null, maxSeconds = 60): number | null {
