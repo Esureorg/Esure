@@ -27,7 +27,7 @@ jobs:
       run:
         working-directory: esure-backend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
@@ -52,7 +52,7 @@ jobs:
       run:
         working-directory: esure-frontend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
@@ -81,7 +81,7 @@ jobs:
       matrix:
         node-version: [20, 22]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
@@ -112,7 +112,7 @@ jobs:
       TESTNET_ENABLED: "false"
       ESURE_LIVE_NETWORK: "false"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with:
           node-version: 22
