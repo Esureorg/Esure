@@ -11,6 +11,13 @@ describe("backend proxy report downloads", () => {
     expect(isAllowedPath(["api", "v1", "runs", "run-123", "delete"], "GET")).toBe(false);
   });
 
+  it("allows only history and exact-version scenario reads", () => {
+    expect(isAllowedPath(["api", "v1", "scenarios", "xlm-payment", "versions"], "GET")).toBe(true);
+    expect(isAllowedPath(["api", "v1", "scenarios", "xlm-payment", "versions", "2"], "GET")).toBe(true);
+    expect(isAllowedPath(["api", "v1", "scenarios", "xlm-payment", "versions", "2", "export"], "GET")).toBe(false);
+    expect(isAllowedPath(["api", "v1", "scenarios", "xlm-payment", "versions", "2"], "POST")).toBe(false);
+  });
+
   it("forwards the attachment filename from the backend", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response('{"status":"passed"}', {
       status: 200,

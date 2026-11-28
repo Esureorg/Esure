@@ -1,0 +1,69 @@
+# Path payment with no available liquidity
+#
+# This fixture is the negative counterpart to `path-payment.yaml`. It sets up
+# the same shape of accounts and assets (native XLM plus freshly generated
+# issued EUR and USDC) but deliberately never places any offers on the
+# orderbook. A `pathPaymentStrictReceive` that requires an EUR -> USDC hop
+# therefore has no liquidity to consume and must fail without moving funds.
+#
+# Testnet only. All amounts are bounded.
+
+network: testnet
+
+accounts:
+  - name: sender
+    generated: true
+    funded: true
+  - name: recipient
+    generated: true
+    funded: true
+  - name: issuer
+    generated: true
+    funded: true
+
+assets:
+  - code: EUR
+    issuer: issuer
+    generated: true
+  - code: USDC
+    issuer: issuer
+    generated: true
+
+steps:
+  # Recipient needs a USDC trustline so the destination asset is valid. The
+  # issuer is the source of both issued assets; no offers are created.
+  - name: recipient-trust-usdc
+    type: changeTrust
+    account: recipient
+    asset: USDC
+    limit: "1000"
+
+  # Attempt to deliver 5 USDC to the recipient by sending at most 10 XLM
+  # through an EUR hop. With no offers on the orderbook there is no path and
+  # the operation must fail with `op_no_issuer`.
+  - name: path-payment-no-liquidity
+    type: pathPaymentStrictReceive
+    account: sender
+    sendAsset: native
+    sendMax: "10"
+    destination: recipient
+    destAsset: USDC
+    destAmount: "5"
+    path:
+      - EUR
+
+assertions:
+  - type: stepSucceeded
+    step: recipient-trust-usdc
+
+  - type: stepFailedWith
+    step: path-payment-no-liquidity
+    transactionCode: tx_failed
+    operationCodes:
+      - op_no_issuer
+
+  # The recipient balance must be unchanged: nothing was delivered.
+  - type: balanceEquals
+    account: recipient
+    asset: USDC
+    amount: "0"

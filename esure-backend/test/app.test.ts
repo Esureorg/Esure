@@ -16,8 +16,8 @@ const config: AppConfig = {
   friendbotUrl: "https://friendbot.stellar.org",
   runTimeoutMs: 5_000,
   stepTimeoutMs: 1_000,
+  shutdownTimeoutMs: 30_000,
   maxConcurrentRuns: 2,
-  metricsEnabled: false,
   maxConcurrentFriendbotRequests: 5,
   maxStoredRuns: 100,
   runRetentionMs: 60_000,
@@ -31,6 +31,8 @@ const config: AppConfig = {
   databaseConnectionTimeoutMs: 5_000,
   databaseQueryTimeoutMs: 5_000,
   databaseIdleTimeoutMs: 10_000,
+  idempotencyMaxEntries: 1_000,
+  idempotencyRetentionMs: 86_400_000,
 };
 
 const ledger: LedgerGateway = {
@@ -682,5 +684,61 @@ describe("graceful shutdown", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("idempotency store — capacity and expiry via injected clock", () => {
+  it("rejects new keys once idempotencyMaxEntries is reached", async () => {
+    const app = createApp({
+      config: { ...config, idempotencyMaxEntries: 1, idempotencyRetentionMs: 86_400_000 },
+    });
+
+    // First keyed request fills the single-slot store.
+    const first = await app.inject({
+      method: "POST",
+      url: "/api/v1/runs",
+      headers: { "idempotency-key": "key-first" },
+      payload: { scenarioId: "xlm-payment" },
+    });
+    expect(first.statusCode).toBe(202);
+
+    // Second distinct key hits capacity.
+    const second = await app.inject({
+      method: "POST",
+      url: "/api/v1/runs",
+      headers: { "idempotency-key": "key-second" },
+      payload: { scenarioId: "xlm-payment" },
+    });
+    expect(second.statusCode).toBe(503);
+    expect(second.json().error.code).toBe("IDEMPOTENCY_CAPACITY");
+  });
+
+  it("allows key reuse after the retention window elapses", async () => {
+    let now = 0;
+    const app = createApp({
+      config: { ...config, idempotencyMaxEntries: 1, idempotencyRetentionMs: 1_000 },
+      clock: () => now,
+    });
+
+    // Insert an entry.
+    const first = await app.inject({
+      method: "POST",
+      url: "/api/v1/runs",
+      headers: { "idempotency-key": "reuse-key" },
+      payload: { scenarioId: "xlm-payment" },
+    });
+    expect(first.statusCode).toBe(202);
+
+    // Advance clock past the retention window so the entry expires.
+    now = 1_001;
+
+    // The same key should now be treated as a new entry — the slot is free.
+    const second = await app.inject({
+      method: "POST",
+      url: "/api/v1/runs",
+      headers: { "idempotency-key": "reuse-key" },
+      payload: { scenarioId: "xlm-payment" },
+    });
+    expect(second.statusCode).toBe(202);
   });
 });

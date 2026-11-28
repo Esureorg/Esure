@@ -6,6 +6,18 @@ export interface ScenarioSummary {
   contentHash: string;
 }
 
+export interface ScenarioVersionSummary {
+  version: number;
+  schemaVersion: number;
+  contentHash: string;
+  createdAt: string;
+}
+
+export interface ScenarioVersionHistory {
+  items: ScenarioVersionSummary[];
+  nextCursor?: number;
+}
+
 export type RunStatus = "requested" | "validating" | "running" | "passed" | "failed";
 
 export interface StepResult {
@@ -75,7 +87,7 @@ export async function listScenarios(signal?: AbortSignal): Promise<ScenarioSumma
   return data.items;
 }
 
-export function startRun(scenarioId: string, idempotencyKey?: string): Promise<RunReport> {
+export function startRun(scenarioId: string, scenarioVersion: number, idempotencyKey?: string): Promise<RunReport> {
   const headers: Record<string, string> = { "content-type": "application/json" };
   if (idempotencyKey) {
     headers["idempotency-key"] = idempotencyKey;
@@ -83,7 +95,7 @@ export function startRun(scenarioId: string, idempotencyKey?: string): Promise<R
   return request("/api/backend/api/v1/runs", {
     method: "POST",
     headers,
-    body: JSON.stringify({ scenarioId, inputs: {} }),
+    body: JSON.stringify({ scenarioId, scenarioVersion, inputs: {} }),
   }, isRunReport);
 }
 
@@ -277,6 +289,7 @@ export interface AssertionComparison {
   statusA?: "passed" | "failed";
   statusB?: "passed" | "failed";
   statusChange: "unchanged" | "added" | "removed" | "changed";
+  evidenceChanged?: boolean;
 }
 
 export interface ReportComparison {
@@ -385,26 +398,33 @@ export function compareReports(a: RunReport, b: RunReport): ReportComparison {
   }
 
   // Assertion comparison using documented stable occurrence keys: `${type}#${index}`
-  // index is occurrence count of this assertion type in the report
+  // index is occurrence count of this assertion type in the report.
+  // The type is stored alongside the key (rather than re-derived via split("#"))
+  // so assertion types containing "#" cannot corrupt the reported type.
   function getAssertionKeyMap(assertions: AssertionResult[]) {
-    const keyMap = new Map<string, AssertionResult>();
+    const keyMap = new Map<string, { type: string; assertion: AssertionResult }>();
     const counts = new Map<string, number>();
+
     for (const assertion of assertions) {
+      const refKey = getAssertionReferenceKey(assertion);
+      if (refKey) {
+        if (!refMap.has(refKey)) refMap.set(refKey, []);
+        refMap.get(refKey)!.push(assertion);
+      }
+
       const count = counts.get(assertion.type) ?? 0;
       counts.set(assertion.type, count + 1);
       const key = `${assertion.type}#${count}`;
-      keyMap.set(key, assertion);
+      keyMap.set(key, { type: assertion.type, assertion });
     }
-    return keyMap;
+
+    return { keyMap, refMap };
   }
 
-  const assertMapA = getAssertionKeyMap(a.assertions);
-  const assertMapB = getAssertionKeyMap(b.assertions);
+  const { keyMap: assertMapA, refMap: refMapA } = getAssertionKeyMap(a.assertions);
+  const { keyMap: assertMapB, refMap: refMapB } = getAssertionKeyMap(b.assertions);
 
-  const allAssertKeys = new Set<string>([
-    ...assertMapA.keys(),
-    ...assertMapB.keys(),
-  ]);
+  const matchedRefs = new Set<string>();
 
   const assertionComparisons: AssertionComparison[] = [];
   let assertionsAdded = 0;
@@ -412,10 +432,77 @@ export function compareReports(a: RunReport, b: RunReport): ReportComparison {
   let assertionsChanged = 0;
   let assertionsUnchanged = 0;
 
+  for (const refKey of refMapA.keys()) {
+    const assertsA = refMapA.get(refKey) || [];
+    const assertsB = refMapB.get(refKey) || [];
+    matchedRefs.add(refKey);
+
+    for (let i = 0; i < Math.max(assertsA.length, assertsB.length); i++) {
+      const assertA = assertsA[i];
+      const assertB = assertsB[i];
+      const type = assertA?.type || assertB?.type || "";
+
+      if (assertA && assertB) {
+        const statusChange = assertA.status === assertB.status ? "unchanged" : "changed";
+        const evidenceChanged = JSON.stringify(canonicalJson(assertA)) !== JSON.stringify(canonicalJson(assertB));
+
+        if (statusChange === "unchanged" && !evidenceChanged) assertionsUnchanged++;
+        else assertionsChanged++;
+
+        assertionComparisons.push({
+          key: refKey,
+          type,
+          statusA: assertA.status,
+          statusB: assertB.status,
+          statusChange: statusChange === "unchanged" && evidenceChanged ? "changed" : statusChange,
+          evidenceChanged: evidenceChanged && statusChange === "unchanged",
+        });
+      } else if (assertA && !assertB) {
+        assertionsRemoved++;
+        assertionComparisons.push({
+          key: refKey,
+          type,
+          statusA: assertA.status,
+          statusChange: "removed",
+        });
+      } else if (!assertA && assertB) {
+        assertionsAdded++;
+        assertionComparisons.push({
+          key: refKey,
+          type,
+          statusB: assertB.status,
+          statusChange: "added",
+        });
+      }
+    }
+  }
+
+  for (const refKey of refMapB.keys()) {
+    if (matchedRefs.has(refKey)) continue;
+    const assertsB = refMapB.get(refKey) || [];
+
+    for (const assertB of assertsB) {
+      assertionsAdded++;
+      assertionComparisons.push({
+        key: refKey,
+        type: assertB.type,
+        statusB: assertB.status,
+        statusChange: "added",
+      });
+    }
+  }
+
+  const allAssertKeys = new Set<string>([
+    ...assertMapA.keys(),
+    ...assertMapB.keys(),
+  ]);
+
   for (const key of allAssertKeys) {
-    const assertA = assertMapA.get(key);
-    const assertB = assertMapB.get(key);
-    const type = key.split("#")[0];
+    const entryA = assertMapA.get(key);
+    const entryB = assertMapB.get(key);
+    const assertA = entryA?.assertion;
+    const assertB = entryB?.assertion;
+    const type = (entryB ?? entryA)!.type;
 
     if (assertA && assertB) {
       const change = assertA.status === assertB.status ? "unchanged" : "changed";
@@ -473,6 +560,73 @@ export function compareReports(a: RunReport, b: RunReport): ReportComparison {
   };
 }
 
+/** Versioned comparison artifact format (issue #202). */
+export interface ComparisonArtifact {
+  /** Format version — bump when the shape changes. */
+  comparisonFormatVersion: 1;
+  exportedAt: string;
+  reportA: {
+    id: string;
+    scenarioId: string;
+    scenarioVersion: number;
+    scenarioContentHash: string;
+    network: string;
+    status: RunStatus;
+    createdAt: string;
+    completedAt?: string;
+  };
+  reportB: {
+    id: string;
+    scenarioId: string;
+    scenarioVersion: number;
+    scenarioContentHash: string;
+    network: string;
+    status: RunStatus;
+    createdAt: string;
+    completedAt?: string;
+  };
+  comparison: ReportComparison;
+}
+
+/**
+ * Build a versioned JSON artifact capturing all comparison data (issue #202).
+ * The returned value is deterministic: same two reports always produce the
+ * same artifact (modulo `exportedAt`), so callers can compare artifacts for
+ * test purposes by stripping that field.
+ */
+export function buildComparisonArtifact(
+  reportA: RunReport,
+  reportB: RunReport,
+  comparison: ReportComparison,
+  now: () => string = () => new Date().toISOString(),
+): ComparisonArtifact {
+  return {
+    comparisonFormatVersion: 1,
+    exportedAt: now(),
+    reportA: {
+      id: reportA.id,
+      scenarioId: reportA.scenarioId,
+      scenarioVersion: reportA.scenarioVersion,
+      scenarioContentHash: reportA.scenarioContentHash,
+      network: reportA.network,
+      status: reportA.status,
+      createdAt: reportA.createdAt,
+      ...(reportA.completedAt !== undefined && { completedAt: reportA.completedAt }),
+    },
+    reportB: {
+      id: reportB.id,
+      scenarioId: reportB.scenarioId,
+      scenarioVersion: reportB.scenarioVersion,
+      scenarioContentHash: reportB.scenarioContentHash,
+      network: reportB.network,
+      status: reportB.status,
+      createdAt: reportB.createdAt,
+      ...(reportB.completedAt !== undefined && { completedAt: reportB.completedAt }),
+    },
+    comparison,
+  };
+}
+
 export interface ScenarioDetail {
   id: string;
   version: number;
@@ -506,6 +660,46 @@ export function getScenario(scenarioId: string, signal?: AbortSignal): Promise<S
   return request(`/api/backend/api/v1/scenarios/${encodeURIComponent(scenarioId)}`, { signal }, isScenarioDetail);
 }
 
+export function getScenarioVersions(
+  scenarioId: string,
+  limit = 10,
+  cursor?: number,
+  signal?: AbortSignal,
+): Promise<ScenarioVersionHistory> {
+  const query = new URLSearchParams({ limit: String(limit) });
+  if (cursor !== undefined) query.set("cursor", String(cursor));
+  return request(
+    `/api/backend/api/v1/scenarios/${encodeURIComponent(scenarioId)}/versions?${query}`,
+    { signal },
+    isScenarioVersionHistory,
+  );
+}
+
+export function getScenarioVersion(scenarioId: string, version: number, signal?: AbortSignal): Promise<ScenarioDetail> {
+  return request(
+    `/api/backend/api/v1/scenarios/${encodeURIComponent(scenarioId)}/versions/${version}`,
+    { signal },
+    isScenarioDetail,
+  );
+}
+
+function isScenarioVersionSummary(value: unknown): value is ScenarioVersionSummary {
+  return isRecord(value)
+    && isNonNegativeInteger(value.version)
+    && value.version > 0
+    && isNonNegativeInteger(value.schemaVersion)
+    && value.schemaVersion > 0
+    && isString(value.contentHash)
+    && isString(value.createdAt);
+}
+
+function isScenarioVersionHistory(value: unknown): value is ScenarioVersionHistory {
+  return isRecord(value)
+    && Array.isArray(value.items)
+    && value.items.every(isScenarioVersionSummary)
+    && (value.nextCursor === undefined || (isNonNegativeInteger(value.nextCursor) && value.nextCursor > 0));
+}
+
 export function parseRetryAfter(value: string | null, maxSeconds = 60): number | null {
   if (!value) return null;
   const numeric = Number(value.trim());
@@ -516,6 +710,17 @@ export function parseRetryAfter(value: string | null, maxSeconds = 60): number |
     return Math.min(Math.max(seconds, 0), maxSeconds);
   }
   return null;
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return "[" + value.map((v) => canonicalJson(v)).join(",") + "]";
+  }
+  const keys = Object.keys(value as Record<string, unknown>).sort();
+  return "{" + keys.map((k) => `"${k}":${canonicalJson((value as Record<string, unknown>)[k])}`).join(",") + "}";
 }
 
 export class RateLimitError extends ApiError {

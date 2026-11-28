@@ -29,6 +29,76 @@ operators as `npm run prune:runs` — deletes expired terminal runs in bounded
 batches so large backlogs cannot accumulate in a single transaction. Nothing
 invokes it automatically; it runs only on explicit operator request.
 
+## Retention: logical expiry vs. physical pruning
+
+Retention has two independent stages, and conflating them leads to wrong
+expectations about what the database contains.
+
+- **Logical expiry (reads).** Once a terminal report's `completed_at` is older
+  than `RUN_RETENTION_MS`, the store stops returning it. The row is untouched;
+  it is simply filtered out of read results.
+- **Physical pruning (deletes).** Rows are removed only when an operator runs
+  `npm run prune:runs` (backed by `PostgresRunStore.pruneExpired`). The
+  `guard_run_cleanup` trigger from migration 001 enforces a hard 30-day
+  database floor, so even an explicit prune deletes a run only when it is
+  terminal, past the `RUN_RETENTION_MS` cutoff, **and** older than 30 days.
+
+### Concrete timeline
+
+Assume a run completes at `T0` and `RUN_RETENTION_MS` is shorter than 30 days
+(the common configuration):
+
+| Time | State |
+| --- | --- |
+| `T0` | Run completes; visible to reads. |
+| `T0 + RUN_RETENTION_MS` | Hidden from reads. Row still present in `runs`. |
+| `T0 + 30 days` | Earliest moment the row becomes eligible for physical deletion. |
+| First `npm run prune:runs` at or after `T0 + 30 days` | Row is deleted (subject to batch size and the loop completing). |
+
+If `RUN_RETENTION_MS` is configured longer than 30 days, the retention cutoff
+becomes the binding constraint and the earliest deletion is
+`T0 + RUN_RETENTION_MS`. In both cases, deletion only happens when a prune is
+actually invoked; there is no background scheduler.
+
+### Why hidden rows may remain
+
+Between the retention cutoff and the 30-day floor, rows stay in the `runs`
+table but are invisible to the API. A raw `SELECT count(*) FROM runs` can
+therefore exceed the number of reports the API returns, and that gap is
+expected rather than a bug. The gap also persists after the floor passes until
+an operator runs the prune.
+
+### Prerequisites
+
+- The prune must run as a login role with `esure_maintenance` membership; the
+  application and worker roles cannot delete runs.
+- Each batch runs in its own transaction with `SET LOCAL esure.cleanup_mode=on`
+  and a fresh `esure.cleanup_id`, and writes one `cleanup_audit` row per deleted
+  run (`action='delete_run'`) before the DELETE.
+- `--dry-run` reports the eligible count without deleting anything.
+
+### Verifying cleanup
+
+```sh
+# 1. See how many rows are currently eligible (no deletes).
+npm run prune:runs -- --dry-run
+
+# 2. Perform the real prune.
+npm run prune:runs
+
+# 3. Confirm the row is gone and the audit entry exists.
+psql "$DATABASE_MIGRATION_URL" -X -v ON_ERROR_STOP=1 \
+  -c "SELECT run_id FROM runs WHERE run_id = 'REPLACE_WITH_RUN_ID'" \
+  -c "SELECT cleanup_id, action, run_id, created_at FROM cleanup_audit WHERE action = 'delete_run' AND run_id = 'REPLACE_WITH_RUN_ID' ORDER BY created_at"
+```
+
+The first query should return no rows after a successful prune, and the second
+should return the audit entries written for that run. Rerunning the prune is
+idempotent: it reselects whatever remains eligible, so a second run deletes
+nothing new if the first completed. If a batch fails, the loop stops at the
+first failing batch; already-committed batches stay deleted with their audit
+entries, and rerunning resumes from whatever remains eligible.
+
 Deletion follows the audited cleanup contract enforced by the
 `guard_run_cleanup` trigger from migration 001: every batch runs in its own
 transaction as the `esure_maintenance` role with transaction-local
@@ -187,6 +257,51 @@ migration rolls back completely. Production rollback uses a pre-migration
 backup/point-in-time restore for destructive incompatibility and a new forward
 repair migration for ordinary defects; applied migration files are never edited
 and automatic destructive down-migrations are not used.
+
+### Recovering from a checksum mismatch
+
+Startup verification (`assertMigrationsCurrent` in `esure-backend/src/database.ts`)
+and `npm run db:migrate` (`runMigrations`) both fail closed when a file on disk
+does not match the filename or SHA-256 checksum recorded in `schema_migrations`.
+The process does not start and the migration command exits nonzero; neither path
+rewrites the recorded row. Treat the mismatch as a signal that the applied
+migration and the checked-in file have diverged, not as something to silence.
+
+1. **Inspect status (read-only).** Run `npm run db:migrate:status` (backed by
+   `migrationStatus`) with `DATABASE_MIGRATION_URL`. It reports applied, pending,
+   unexpected, and mismatched versions without writing anything. Then compare the
+   recorded checksums with the files on disk:
+
+   ```sh
+   psql "$DATABASE_MIGRATION_URL" -X -v ON_ERROR_STOP=1 -At -F '|' \
+     -c "SELECT version, filename, checksum FROM schema_migrations ORDER BY version"
+   sha256sum migrations/*.sql
+   ```
+
+   A version listed as mismatched has a recorded checksum that differs from the
+   file, or a recorded filename that no longer exists. Note which file changed
+   and whether the database is local and disposable or shared.
+
+2. **Local disposable database.** If the database holds no data you need, drop
+   and recreate it, then rerun `npm run db:migrate` and `npm run db:reconcile`
+   from a clean state. This is the fastest recovery and avoids reasoning about
+   partial history. Never do this to a shared or deployed database.
+
+3. **Shared deployment.** Restore the original applied migration file
+   byte-for-byte so its checksum matches the recorded value, then rerun
+   `npm run db:migrate:status` and startup verification. Recover the original
+   content from version control at the commit that was deployed, not from memory
+   or a reformatted copy; line endings and whitespace are part of the checksum.
+   If the original file cannot be recovered, treat this as a destructive
+   incompatibility and use a pre-migration backup or point-in-time restore.
+
+4. **Prefer forward repair migrations.** For ordinary defects, add a new numbered
+   migration that corrects the schema. Do not edit recorded checksums or
+   `schema_migrations` rows by hand: doing so hides the divergence, defeats the
+   startup guard, and leaves other environments inconsistent. Editing an applied
+   migration file is never acceptable; the only sanctioned fix is a new forward
+   migration (or, for destructive incompatibility, a backup/PITR restore).
+=======
 
 References: [Render database credentials](https://render.com/docs/postgresql-credentials)
 and [Render connection pooling](https://render.com/docs/postgresql-connection-pooling).

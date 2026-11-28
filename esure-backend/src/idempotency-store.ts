@@ -36,6 +36,14 @@ export type IdempotencyInsertResult<T> =
   | { status: "conflict"; existingFingerprint: string }
   | { status: "capacity" };
 
+/**
+ * Pre-admission failures that should release the idempotency key so the
+ * caller can retry with the same key. Errors that occur after the run is
+ * admitted (i.e. already running) are NOT transient in this sense — the entry
+ * stays so callers that re-submit get the same result. (#215)
+ */
+export type TransientRejectionPredicate = (err: unknown) => boolean;
+
 export class IdempotencyStore<T> {
   readonly #entries = new Map<string, IdempotencyEntry<T>>();
 
@@ -43,6 +51,17 @@ export class IdempotencyStore<T> {
     private readonly maxEntries: number = 1_000,
     private readonly retentionMs: number = 86_400_000, // 24 h
     private readonly now: () => number = Date.now,
+    /**
+     * When set, a producer that rejects with an error matching this predicate
+     * is treated as a *pre-admission* transient failure: the entry is removed
+     * from the store so the caller can retry with the same key without getting
+     * a spurious "existing" response. (#215)
+     *
+     * Errors that do NOT match are treated as settled results — the entry
+     * stays, and re-submitters with the same key receive the same rejection,
+     * which prevents duplicate execution.
+     */
+    private readonly isTransient?: TransientRejectionPredicate,
   ) {}
 
   get size(): number {
@@ -73,7 +92,21 @@ export class IdempotencyStore<T> {
       return { status: "capacity" };
     }
 
-    const resultPromise = typeof producer === "function" ? producer() : producer;
+    const rawPromise = typeof producer === "function" ? producer() : producer;
+
+    // If a transient predicate is configured, tap the promise so that a
+    // matching rejection deletes the entry. The tap itself never swallows
+    // the rejection — the caller still receives the original rawPromise
+    // through entry.result and must handle it. (#215)
+    const resultPromise = this.isTransient
+      ? rawPromise.catch((err: unknown) => {
+          if (this.isTransient!(err) && this.#entries.get(key)?.result === resultPromise) {
+            this.#entries.delete(key);
+          }
+          return Promise.reject(err);
+        })
+      : rawPromise;
+
     const entry: IdempotencyEntry<T> = {
       requestFingerprint: fingerprint,
       result: resultPromise,
@@ -81,6 +114,21 @@ export class IdempotencyStore<T> {
     };
     this.#entries.set(key, entry);
     return { status: "created", entry };
+  }
+
+  /**
+   * Release an idempotency key so a subsequent request with the same key can
+   * succeed without being treated as a duplicate (issue #215).
+   *
+   * Only call this when a *pre-admission* failure occurred — i.e. the handler
+   * never ran and no run was created.  Releasing after a successful run or a
+   * conflict would allow duplicate execution of work that already happened.
+   *
+   * Returns `true` if the entry existed and was removed; `false` if it had
+   * already expired or was never inserted.
+   */
+  release(key: string): boolean {
+    return this.#entries.delete(key);
   }
 
   #removeExpired(): void {
