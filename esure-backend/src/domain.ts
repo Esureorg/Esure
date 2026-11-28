@@ -41,7 +41,20 @@ export type ScenarioStep =
   | { id: string; type: "payment"; from: string; to: string; asset: string; amount: string; memo?: string }
   | { id: string; type: "manageSellOffer"; account: string; sellingAsset: string; buyingAsset: string; amount: string; price: string }
   | { id: string; type: "pathPaymentStrictReceive"; from: string; to: string; sendAsset: string; sendMax: string; destAsset: string; destAmount: string; path: string[] }
-  | { id: string; type: "pathPaymentStrictSend"; from: string; to: string; sendAsset: string; sendAmount: string; destAsset: string; destMin: string; path: string[] };
+  | {
+      id: string;
+      type: "pathPaymentStrictSend";
+      from: string;
+      to: string;
+      sendAsset: string;
+      /** Exact amount of `sendAsset` debited from `from` (integer string in asset units). */
+      sendAmount: string;
+      destAsset: string;
+      /** Minimum acceptable amount of `destAsset` credited to `to` (integer string in asset units). */
+      destMin: string;
+      path: string[];
+      memo?: string;
+    };
 
 export type ScenarioAssertion =
   | { type: "transactionMemoEquals"; step: string; memo: string }

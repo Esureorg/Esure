@@ -541,6 +541,92 @@ test.describe("Failed Run and Error States", () => {
     await expect(page.locator("a.download")).toBeVisible();
   });
 
+  test("prints a terminal report with long evidence without overflow", async ({ page }) => {
+    const longEvidence = "Recipient balance evidence: ".repeat(40);
+    const printRun: RunReport = {
+      ...failedRun,
+      assertions: [
+        {
+          type: "balanceEquals",
+          status: "passed",
+          expected: "100",
+          actual: "100",
+          message: "Passing balance assertion.",
+        },
+        {
+          type: "paymentDelivered",
+          status: "failed",
+          expected: true,
+          actual: false,
+          message: `Failed payment assertion with long structured evidence. ${longEvidence}`,
+        },
+      ],
+    };
+
+    await page.route("**/api/backend/api/v1/scenarios", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ items: mockScenarios }),
+      });
+    });
+
+    await page.route("**/api/backend/api/v1/runs", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(runningRun),
+      });
+    });
+
+    await page.route("**/api/backend/api/v1/runs/run-e2e-123", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(printRun),
+      });
+    });
+
+    await page.goto("/");
+    await page.locator(".launch-panel .run-button").click();
+    await expect(page.locator(".status-badge")).toContainText("Failed", { timeout: 10_000 });
+
+    await page.emulateMedia({ media: "print" });
+
+    // Provenance header remains visible in print media
+    const printHeader = page.locator(".print-report-header");
+    await expect(printHeader).toBeVisible();
+    await expect(printHeader).toContainText("Issued Asset Payment");
+    await expect(printHeader).toContainText("sha256:2222222222222222222222222222222222222222222222222222222222222222");
+
+    // Long structured assertion evidence remains visible
+    const longAssertion = page.locator(".assertion", { hasText: "Failed payment assertion with long structured evidence." });
+    await expect(longAssertion).toBeVisible();
+    await expect(longAssertion).toContainText(longEvidence.trim());
+
+    // Interactive controls are hidden in print media
+    await expect(page.locator(".launch-panel")).toBeHidden();
+    await expect(page.locator(".scenario-grid")).toBeHidden();
+    await expect(page.getByRole("group", { name: "Report filter" })).toBeHidden();
+    await expect(page.locator("a.download")).toBeHidden();
+
+    // No horizontal page-width overflow
+    const overflow = await page.evaluate(() => {
+      const doc = document.documentElement;
+      const body = document.body;
+      return {
+        docScroll: doc.scrollWidth,
+        docClient: doc.clientWidth,
+        bodyScroll: body.scrollWidth,
+        bodyClient: body.clientWidth,
+      };
+    });
+    expect(overflow.docScroll).toBeLessThanOrEqual(overflow.docClient);
+    expect(overflow.bodyScroll).toBeLessThanOrEqual(overflow.bodyClient);
+
+    await page.emulateMedia({ media: "screen" });
+  });
+
   test("displays error banner when starting a run fails", async ({ page }) => {
     await page.route("**/api/backend/api/v1/scenarios", async (route) => {
       await route.fulfill({
