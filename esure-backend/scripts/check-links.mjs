@@ -10,7 +10,13 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, "..");
+// Resolve the docs directory relative to the repository root so the checker
+// works regardless of the current working directory (e.g. when run from CI).
 const docsDir = resolve(repoRoot, "..", "esure-docs");
+
+// This checker is strictly offline: external links are never fetched, only
+// local paths and anchors are validated.
+const OFFLINE = true;
 
 // Track all Markdown files and their headings
 const headingsByFile = new Map();
@@ -58,8 +64,13 @@ function resolveMarkdownPath(link, fromFile) {
 }
 
 function validateLink(link, sourceFile, sourceLine) {
-  // Skip external URLs
-  if (link.startsWith("http://") || link.startsWith("https://") || link.startsWith("mailto:")) {
+  // Skip external URLs (never fetched; offline mode only validates local links)
+  if (
+    link.startsWith("http://") ||
+    link.startsWith("https://") ||
+    link.startsWith("mailto:") ||
+    link.startsWith("//")
+  ) {
     return true;
   }
 
@@ -137,7 +148,12 @@ function walkDir(dir) {
 }
 
 // Validate all Markdown files
-console.log(`Checking links in ${docsDir}...`);
+if (!existsSync(docsDir)) {
+  console.error(`✗ Docs directory not found: ${docsDir}`);
+  process.exit(1);
+}
+
+console.log(`Checking links in ${docsDir} (offline mode: ${OFFLINE})...`);
 walkDir(docsDir);
 
 // Now validate each file

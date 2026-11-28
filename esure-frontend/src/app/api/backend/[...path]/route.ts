@@ -4,6 +4,14 @@ export const dynamic = "force-dynamic";
 
 const backendUrl = process.env.ESURE_BACKEND_URL ?? "http://127.0.0.1:3001";
 
+const FORWARDED_REQUEST_HEADERS = ["idempotency-key", "x-request-id"] as const;
+const FORWARDED_RESPONSE_HEADERS = [
+  "content-disposition",
+  "retry-after",
+  "idempotency-key",
+  "x-request-id",
+] as const;
+
 interface RouteContext {
   params: Promise<{ path: string[] }>;
 }
@@ -23,10 +31,16 @@ async function forward(request: NextRequest, context: RouteContext, method: "GET
   }
 
   const target = new URL(path.map(encodeURIComponent).join("/"), `${backendUrl.replace(/\/$/, "")}/`);
-  target.search = request.nextUrl.search;
+  const forwardedHeaders: Record<string, string> = { accept: "application/json" };
+  if (method === "POST") forwardedHeaders["content-type"] = "application/json";
+  for (const headerName of FORWARDED_REQUEST_HEADERS) {
+    const value = request.headers.get(headerName);
+    if (value) forwardedHeaders[headerName] = value;
+  }
+
   const response = await fetch(target, {
     method,
-    headers: { accept: "application/json", ...(method === "POST" && { "content-type": "application/json" }) },
+    headers: forwardedHeaders,
     body: method === "POST" ? await request.text() : undefined,
     cache: "no-store",
     signal: AbortSignal.timeout(30_000),
@@ -40,16 +54,15 @@ async function forward(request: NextRequest, context: RouteContext, method: "GET
   }
 
   const body = await response.text();
-  const contentDisposition = response.headers.get("content-disposition");
-  const retryAfter = response.headers.get("retry-after");
-  return new NextResponse(body, {
-    status: response.status,
-    headers: {
-      "content-type": response.headers.get("content-type") ?? "application/json",
-      ...(contentDisposition && { "content-disposition": contentDisposition }),
-      ...(retryAfter && { "retry-after": retryAfter }),
-    },
-  });
+  const responseHeaders: Record<string, string> = {
+    "content-type": response.headers.get("content-type") ?? "application/json",
+  };
+  for (const headerName of FORWARDED_RESPONSE_HEADERS) {
+    const value = response.headers.get(headerName);
+    if (value) responseHeaders[headerName] = value;
+  }
+
+  return new NextResponse(body, { status: response.status, headers: responseHeaders });
 }
 
 export function isAllowedPath(path: string[], method: "GET" | "POST"): boolean {

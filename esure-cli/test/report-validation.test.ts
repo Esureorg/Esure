@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -7,6 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 const execFileAsync = promisify(execFile);
 const cliPath = resolve(__dirname, "../dist/cli.js");
+const fixturesDir = resolve(__dirname, "../../esure-shared/fixtures/reports");
 
 const validReport = {
   id: "run-123",
@@ -35,6 +36,10 @@ const validReport = {
   }],
   summary: { stepsPassed: 1, stepsFailed: 0, assertionsPassed: 1, assertionsFailed: 0 },
 };
+
+async function loadFixture(name: string): Promise<string> {
+  return readFile(join(fixturesDir, name), "utf-8");
+}
 
 describe("CLI offline report validation (#156)", () => {
   let tempDir: string;
@@ -73,6 +78,24 @@ describe("CLI offline report validation (#156)", () => {
       "json",
     );
     expect(JSON.parse(stdout)).toMatchObject({ valid: true, reportId: "run-123" });
+  });
+
+  it("accepts the shared minimal legacy report fixture offline", async () => {
+    const contents = await loadFixture("report-minimal-legacy.v1.json");
+    const { stdout } = await validateFile("fixture-minimal-legacy.json", contents, "json");
+    const parsed = JSON.parse(stdout);
+    expect(parsed).toMatchObject({ valid: true });
+    expect(typeof parsed.reportId).toBe("string");
+    expect(typeof parsed.scenarioId).toBe("string");
+  });
+
+  it("accepts the shared complete additive-field report fixture offline", async () => {
+    const contents = await loadFixture("report-complete-additive.v1.json");
+    const { stdout } = await validateFile("fixture-complete-additive.json", contents, "json");
+    const parsed = JSON.parse(stdout);
+    expect(parsed).toMatchObject({ valid: true });
+    expect(typeof parsed.reportId).toBe("string");
+    expect(typeof parsed.scenarioId).toBe("string");
   });
 
   it.each([

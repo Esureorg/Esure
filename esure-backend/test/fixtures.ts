@@ -1,4 +1,83 @@
 import type { ScenarioDefinition } from "../src/domain.js";
+import type { Report } from "../src/report-schema.js";
+
+/**
+ * Shared, sanitized, versioned report fixtures.
+ *
+ * These fixtures are intentionally free of any real network data (no real
+ * account IDs, hashes, or signatures) so they can be reused across the
+ * backend, CLI, and frontend consumers to keep report parsing in sync.
+ *
+ * - `minimalLegacy`: a report produced before optional timing, fee, and
+ *   subject fields were added. Only required fields are present.
+ * - `completeAdditive`: a report that exercises every optional additive
+ *   field (timing, fee, subject) alongside the required ones.
+ */
+export const reportFixturesV1 = {
+  schemaVersion: 1,
+  minimalLegacy: {
+    schemaVersion: 1,
+    id: "report-minimal-legacy",
+    scenarioId: "complete-scenario",
+    scenarioVersion: 1,
+    network: "testnet",
+    status: "succeeded",
+    startedAt: "2024-01-01T00:00:00.000Z",
+    finishedAt: "2024-01-01T00:00:05.000Z",
+    steps: [
+      {
+        id: "pay-xlm",
+        type: "payment",
+        status: "succeeded",
+        transactionHash: "0".repeat(64),
+      },
+    ],
+    assertions: [
+      { type: "accountExists", account: "recipient", status: "passed" },
+    ],
+  } satisfies Report,
+  completeAdditive: {
+    schemaVersion: 1,
+    id: "report-complete-additive",
+    scenarioId: "complete-scenario",
+    scenarioVersion: 1,
+    network: "testnet",
+    status: "succeeded",
+    startedAt: "2024-01-01T00:00:00.000Z",
+    finishedAt: "2024-01-01T00:00:05.000Z",
+    durationMs: 5000,
+    fee: {
+      totalCharged: "0.0005000",
+      totalMax: "0.0010000",
+      asset: "xlm",
+    },
+    subject: {
+      account: "recipient",
+      asset: "demo",
+    },
+    steps: [
+      {
+        id: "pay-xlm",
+        type: "payment",
+        status: "succeeded",
+        transactionHash: "0".repeat(64),
+        startedAt: "2024-01-01T00:00:01.000Z",
+        finishedAt: "2024-01-01T00:00:02.000Z",
+        durationMs: 1000,
+        feeCharged: "0.0001000",
+        subject: { account: "recipient", asset: "xlm" },
+      },
+    ],
+    assertions: [
+      {
+        type: "accountExists",
+        account: "recipient",
+        status: "passed",
+        subject: { account: "recipient" },
+      },
+    ],
+  } satisfies Report,
+} as const;
 
 export function pathPaymentSendMaxExceededScenario(): ScenarioDefinition {
   return {
