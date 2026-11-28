@@ -329,7 +329,14 @@ export function buildApp(options: BuildAppOptions): AppInstance {
       }
       // Both "created" and "existing" return the settled result of the original
       // promise, which may be from a concurrent or prior request.
-      return reply.code(202).send(await outcome.entry.result);
+      // Release the key on pre-admission failures (issue #215) so a subsequent
+      // request with the same key can succeed without being treated as a duplicate.
+      try {
+        return reply.code(202).send(await outcome.entry.result);
+      } catch (err) {
+        if (err instanceof RunCapacityError) idempotency.release(idempotencyKey);
+        throw err;
+      }
     }
 
     return reply.code(202).send(await runs.start(scenario, request.id));
@@ -351,7 +358,12 @@ export function buildApp(options: BuildAppOptions): AppInstance {
       if (outcome.status === "capacity") {
         return reply.code(503).send(apiError("IDEMPOTENCY_CAPACITY", "The idempotency store is at capacity. Retry without an Idempotency-Key or try again later.", request.id));
       }
-      return reply.code(202).send(await outcome.entry.result);
+      try {
+        return reply.code(202).send(await outcome.entry.result);
+      } catch (err) {
+        if (err instanceof RunCapacityError) idempotency.release(idempotencyKey);
+        throw err;
+      }
     }
 
     return reply.code(202).send(await runs.start(scenario, request.id));

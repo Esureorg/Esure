@@ -116,6 +116,21 @@ export class IdempotencyStore<T> {
     return { status: "created", entry };
   }
 
+  /**
+   * Release an idempotency key so a subsequent request with the same key can
+   * succeed without being treated as a duplicate (issue #215).
+   *
+   * Only call this when a *pre-admission* failure occurred — i.e. the handler
+   * never ran and no run was created.  Releasing after a successful run or a
+   * conflict would allow duplicate execution of work that already happened.
+   *
+   * Returns `true` if the entry existed and was removed; `false` if it had
+   * already expired or was never inserted.
+   */
+  release(key: string): boolean {
+    return this.#entries.delete(key);
+  }
+
   #removeExpired(): void {
     const cutoff = this.now() - this.retentionMs;
     for (const [key, entry] of this.#entries) {

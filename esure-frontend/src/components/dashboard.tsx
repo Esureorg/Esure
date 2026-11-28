@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
-import { ApiError, RateLimitError, downloadReport, getRun, getScenario, getScenarioVersion, getScenarioVersions, listScenarios, startRun, type JsonValue, type RunReport, type ScenarioDetail, type ScenarioSummary, type ScenarioVersionSummary } from "@/lib/api";
+import { ApiError, downloadReport, getRun, listScenarios, startRun, type JsonValue, type RunReport, type ScenarioSummary } from "@/lib/api";
+import { ApiError, RateLimitError, buildComparisonArtifact, compareReports, getRun, getScenario, listScenarios, startRun, type JsonValue, type RunReport, type ReportComparison, type ScenarioDetail, type ScenarioSummary } from "@/lib/api";
 
 import { parseFavorites } from "@/lib/favorites";
 
@@ -1291,6 +1292,7 @@ function ReportComparisonView({ currentRun }: { currentRun: RunReport | null }) 
   const [reportB, setReportB] = useState<RunReport | null>(null);
   const [errorA, setErrorA] = useState<string | null>(null);
   const [errorB, setErrorB] = useState<string | null>(null);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
 
   async function handleFileA(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -1326,10 +1328,30 @@ function ReportComparisonView({ currentRun }: { currentRun: RunReport | null }) 
     }
   }
 
-  const comparison = useMemo(() => {
+  const comparison = useMemo<ReportComparison | null>(() => {
     if (!reportA || !reportB) return null;
     return compareReports(reportA, reportB);
   }, [reportA, reportB]);
+
+  function handleDownloadComparison() {
+    if (!reportA || !reportB || !comparison) return;
+    setDownloadError(null);
+    try {
+      const artifact = buildComparisonArtifact(reportA, reportB, comparison);
+      const json = JSON.stringify(artifact, null, 2);
+      const blob = new Blob([json], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `esure-comparison-${reportA.id.slice(0, 8)}-vs-${reportB.id.slice(0, 8)}.json`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      document.body.removeChild(anchor);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setDownloadError(err instanceof Error ? err.message : "Failed to build comparison artifact.");
+    }
+  }
 
   return (
     <div className="comparison-container">
@@ -1458,8 +1480,23 @@ function ReportComparisonView({ currentRun }: { currentRun: RunReport | null }) 
             ))}
           </div>
 
-          {/* Download comparison as a versioned JSON artifact (#202) */}
-          <ComparisonDownloadButton reportA={reportA} reportB={reportB} comparison={comparison} />
+          {/* Issue #202 — Download comparison as standalone JSON artifact */}
+          <div style={{ marginTop: "16px", display: "flex", alignItems: "center", gap: "12px" }}>
+            <button
+              type="button"
+              className="download"
+              data-testid="download-comparison"
+              onClick={handleDownloadComparison}
+            >
+              <span>Download comparison JSON</span>
+              <DownloadIcon />
+            </button>
+            {downloadError && (
+              <p className="download-error" role="alert" data-testid="comparison-download-error">
+                {downloadError}
+              </p>
+            )}
+          </div>
         </div>
       ) : null}
 /** Download a comparison as a versioned JSON artifact (#202). */

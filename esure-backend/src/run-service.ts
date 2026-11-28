@@ -62,11 +62,13 @@ export class RunService {
     private readonly options: { maxConcurrentRuns: number; runTimeoutMs: number; stepTimeoutMs: number },
     private readonly now: () => number = Date.now,
     private readonly logger?: RunLifecycleLogger,
-    // Monotonic clock for duration measurement (#213). Defaults to
-    // performance.now() so wall-clock adjustments (NTP, DST, leap seconds)
-    // cannot make a duration appear negative or artificially large. The
-    // existing `now` parameter continues to supply wall-clock timestamps.
-    private readonly hrNow: () => number = () => performance.now(),
+    /**
+     * Monotonic clock for duration measurement (issue #213).
+     * Defaults to `performance.now` so duration is immune to wall-clock jumps
+     * (NTP corrections, DST, leap seconds). `now` keeps its role for
+     * wall-clock timestamps (`createdAt`, `completedAt`).
+     */
+    private readonly monotonicNow: () => number = () => performance.now(),
   ) {}
 
   /** True once drain() has been called; new starts are rejected after this point. */
@@ -132,7 +134,7 @@ export class RunService {
       resolveExecution();
       throw error;
     }
-    const startedAt = this.hrNow();
+    const startedAt = this.monotonicNow();
     this.logger?.info({
       event: "run.started",
       runId: run.id,
@@ -232,7 +234,7 @@ export class RunService {
       this.#activeRuns -= 1;
       if (outcome === "passed") this.#passedRuns += 1;
       else this.#failedRuns += 1;
-      const durationMs = Math.max(0, this.now() - startedAt);
+      const durationMs = Math.max(0, this.monotonicNow() - startedAt);
       this.#runDurationCount += 1;
       this.#runDurationTotalMilliseconds += durationMs;
       this.logger?.info({
