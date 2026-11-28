@@ -8,11 +8,21 @@ on:
 permissions:
   contents: read
 
+# One run per workflow and ref. Superseded pull request runs are cancelled;
+# pushes to main are never cancelled, so each push keeps its own result.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   backend:
-    name: Backend checks
+    name: Backend checks (Node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [20, 22]
     defaults:
       run:
         working-directory: esure-backend
@@ -20,17 +30,28 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: ${{ matrix.node-version }}
           cache: npm
           cache-dependency-path: esure-backend/package-lock.json
-      - run: npm ci
+      - run: npm ci --no-workspaces
       - run: npm run check
       - run: npm run build
+      - name: Fail if generated API types drift
+        run: |
+          if ! git diff --exit-code -- src/generated/api-types.ts; then
+            echo "src/generated/api-types.ts is out of date."
+            echo "Regenerate and commit it with: cd esure-backend && npm run generate:api-types"
+            exit 1
+          fi
 
   frontend:
-    name: Frontend checks
+    name: Frontend checks (Node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [20, 22]
     defaults:
       run:
         working-directory: esure-frontend
@@ -38,10 +59,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: ${{ matrix.node-version }}
           cache: npm
           cache-dependency-path: esure-frontend/package-lock.json
-      - run: npm ci
+      - run: npm ci --no-workspaces
       - run: npm run check
       - run: npm run build
       - run: npx playwright install --with-deps chromium
@@ -50,26 +71,30 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: playwright-report-${{ matrix.node-version || 'default' }}
+          name: playwright-report-node${{ matrix.node-version }}
           path: esure-frontend/playwright-report/
           retention-days: 7
           if-no-files-found: ignore
 
   cli:
-    name: CLI checks
+    name: CLI checks (Node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [20, 22]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: ${{ matrix.node-version }}
       - name: Install backend dependencies
         working-directory: esure-backend
-        run: npm ci
+        run: npm ci --no-workspaces
       - name: Install CLI dependencies
         working-directory: esure-cli
-        run: npm ci
+        run: npm ci --no-workspaces
       - name: Typecheck CLI
         working-directory: esure-cli
         run: npm run typecheck
@@ -79,4 +104,3 @@ jobs:
       - name: Build CLI
         working-directory: esure-cli
         run: npm run build
-

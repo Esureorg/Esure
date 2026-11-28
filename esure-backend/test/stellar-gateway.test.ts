@@ -13,6 +13,11 @@ import {
   StellarTestnetGateway,
 } from "../src/stellar-gateway.js";
 import { SafeRunError } from "../src/errors.js";
+import {
+  ControllableClock,
+  createFakeSleep,
+  createSeededRandom,
+} from "./helpers/controllable-clock.js";
 
 
 
@@ -119,6 +124,19 @@ describe("Friendbot retry delay calculation", () => {
     random: () => 1,
   };
 
+  it("uses the seeded PRNG helper for deterministic jitter", () => {
+    const seeded = createSeededRandom(42);
+    const first = seeded();
+    const second = seeded();
+    expect(first).toBeGreaterThanOrEqual(0);
+    expect(first).toBeLessThan(1);
+    expect(second).toBeGreaterThanOrEqual(0);
+    expect(second).toBeLessThan(1);
+    // Re-seeding with the same value reproduces the same sequence.
+    const replay = createSeededRandom(42);
+    expect([replay(), replay()]).toEqual([first, second]);
+  });
+
   it("calculates exponential backoff", () => {
     expect(calculateRetryDelay(1, deterministicConfig)).toBe(1_000);
     expect(calculateRetryDelay(2, deterministicConfig)).toBe(2_000);
@@ -137,6 +155,58 @@ describe("Friendbot retry delay calculation", () => {
 
     const zeroJitter = { ...deterministicConfig, random: () => 0 };
     expect(calculateRetryDelay(1, zeroJitter)).toBe(0);
+  });
+});
+
+describe("ControllableClock", () => {
+  it("advances monotonic and ISO time deterministically", () => {
+    const clock = new ControllableClock(1_000);
+    expect(clock.monotonicNow()).toBe(1_000);
+    clock.advance(250);
+    expect(clock.monotonicNow()).toBe(1_250);
+    expect(clock.isoNow()).toBe(new Date(1_250).toISOString());
+    clock.set(5_000);
+    expect(clock.monotonicNow()).toBe(5_000);
+    expect(clock.isoNow()).toBe(new Date(5_000).toISOString());
+  });
+});
+
+describe("createFakeSleep", () => {
+  it("records requested delays and resolves only when advanced", async () => {
+    const clock = new ControllableClock();
+    const sleep = createFakeSleep(clock);
+    let resolved = false;
+    const promise = sleep(500).then(() => {
+      resolved = true;
+    });
+    expect(sleep.delays).toEqual([500]);
+    expect(resolved).toBe(false);
+    clock.advance(499);
+    await Promise.resolve();
+    expect(resolved).toBe(false);
+    clock.advance(1);
+    await promise;
+    expect(resolved).toBe(true);
+  });
+
+  it("rejects with the abort reason when the signal aborts during backoff", async () => {
+    const clock = new ControllableClock();
+    const sleep = createFakeSleep(clock);
+    const controller = new AbortController();
+    const promise = sleep(1_000, controller.signal);
+    const reason = new Error("Run aborted by client");
+    controller.abort(reason);
+    await expect(promise).rejects.toBe(reason);
+    expect(sleep.delays).toEqual([1_000]);
+  });
+
+  it("rejects immediately when the signal is already aborted", async () => {
+    const clock = new ControllableClock();
+    const sleep = createFakeSleep(clock);
+    const controller = new AbortController();
+    const reason = new Error("pre-aborted");
+    controller.abort(reason);
+    await expect(sleep(1_000, controller.signal)).rejects.toBe(reason);
   });
 });
 
@@ -370,17 +440,22 @@ describe("StellarTestnetGateway Friendbot bounded retry", () => {
       const loadAccount = vi.spyOn(Horizon.Server.prototype, "loadAccount")
         .mockRejectedValueOnce(horizonResponseError(status))
         .mockImplementation(async (publicKey) => mockAccount(publicKey));
-      const sleep = vi.fn(async (_ms: number) => {});
+      const clock = new ControllableClock();
+      const sleep = createFakeSleep(clock);
       const gateway = new StellarTestnetGateway("https://horizon.example", "https://friendbot.example", {
-        horizonRetry: { random: () => 1 },
+        horizonRetry: { random: createSeededRandom(7) },
         sleep,
       });
 
-      const result = await gateway.execute(accountScenario);
+      const promise = gateway.execute(accountScenario);
+      // Drive the backoff window deterministically instead of relying on real timers.
+      await vi.advanceTimersByTimeAsync(0);
+      clock.advance(1_000);
+      const result = await promise;
 
       expect(result.assertions[0]).toMatchObject({ type: "accountExists", status: "passed" });
       expect(loadAccount).toHaveBeenCalledTimes(2);
-      expect(sleep).toHaveBeenCalledExactlyOnceWith(1_000);
+      expect(sleep.delays).toEqual([1_000]);
     });
 
     it("retries transaction submission after 503 and returns success", async () => {
@@ -434,13 +509,22 @@ describe("StellarTestnetGateway Friendbot bounded retry", () => {
     it("retries timeout errors and reports exhaustion after three retries", async () => {
       const timeoutError = Object.assign(new Error("request timed out"), { code: "ETIMEDOUT" });
       const loadAccount = vi.spyOn(Horizon.Server.prototype, "loadAccount").mockRejectedValue(timeoutError);
-      const sleep = vi.fn(async (_ms: number) => {});
+      const clock = new ControllableClock();
+      const sleep = createFakeSleep(clock);
       const gateway = new StellarTestnetGateway("https://horizon.example", "https://friendbot.example", {
-        horizonRetry: { random: () => 1 },
+        horizonRetry: { random: createSeededRandom(7) },
         sleep,
       });
 
-      await expect(gateway.execute(accountScenario)).rejects.toMatchObject({
+      const promise = gateway.execute(accountScenario).catch((err: unknown) => err);
+      // Advance through each backoff window in turn.
+      for (const delay of [1_000, 2_000, 4_000]) {
+        await vi.advanceTimersByTimeAsync(0);
+        clock.advance(delay);
+      }
+      const error = await promise;
+
+      expect(error).toMatchObject({
         name: "SafeRunError",
         report: {
           code: "HORIZON_UNAVAILABLE",
@@ -450,7 +534,7 @@ describe("StellarTestnetGateway Friendbot bounded retry", () => {
         },
       });
       expect(loadAccount).toHaveBeenCalledTimes(4);
-      expect(sleep.mock.calls.map(([delay]) => delay)).toEqual([1_000, 2_000, 4_000]);
+      expect(sleep.delays).toEqual([1_000, 2_000, 4_000]);
     });
 
     it("reports a service-specific timeout when Horizon transaction submission times out", async () => {
@@ -699,23 +783,30 @@ describe("StellarTestnetGateway Friendbot bounded retry", () => {
       .fn<typeof fetch>()
       .mockResolvedValueOnce(new Response(null, { status: 429 }));
 
+    const clock = new ControllableClock();
+    const sleep = createFakeSleep(clock);
     const gateway = new StellarTestnetGateway(
       "https://horizon-testnet.stellar.org",
       "https://friendbot.stellar.org",
       {
         fetch: fetchMock,
+        sleep,
         friendbotRetry: {
           maxAttempts: 3,
           baseDelayMs: 1_000,
-          random: () => 1,
+          random: createSeededRandom(7),
         },
       },
     );
 
     const promise = gateway.fundAccount(publicKey, controller.signal);
-    // Abort before the backoff timer elapses
-    controller.abort(new Error("Run aborted by client"));
-    await expect(promise).rejects.toThrow("Run aborted by client");
+    // Let the first request settle and the backoff sleep begin.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sleep.delays).toEqual([1_000]);
+    // Abort inside the backoff window without advancing the clock.
+    const reason = new Error("Run aborted by client");
+    controller.abort(reason);
+    await expect(promise).rejects.toBe(reason);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
@@ -778,6 +869,77 @@ describe("StellarTestnetGateway Friendbot bounded retry", () => {
     expect(result.steps[0]).toHaveProperty("startedAt");
     expect(result.steps[0]).toHaveProperty("completedAt");
     expect(result.steps[0]?.durationMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it("limits simultaneous Friendbot requests per run", async () => {
+    let active = 0;
+    let peak = 0;
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async () => {
+      active += 1;
+      peak = Math.max(peak, active);
+      await Promise.resolve();
+      active -= 1;
+      return new Response(null, { status: 200 });
+    });
+    const gateway = new StellarTestnetGateway(
+      "https://horizon-testnet.stellar.org",
+      "https://friendbot.stellar.org",
+      { fetch: fetchMock, maxConcurrentFriendbotRequests: 2 },
+    );
+    const scenario: ValidatedScenario = {
+      schemaVersion: 1,
+      id: "funding-concurrency-scenario",
+      version: 1,
+      name: "Funding concurrency scenario",
+      description: "Verifies a per-run Friendbot request limit",
+      network: "testnet",
+      contentHash: "sha256:concurrency",
+      accounts: ["alice", "bob", "carol", "dave"].map((id) => ({ id, generate: true as const, fund: true })),
+      assets: [{ id: "xlm", type: "native" }],
+      steps: [],
+      assertions: [],
+    };
+
+    const result = await gateway.execute(scenario);
+
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(peak).toBe(2);
+    expect(result.steps.at(0)?.status).toBe("passed");
+  });
+
+  it("cancels active funding and stops dequeuing when a Friendbot request fails", async () => {
+    let calls = 0;
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation((_input, init) => {
+      calls += 1;
+      if (calls === 1) return Promise.resolve(new Response(null, { status: 400 }));
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+      });
+    });
+    const gateway = new StellarTestnetGateway(
+      "https://horizon-testnet.stellar.org",
+      "https://friendbot.stellar.org",
+      { fetch: fetchMock, maxConcurrentFriendbotRequests: 2, friendbotRetry: { maxAttempts: 1 } },
+    );
+    const scenario: ValidatedScenario = {
+      schemaVersion: 1,
+      id: "funding-failure-scenario",
+      version: 1,
+      name: "Funding failure scenario",
+      description: "Verifies a funding failure stops the queue",
+      network: "testnet",
+      contentHash: "sha256:funding-failure",
+      accounts: ["alice", "bob", "carol"].map((id) => ({ id, generate: true as const, fund: true })),
+      assets: [{ id: "xlm", type: "native" }],
+      steps: [],
+      assertions: [],
+    };
+
+    const error = await gateway.execute(scenario).catch((cause: unknown) => cause);
+
+    expect(calls).toBe(2);
+    expect(error).toBeInstanceOf(SafeRunError);
+    expect((error as SafeRunError).report.code).toBe("FRIENDBOT_UNAVAILABLE");
   });
 
   it("fails the funding step and throws sanitized error when retries are exhausted during execution", async () => {
@@ -970,14 +1132,16 @@ describe("StellarTestnetGateway Friendbot bounded retry", () => {
 
     it("records start/completion timestamps and monotonic duration for a successful step", async () => {
       const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 200 }));
-      let monotonic = 1_000;
-      const clock = {
-        monotonicNow: () => { monotonic += 50; return monotonic; },
-        isoNow: () => new Date(monotonic).toISOString(),
-      };
+      const clock = new ControllableClock(1_000);
       const gateway = new StellarTestnetGateway("https://horizon-testnet.stellar.org", "https://friendbot.stellar.org", {
         fetch: fetchMock,
-        clock,
+        clock: {
+          monotonicNow: () => {
+            clock.advance(50);
+            return clock.monotonicNow();
+          },
+          isoNow: () => clock.isoNow(),
+        },
       });
 
       const result = await gateway.execute(fundingScenarioFor("timing-success-scenario"));
@@ -1007,15 +1171,19 @@ describe("StellarTestnetGateway Friendbot bounded retry", () => {
 
     it("records timing for a step that times out, without waiting for a real delay", async () => {
       vi.useFakeTimers();
-      let monotonic = 0;
-      const clock = {
-        monotonicNow: () => { monotonic += 10; return monotonic; },
-        isoNow: () => new Date(monotonic).toISOString(),
-      };
+      const clock = new ControllableClock();
       const neverResolves = () => new Promise<never>(() => {});
       vi.spyOn(Horizon.Server.prototype, "loadAccount").mockImplementation(neverResolves as never);
 
-      const gateway = new StellarTestnetGateway("https://horizon-testnet.stellar.org", "https://friendbot.stellar.org", { clock });
+      const gateway = new StellarTestnetGateway("https://horizon-testnet.stellar.org", "https://friendbot.stellar.org", {
+        clock: {
+          monotonicNow: () => {
+            clock.advance(10);
+            return clock.monotonicNow();
+          },
+          isoNow: () => clock.isoNow(),
+        },
+      });
       const scenario: ValidatedScenario = {
         schemaVersion: 1,
         id: "timing-timeout-scenario",
@@ -1272,6 +1440,106 @@ describe("Issue #94 — trustlineLimitEquals assertion", () => {
     const { assertions } = await new StellarTestnetGateway("https://horizon.example", "https://friendbot.example").execute(trustlineLimitScenario("500"));
     expect(assertions[0]).toMatchObject({ type: "trustlineLimitEquals", status: "failed", expected: "500", actual: null });
     expect(assertions[0]!.message).toContain("does not exist");
+  });
+});
+
+// Issues #289/#290/#293 — expected-failure path-payment fixtures
+describe("expected-failure path-payment fixtures", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  const fixtureIds = ["path-payment-strict-send-below-dest-min", "path-payment-no-liquidity", "path-payment-trustline-limit-exceeded"] as const;
+
+  function fixture(id: (typeof fixtureIds)[number]): ValidatedScenario {
+    const scenario = createScenarioRegistry().find(id);
+    expect(scenario, `fixture ${id} should be registered`).toBeDefined();
+    return scenario!;
+  }
+
+  function issuedBalance(asset: { code: string; issuer: string }, balance: string) {
+    return { asset_type: "credit_alphanum4", asset_code: asset.code, asset_issuer: asset.issuer, balance, limit: "1000000" };
+  }
+
+  function setupExpectedFailure(
+    scenario: ValidatedScenario,
+    failure: { transaction: string; operations: string[] },
+    balances: Record<string, Array<Record<string, unknown>>>,
+  ) {
+    vi.spyOn(Horizon.Server.prototype, "fetchTimebounds").mockResolvedValue({ minTime: 0, maxTime: 2_000_000_000 });
+    vi.spyOn(Horizon.Server.prototype, "loadAccount").mockImplementation(async (key) =>
+      Object.assign(new Account(key, "1"), { balances: balances[key] ?? [] }) as unknown as Awaited<ReturnType<Horizon.Server["loadAccount"]>>,
+    );
+    const submit = vi.spyOn(Horizon.Server.prototype, "submitTransaction").mockImplementation(async (transaction) => {
+      const types = transaction.operations.map((operation) => operation.type);
+      if (types.includes("pathPaymentStrictSend") || types.includes("pathPaymentStrictReceive")) {
+        throw horizonError(failure.transaction, failure.operations);
+      }
+      return { hash: "a".repeat(64), ledger: 100 } as Horizon.HorizonApi.SubmitTransactionResponse;
+    });
+    return submit;
+  }
+
+  it("fails strict-send below destMin with op_under_dest_min and unchanged issued balances", async () => {
+    const scenario = fixture("path-payment-strict-send-below-dest-min");
+    const recipient = scenario.accounts.find((account) => account.id === "recipient")!;
+    const marketMaker = scenario.accounts.find((account) => account.id === "market-maker")!;
+    const usd = { code: "USD", issuer: "issuer" };
+    const balances = {
+      [recipient.publicKey!]: [issuedBalance(usd, "0")],
+      [marketMaker.publicKey!]: [issuedBalance(usd, "1000")],
+    };
+    setupExpectedFailure(scenario, { transaction: "tx_failed", operations: ["op_under_dest_min"] }, balances);
+
+    const execution = await new StellarTestnetGateway("https://horizon.example", "https://friendbot.example").execute(scenario);
+
+    const pathStep = execution.steps.find((step) => step.type === "pathPaymentStrictSend")!;
+    expect(pathStep).toMatchObject({ status: "failed" });
+    expect(pathStep.error).toMatchObject({ stellarTransactionCode: "tx_failed", stellarOperationCodes: ["op_under_dest_min"] });
+    expect(execution.assertions.find((assertion) => assertion.type === "stepFailedWith")).toMatchObject({ status: "passed" });
+    const recipientBalance = execution.assertions.find((assertion) => assertion.type === "balanceEquals" && assertion.account === "recipient");
+    expect(recipientBalance).toMatchObject({ status: "passed", actual: "0" });
+    const marketMakerBalance = execution.assertions.find((assertion) => assertion.type === "balanceEquals" && assertion.account === "market-maker");
+    expect(marketMakerBalance).toMatchObject({ status: "passed", actual: "1000" });
+  });
+
+  it("fails path payment with no liquidity and continues past the expected failure", async () => {
+    const scenario = fixture("path-payment-no-liquidity");
+    const recipient = scenario.accounts.find((account) => account.id === "recipient")!;
+    const usd = { code: "USD", issuer: "issuer" };
+    setupExpectedFailure(scenario, { transaction: "tx_failed", operations: ["op_no_issuer"] }, { [recipient.publicKey!]: [issuedBalance(usd, "0")] });
+
+    const execution = await new StellarTestnetGateway("https://horizon.example", "https://friendbot.example").execute(scenario);
+
+    const pathStep = execution.steps.find((step) => step.type === "pathPaymentStrictReceive")!;
+    expect(pathStep).toMatchObject({ status: "failed" });
+    expect(pathStep.error).toMatchObject({ stellarTransactionCode: "tx_failed", stellarOperationCodes: ["op_no_issuer"] });
+    expect(execution.assertions.find((assertion) => assertion.type === "stepFailedWith")).toMatchObject({ status: "passed" });
+    const recipientBalance = execution.assertions.find((assertion) => assertion.type === "balanceEquals" && assertion.account === "recipient");
+    expect(recipientBalance).toMatchObject({ status: "passed", actual: "0" });
+    // Expected-failure continuation: the run completes and evaluates later assertions instead of throwing.
+    expect(execution.assertions.every((assertion) => assertion.status === "passed")).toBe(true);
+  });
+
+  it("fails path payment exceeding the destination trustline limit with op_line_full", async () => {
+    const scenario = fixture("path-payment-trustline-limit-exceeded");
+    const recipient = scenario.accounts.find((account) => account.id === "recipient")!;
+    const marketMaker = scenario.accounts.find((account) => account.id === "market-maker")!;
+    const usd = { code: "USD", issuer: "issuer" };
+    const balances = {
+      [recipient.publicKey!]: [issuedBalance(usd, "0")],
+      [marketMaker.publicKey!]: [issuedBalance(usd, "1000")],
+    };
+    setupExpectedFailure(scenario, { transaction: "tx_failed", operations: ["op_line_full"] }, balances);
+
+    const execution = await new StellarTestnetGateway("https://horizon.example", "https://friendbot.example").execute(scenario);
+
+    const pathStep = execution.steps.find((step) => step.type === "pathPaymentStrictReceive")!;
+    expect(pathStep).toMatchObject({ status: "failed" });
+    expect(pathStep.error).toMatchObject({ stellarTransactionCode: "tx_failed", stellarOperationCodes: ["op_line_full"] });
+    expect(execution.assertions.find((assertion) => assertion.type === "stepFailedWith")).toMatchObject({ status: "passed" });
+    const recipientBalance = execution.assertions.find((assertion) => assertion.type === "balanceEquals" && assertion.account === "recipient");
+    expect(recipientBalance).toMatchObject({ status: "passed", actual: "0" });
+    const marketMakerBalance = execution.assertions.find((assertion) => assertion.type === "balanceEquals" && assertion.account === "market-maker");
+    expect(marketMakerBalance).toMatchObject({ status: "passed", actual: "1000" });
   });
 });
 

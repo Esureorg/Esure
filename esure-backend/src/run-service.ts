@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { LedgerGateway, RunError, RunReport, RunSummary, ValidatedScenario } from "./domain.js";
 import type { RunStore } from "./run-store.js";
-import { RunCapacityError, RunTimeoutError, SafeRunError, ShutdownError, withTimeout } from "./errors.js";
+import { RunCapacityError, RunDrainingError, RunTimeoutError, SafeRunError, ShutdownError, withTimeout } from "./errors.js";
 
 const emptySummary = (): RunSummary => ({
   stepsPassed: 0,
@@ -100,7 +100,7 @@ export class RunService {
   async start(scenario: ValidatedScenario, requestId?: string): Promise<RunReport> {
     if (this.#draining) {
       this.#drainingRejectedStarts += 1;
-      throw new RunCapacityError("The server is shutting down. No new runs are accepted.");
+      throw new RunDrainingError();
     }
     if (this.#activeRuns >= this.options.maxConcurrentRuns) {
       this.#capacityRejectedStarts += 1;
@@ -152,7 +152,7 @@ export class RunService {
     return Promise.resolve(this.store.get(id));
   }
 
-  async execute(id: string, scenario: ValidatedScenario, startedAt = this.now(), requestId?: string): Promise<void> {
+  async execute(id: string, scenario: ValidatedScenario, startedAt = this.hrNow(), requestId?: string): Promise<void> {
     const controller = new AbortController();
     let progressUpdates = Promise.resolve();
     let outcome: "passed" | "failed" = "failed";
@@ -193,7 +193,7 @@ export class RunService {
       const summary = summarize(result.steps, result.assertions);
       const passed = summary.stepsFailed === 0 && summary.assertionsFailed === 0;
       errorCode = passed ? undefined : "ASSERTION_FAILED";
-      await this.store.update(id, {
+      await this.safeUpdate(id, {
         status: passed ? "passed" : "failed",
         completedAt: new Date(this.now()).toISOString(),
         steps: result.steps,
@@ -210,13 +210,18 @@ export class RunService {
       });
       outcome = passed ? "passed" : "failed";
     } catch (error) {
-      await progressUpdates;
-      const current = await this.store.get(id);
+      await progressUpdates.catch(() => {});
+      let current: RunReport | undefined;
+      try {
+        current = await this.store.get(id);
+      } catch {
+        current = undefined;
+      }
       const steps = current?.steps ?? [];
       const assertions = current?.assertions ?? [];
       const normalizedError = normalizeError(error);
       errorCode = SAFE_RUN_ERROR_CODES.has(normalizedError.code) ? normalizedError.code : "INTERNAL_ERROR";
-      await this.store.update(id, {
+      await this.safeUpdate(id, {
         status: "failed",
         completedAt: new Date(this.now()).toISOString(),
         steps,
@@ -242,6 +247,19 @@ export class RunService {
         durationMs,
         ...(errorCode !== undefined && { errorCode }),
       });
+    }
+  }
+
+  /**
+   * Persist a terminal update without letting a store failure escape the run
+   * lifecycle. Capacity release and terminal metrics live in the caller's
+   * finally block, so a throwing update must never reject execute().
+   */
+  async #safeUpdate(id: string, patch: Parameters<RunStore["update"]>[1]): Promise<void> {
+    try {
+      await this.store.update(id, patch);
+    } catch {
+      // Swallow: the run is already terminal from the service's perspective.
     }
   }
 }

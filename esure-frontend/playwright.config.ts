@@ -7,11 +7,13 @@ const isProduction = process.env.TEST_MODE === "production";
 export default defineConfig({
   testDir: "./e2e",
   fullyParallel: true,
+  // Traces, screenshots and videos land here; CI uploads it on failure.
+  outputDir: "test-results",
   forbidOnly: Boolean(process.env.CI),
   retries: process.env.CI ? 2 : 0,
   workers: process.env.CI ? 1 : undefined,
   reporter: [
-    "list",
+    ["list"],
     ["html", { outputFolder: "playwright-report" }],
   ],
   use: {

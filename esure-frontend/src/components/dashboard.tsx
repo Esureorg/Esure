@@ -5,40 +5,20 @@ import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { ApiError, downloadReport, getRun, listScenarios, startRun, type JsonValue, type RunReport, type ScenarioSummary } from "@/lib/api";
 import { ApiError, RateLimitError, buildComparisonArtifact, compareReports, getRun, getScenario, listScenarios, startRun, type JsonValue, type RunReport, type ReportComparison, type ScenarioDetail, type ScenarioSummary } from "@/lib/api";
 
+import { parseFavorites } from "@/lib/favorites";
+
 const terminalStatuses = new Set(["passed", "failed"]);
 
-export type ScenarioFilter = "all" | "xlm" | "issued-asset" | "expected-failure";
-export type SortOrder = "name-asc" | "name-desc" | "id-asc";
-export type ReportFilter = "all" | "failed";
-
-const FAVORITES_STORAGE_KEY = "esure:favorite-scenarios";
-
-function getFavorites(): Set<string> {
-  try {
-    const stored = localStorage.getItem(FAVORITES_STORAGE_KEY);
-    return new Set(stored ? JSON.parse(stored) : []);
-  } catch {
-    return new Set();
-  }
-}
-
-function saveFavorites(favorites: Set<string>): void {
-  try {
-    localStorage.setItem(FAVORITES_STORAGE_KEY, JSON.stringify(Array.from(favorites)));
-  } catch {
-    // ignore storage errors
-  }
-}
+export type ScenarioFilter = "all" | "xlm" | "issued-asset" | "expected-failure" | "favorites";
 
 export const FILTER_OPTIONS: { key: ScenarioFilter; label: string }[] = [
   { key: "all", label: "All" },
   { key: "xlm", label: "XLM" },
   { key: "issued-asset", label: "Issued Asset" },
   { key: "expected-failure", label: "Expected Failure" },
+  { key: "favorites", label: "Favorites" },
 ];
 
-
-export type ReportFilter = "all" | "failed";
 
 export const REPORT_FILTER_OPTIONS: { key: ReportFilter; label: string }[] = [
   { key: "all", label: "All" },
@@ -57,6 +37,7 @@ export function filterScenario(scenario: ScenarioSummary, filter: ScenarioFilter
   if (filter === "xlm") return text.includes("xlm");
   if (filter === "issued-asset") return text.includes("issued") || text.includes("testusd") || scenario.id === "issued-asset-payment";
   if (filter === "expected-failure") return text.includes("fail") || text.includes("missing-trustline") || scenario.id === "missing-trustline";
+  if (filter === "favorites") return favorites.has(scenario.id);
   return true;
 }
 
@@ -96,6 +77,9 @@ function parseCategory(value: string | null): ScenarioFilter {
 
 export function Dashboard() {
   const [scenarios, setScenarios] = useState<ScenarioSummary[]>([]);
+  const [filter, setFilter] = useState<ScenarioFilter>("all");
+  const [favorites, setFavorites] = useState<string[]>([]);
+  const [favoritesLoaded, setFavoritesLoaded] = useState(false);
   const [selectedId, setSelectedId] = useState<string>("");
   const [run, setRun] = useState<RunReport | null>(null);
   const [reportFilter, setReportFilter] = useState<ReportFilter>("all");
@@ -109,13 +93,19 @@ export function Dashboard() {
   const [isBrowserOffline, setIsBrowserOffline] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<"report" | "compare">("report");
-  const [reportFilter, setReportFilter] = useState<ReportFilter>("all");
 
   // #32 — Scenario preview panel
   const [previewId, setPreviewId] = useState<string | null>(null);
   const [previewScenario, setPreviewScenario] = useState<ScenarioDetail | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
+  const [previewVersions, setPreviewVersions] = useState<ScenarioVersionSummary[]>([]);
+  const [previewHistoryError, setPreviewHistoryError] = useState<string | null>(null);
+  const [previewHistoryNextCursor, setPreviewHistoryNextCursor] = useState<number | undefined>();
+  const [previewHistoryCursors, setPreviewHistoryCursors] = useState<(number | undefined)[]>([undefined]);
+  const [previewHistoryPage, setPreviewHistoryPage] = useState(0);
+  const [previewHistoryLoading, setPreviewHistoryLoading] = useState(false);
+  const [runVersionSelection, setRunVersionSelection] = useState<{ scenarioId: string; version: number } | null>(null);
   const previewAbortRef = useRef<AbortController | null>(null);
 
   // #39 — Rate-limit countdown (seconds remaining before retry is allowed)
@@ -227,6 +217,15 @@ export function Dashboard() {
   const [restorationError, setRestorationError] = useState<string | null>(null);
 
   useEffect(() => {
+    setFavorites(readFavorites());
+    setFavoritesLoaded(true);
+  }, []);
+
+  useEffect(() => {
+    if (favoritesLoaded) writeFavorites(favorites);
+  }, [favorites, favoritesLoaded]);
+
+  useEffect(() => {
     if (!runIdParam || run) return;
     
     let active = true;
@@ -268,6 +267,8 @@ export function Dashboard() {
     if (!previewId) {
       setPreviewScenario(null);
       setPreviewError(null);
+      setPreviewVersions([]);
+      setPreviewHistoryError(null);
       return;
     }
     previewAbortRef.current?.abort();
@@ -290,6 +291,33 @@ export function Dashboard() {
       });
     return () => { controller.abort(); };
   }, [previewId]);
+
+  useEffect(() => {
+    if (!previewId) return;
+    const controller = new AbortController();
+    setPreviewHistoryLoading(true);
+    setPreviewVersions([]);
+    setPreviewHistoryNextCursor(undefined);
+    setPreviewHistoryError(null);
+    getScenarioVersions(previewId, 10, previewHistoryCursors[previewHistoryPage], controller.signal)
+      .then((history) => {
+        if (controller.signal.aborted) return;
+        setPreviewVersions(history.items);
+        setPreviewHistoryNextCursor(history.nextCursor);
+      })
+      .catch((reason: unknown) => {
+        if (controller.signal.aborted) return;
+        if (reason instanceof ApiError && reason.code === "PERSISTENCE_REQUIRED") {
+          setPreviewHistoryError("Version history is unavailable because published persistence is disabled.");
+        } else {
+          setPreviewHistoryError(readError(reason));
+        }
+        setPreviewVersions([]);
+        setPreviewHistoryNextCursor(undefined);
+      })
+      .finally(() => { if (!controller.signal.aborted) setPreviewHistoryLoading(false); });
+    return () => controller.abort();
+  }, [previewId, previewHistoryCursors, previewHistoryPage]);
 
   // #39 — Clear rate-limit timer when it expires or component unmounts
   useEffect(() => {
@@ -354,13 +382,10 @@ export function Dashboard() {
     return loadScenarios();
   }, [loadScenarios]);
 
-  // Apply filter, search, and sort (#29, #30)
+  const favoriteIds = useMemo(() => new Set(favorites), [favorites]);
   const filteredScenarios = useMemo(() => {
-    const filtered = scenarios.filter(
-      (s) => filterScenario(s, filter) && searchScenario(s, searchQuery),
-    );
-    return sortScenarios(filtered, sortOrder);
-  }, [scenarios, filter, searchQuery, sortOrder]);
+    return scenarios.filter((s) => filterScenario(s, filter, favoriteIds));
+  }, [scenarios, filter, favoriteIds]);
 
   useEffect(() => {
     if (filteredScenarios.length > 0) {
@@ -465,9 +490,34 @@ export function Dashboard() {
   }, [run, isOffline, isBrowserOffline, consecutiveFailures]);
 
   const selected = useMemo(() => scenarios.find((scenario) => scenario.id === selectedId), [scenarios, selectedId]);
+  const selectedVersion = selected
+    ? runVersionSelection?.scenarioId === selected.id ? runVersionSelection.version : selected.version
+    : undefined;
+
+  async function handlePreviewVersion(version: number) {
+    if (!previewId) return;
+    setPreviewLoading(true);
+    setPreviewError(null);
+    try {
+      const detail = await getScenarioVersion(previewId, version);
+      setPreviewScenario(detail);
+      setSelectedId(previewId);
+      setRunVersionSelection({ scenarioId: previewId, version });
+    } catch (reason) {
+      setPreviewError(readError(reason));
+    } finally {
+      setPreviewLoading(false);
+    }
+  }
+
+  function toggleFavorite(scenarioId: string) {
+    setFavorites((current) => current.includes(scenarioId)
+      ? current.filter((id) => id !== scenarioId)
+      : [...current, scenarioId]);
+  }
 
   async function handleRun() {
-    if (!selectedId) return;
+    if (!selectedId || selectedVersion === undefined) return;
     setIsOffline(false);
     setImportError(null);
     setViewMode("report");
@@ -477,7 +527,7 @@ export function Dashboard() {
     setRun(null);
     try {
       const key = crypto.randomUUID();
-      const newRun = await startRun(selectedId, key);
+      const newRun = await startRun(selectedId, selectedVersion, key);
       setRun(newRun);
       setRunIdempotencyKey(crypto.randomUUID());
       const newParams = new URLSearchParams(searchParams?.toString() ?? "");
@@ -732,11 +782,12 @@ export function Dashboard() {
                 className={`scenario-card ${selectedId === scenario.id ? "selected" : ""}`}
                 key={scenario.id}
                 id={`scenario-card-${scenario.id}`}
-                onClick={() => setSelectedId(scenario.id)}
+                onClick={() => { setSelectedId(scenario.id); setRunVersionSelection(null); }}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" || e.key === " ") {
                     e.preventDefault();
                     setSelectedId(scenario.id);
+                    setRunVersionSelection(null);
                   }
                 }}
               >
@@ -747,21 +798,28 @@ export function Dashboard() {
                 <span className="version">V{scenario.version}</span>
                 <button
                   type="button"
-                  className={`favorite-btn ${favorites.has(scenario.id) ? "active" : ""}`}
-                  aria-label={`${favorites.has(scenario.id) ? "Remove from" : "Add to"} favorites`}
-                  aria-pressed={favorites.has(scenario.id)}
-                  onClick={(e) => { e.stopPropagation(); toggleFavorite(scenario.id); }}
+                  className={`scenario-card ${selectedId === scenario.id ? "selected" : ""}`}
+                  onClick={() => setSelectedId(scenario.id)}
                 >
-                  ★
+                  <span className="card-index">0{index + 1}</span>
+                  <ScenarioIcon kind={scenario.id} />
+                  <span className="scenario-name">{scenario.name}</span>
+                  <span className="scenario-description">{scenario.description}</span>
+                  <span className="version">V{scenario.version}</span>
                 </button>
                 <button
                   type="button"
                   className="preview-btn"
                   aria-label={`Preview definition for ${scenario.name}`}
                   aria-expanded={previewId === scenario.id}
-                  onClick={(e) => { e.stopPropagation(); setPreviewId(previewId === scenario.id ? null : scenario.id); }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setPreviewHistoryPage(0);
+                    setPreviewHistoryCursors([undefined]);
+                    setPreviewId(previewId === scenario.id ? null : scenario.id);
+                  }}
                 >
-                  {previewId === scenario.id ? "Close" : "Details"}
+                  {favorites.includes(scenario.id) ? "★" : "☆"}
                 </button>
               </div>
             ))
@@ -797,13 +855,88 @@ export function Dashboard() {
                   <div><dt>Assertions</dt><dd>{previewScenario.assertions.length}</dd></div>
                 </dl>
                 <p className="preview-description">{previewScenario.description}</p>
+                <div className="preview-definition-list">
+                  <h3>Accounts</h3>
+                  {previewScenario.accounts.length ? (
+                    <ol>{previewScenario.accounts.map((account) => <li key={account.id}>
+                      <strong>{account.id}</strong>
+                      <pre>{JSON.stringify(account, null, 2)}</pre>
+                    </li>)}</ol>
+                  ) : <p>No accounts.</p>}
+                  <h3>Assets</h3>
+                  {previewScenario.assets.length ? (
+                    <ol>{previewScenario.assets.map((asset, index) => <li key={`${asset.id ?? asset.type}-${index}`}>
+                      <strong>{asset.id ?? asset.type}</strong>
+                      <pre>{JSON.stringify(asset, null, 2)}</pre>
+                    </li>)}</ol>
+                  ) : <p>No assets.</p>}
+                  <h3>Steps</h3>
+                  {previewScenario.steps.length ? (
+                    <ol>{previewScenario.steps.map((step) => <li key={step.id}>
+                      <strong>{step.id} · {step.type}</strong>
+                      <pre>{JSON.stringify(step, null, 2)}</pre>
+                    </li>)}</ol>
+                  ) : <p>No steps.</p>}
+                  <h3>Assertions</h3>
+                  {previewScenario.assertions.length ? (
+                    <ol>{previewScenario.assertions.map((assertion, index) => <li key={`${assertion.type}-${index}`}>
+                      <strong>{assertion.type}</strong>
+                      <pre>{JSON.stringify(assertion, null, 2)}</pre>
+                    </li>)}</ol>
+                  ) : <p>No assertions.</p>}
+                </div>
+                <section className="preview-history" aria-label="Scenario version history">
+                  <h3>Version history</h3>
+                  {previewHistoryLoading ? <p role="status">Loading version history…</p> : null}
+                  {previewHistoryError && <p className="preview-history-note" role="status">{previewHistoryError}</p>}
+                  {!previewHistoryError && previewVersions.length > 0 && (
+                    <>
+                      <div className="preview-version-list">
+                        {previewVersions.map((version) => (
+                          <button
+                            type="button"
+                            key={version.version}
+                            aria-pressed={previewScenario.version === version.version}
+                            disabled={previewLoading}
+                            onClick={() => { void handlePreviewVersion(version.version); }}
+                          >
+                            v{version.version} · {new Date(version.createdAt).toLocaleDateString()}
+                          </button>
+                        ))}
+                      </div>
+                      <div className="preview-history-controls">
+                        <button
+                          type="button"
+                          disabled={previewHistoryPage === 0 || previewHistoryLoading}
+                          onClick={() => setPreviewHistoryPage((page) => page - 1)}
+                        >
+                          Previous
+                        </button>
+                        <button
+                          type="button"
+                          disabled={previewHistoryNextCursor === undefined || previewHistoryLoading}
+                          onClick={() => {
+                            if (previewHistoryNextCursor === undefined) return;
+                            setPreviewHistoryCursors((cursors) => [...cursors.slice(0, previewHistoryPage + 1), previewHistoryNextCursor]);
+                            setPreviewHistoryPage((page) => page + 1);
+                          }}
+                        >
+                          More versions
+                        </button>
+                      </div>
+                    </>
+                  )}
+                  {!previewHistoryError && !previewHistoryLoading && previewVersions.length === 0 && (
+                    <p className="preview-history-note">No published versions are available.</p>
+                  )}
+                </section>
               </div>
             )}
           </div>
         )}
 
         <div className="launch-panel">
-          <div><span className="label">SELECTED SCENARIO</span><strong>{selected?.name ?? "Choose a scenario"}</strong><span>{selected?.id ?? "—"}</span></div>
+          <div><span className="label">SELECTED SCENARIO</span><strong>{selected?.name ?? "Choose a scenario"}</strong><span>{selected ? `${selected.id} · version ${selectedVersion}` : "—"}</span></div>
           <button
             className="run-button"
             type="button"
@@ -1366,6 +1499,59 @@ function ReportComparisonView({ currentRun }: { currentRun: RunReport | null }) 
           </div>
         </div>
       ) : null}
+/** Download a comparison as a versioned JSON artifact (#202). */
+function ComparisonDownloadButton({
+  reportA,
+  reportB,
+  comparison,
+}: {
+  reportA: RunReport | null;
+  reportB: RunReport | null;
+  comparison: ReportComparison | null;
+}) {
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+
+  if (!reportA || !reportB || !comparison) return null;
+
+  function handleDownload() {
+    setDownloadError(null);
+    try {
+      const artifact = {
+        /** Comparison format version — bump when the shape changes. */
+        version: 1,
+        generatedAt: new Date().toISOString(),
+        reportA: { id: reportA!.id, scenarioId: reportA!.scenarioId, scenarioVersion: reportA!.scenarioVersion, status: reportA!.status, durationMs: reportA!.durationMs ?? null },
+        reportB: { id: reportB!.id, scenarioId: reportB!.scenarioId, scenarioVersion: reportB!.scenarioVersion, status: reportB!.status, durationMs: reportB!.durationMs ?? null },
+        comparison: comparison!,
+      };
+      const blob = new Blob([JSON.stringify(artifact, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `esure-comparison-${reportA!.id.slice(0, 8)}-vs-${reportB!.id.slice(0, 8)}.json`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+    } catch {
+      setDownloadError("Failed to generate comparison download.");
+    }
+  }
+
+  return (
+    <div style={{ padding: "16px 0 0" }}>
+      <button type="button" className="run-button run-button--secondary" onClick={handleDownload} style={{ padding: "8px 14px", minWidth: "auto" }}>
+        Download comparison as JSON
+      </button>
+      {downloadError && (
+        <p className="download-error" role="alert" data-testid="comparison-download-error" style={{ marginTop: "8px" }}>
+          {downloadError}
+        </p>
+      )}
+    </div>
+  );
+}
+
 // #34 — Expandable assertion row with expected / actual values
 function AssertionRow({ assertion, hidden }: { assertion: import("@/lib/api").AssertionResult; hidden?: boolean }) {
 function AssertionRow({ assertion, reportFilter }: { assertion: import("@/lib/api").AssertionResult; reportFilter?: ReportFilter }) {

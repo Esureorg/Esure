@@ -22,4 +22,5 @@ Architecture and product-definition phase. Contracts will be introduced only
 when an MVP scenario demonstrates a genuine on-chain requirement.
 
 Read the [Soroban fixture design gate](./DESIGN.md) before proposing contract
-code.
+code. The [first fixture decision](./FIRST_FIXTURE_DECISION.md) records which
+fixture a future prototype should start with.

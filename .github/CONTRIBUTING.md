@@ -12,6 +12,62 @@ Thank you for helping make Stellar development easier to test and understand.
 Do not begin work based only on an issue title. Assignment prevents duplicate
 work during time-boxed contribution campaigns.
 
+## Build dependency order and clean-install commands
+
+The three packages have a fixed build dependency order:
+
+```
+esure-backend  (no internal deps — build first)
+      ↓  npm file: link
+esure-cli      (depends on esure-backend dist — build second)
+
+esure-frontend (no internal deps — independent, can build in any order)
+```
+
+**esure-cli depends on esure-backend at two distinct levels:**
+
+- **npm package dependency**: `esure-cli/package.json` declares
+  `"@esure/backend": "file:../esure-backend"`. This is a local file-link that
+  npm resolves at install time. `npm ci` inside `esure-cli` reads compiled
+  output from `esure-backend/dist/`, so the backend must be built before the
+  CLI is typechecked, tested, or built.
+- **Runtime API dependency**: at runtime the CLI calls the esure backend HTTP
+  API (`POST /api/v1/runs`, etc.) over the network. That is a separate concern
+  from the npm link. The CLI does not embed or bundle the backend server; it
+  only imports shared types and schema validators from the backend package.
+
+**Clean-install sequence for the full monorepo:**
+
+```sh
+# 1. Backend — install, check, and build first
+cd esure-backend
+npm ci
+npm run check
+npm run build
+
+# 2. CLI — install after backend dist exists
+cd ../esure-cli
+npm ci
+npm run check
+npm run build
+
+# 3. Frontend — independent, can run in parallel with the above
+cd ../esure-frontend
+npm ci
+npm run check
+npm run build
+```
+
+Alternatively, from the monorepo root (runs check in all three workspaces in
+the declared order, but does not install dependencies):
+
+```sh
+npm run check
+```
+
+The root `package.json` does not define an install step across workspaces; run
+`npm ci` in each package directory individually as shown above.
+
 ## Development workflow
 
 1. Fork the relevant repository.
@@ -40,6 +96,67 @@ work during time-boxed contribution campaigns.
   committed fixtures.
 - New dependencies require a clear need and must pass the repository audit.
 - Accessibility and reduced-motion behavior are required for frontend changes.
+
+## Migration and text files
+
+Text files use UTF-8 with LF line endings, a final newline, and two-space
+indentation, as set in `.editorconfig`.
+
+Migration hashes are SHA-256 digests of each file's exact contents
+(`esure-backend/src/database.ts`). A changed byte in an applied migration
+therefore fails the checksum check, and a CRLF conversion or a trailing-newline
+edit counts as a change. For that reason:
+
+- Never edit a migration that has been applied to any environment. Add a new,
+  higher-numbered migration instead.
+- Do not reformat or re-save existing migration files. The EditorConfig
+  section for `esure-backend/migrations/*.sql` turns off final-newline and
+  trailing-whitespace edits for them.
+- Do not change line endings of existing files in a formatting-only commit.
+
+## Scenario inventory
+
+The bundled scenarios in `esure-backend/scenarios` are the source of truth. The
+ID table in `esure-docs/SCENARIOS.md` and the scenario counts in `README.md`
+must match them. Check both from the backend package:
+
+```bash
+cd esure-backend
+npm run check:scenarios
+```
+
+The command prints the sorted scenario IDs and exits with status 1 when a
+definition is invalid or a document drifts, for example:
+
+```text
+inventory drift: esure-docs/SCENARIOS.md: account-missing is missing from the table
+inventory drift: README.md: states 13 bundled scenarios, found 23
+Scenario inventory check failed with 2 finding(s).
+```
+
+When you add or remove a bundled scenario, update the table and both counts in
+the same pull request.
+
+## Continuous integration
+
+The `Monorepo CI` workflow (`.github/workflows/ci.yml`) runs the backend,
+frontend, and CLI checks on pull requests and on pushes to `main`.
+
+Runs share one concurrency group per workflow and Git ref. When new commits
+are pushed to a pull request, the superseded run is cancelled. Pushes to `main`
+are never cancelled, so every merged commit keeps its own result. Runs for
+different branches use different refs and never cancel each other.
+
+## Dependency updates
+
+Dependabot (`.github/dependabot.yml`) proposes updates weekly for the npm
+packages in `esure-backend`, `esure-frontend`, and `esure-cli`, and for the
+GitHub Actions in the workflows. Minor and patch updates are grouped per
+package, and each package keeps at most five open update pull requests. Major
+updates arrive as separate pull requests.
+
+Dependabot pull requests are not merged automatically. They must pass the
+required CI checks and a maintainer review.
 
 ## Issue labels and sizing
 
