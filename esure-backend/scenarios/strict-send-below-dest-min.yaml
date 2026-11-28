@@ -1,0 +1,121 @@
+schemaVersion: 1
+network: testnet
+
+# Strict-send below destMin fixture
+#
+# This scenario demonstrates a pathPaymentStrictSend that cannot satisfy the
+# requested destination minimum. The sender sends 1 XLM along the path
+# XLM -> EUR -> USDC, but the isolated liquidity created below can only deliver
+# far less than the requested destMin of 5 USDC. The operation must fail with
+# `op_under_dest_min` (wrapped in a `tx_failed` transaction result), and no
+# issued-asset balances may change as a result.
+#
+# Authoring notes:
+# - Liquidity is intentionally isolated: the market-maker is the only account
+#   holding EUR and USDC, and the offers are priced at 1 so that 1 XLM cannot
+#   possibly yield 5 USDC through the EUR hop.
+# - All amounts are bounded and the scenario is Testnet-only.
+# - The balance assertions after the failed step prove the failure is atomic:
+#   the recipient receives nothing and the market-maker's issued balances are
+#   untouched.
+
+accounts:
+  - name: issuer
+    generated: true
+    funded: true
+  - name: sender
+    generated: true
+    funded: true
+  - name: market-maker
+    generated: true
+    funded: true
+  - name: recipient
+    generated: true
+    funded: true
+
+steps:
+  # Trustlines for issued assets (bounded limits).
+  - type: changeTrust
+    account: market-maker
+    asset: { code: EUR, issuer: issuer }
+    limit: "1000"
+    assert: stepSucceeded
+
+  - type: changeTrust
+    account: market-maker
+    asset: { code: USDC, issuer: issuer }
+    limit: "1000"
+    assert: stepSucceeded
+
+  - type: changeTrust
+    account: recipient
+    asset: { code: USDC, issuer: issuer }
+    limit: "1000"
+    assert: stepSucceeded
+
+  # Fund the market-maker with issued assets.
+  - type: payment
+    from: issuer
+    to: market-maker
+    asset: { code: EUR, issuer: issuer }
+    amount: "100"
+    assert: stepSucceeded
+
+  - type: payment
+    from: issuer
+    to: market-maker
+    asset: { code: USDC, issuer: issuer }
+    amount: "100"
+    assert: stepSucceeded
+
+  # Create isolated liquidity: EUR/XLM and USDC/EUR offers at price 1.
+  - type: manageSellOffer
+    account: market-maker
+    selling: { code: EUR, issuer: issuer }
+    buying: { code: XLM }
+    amount: "100"
+    price: "1"
+    assert: stepSucceeded
+
+  - type: manageSellOffer
+    account: market-maker
+    selling: { code: USDC, issuer: issuer }
+    buying: { code: EUR, issuer: issuer }
+    amount: "100"
+    price: "1"
+    assert: stepSucceeded
+
+  # Strict-send that cannot meet destMin: 1 XLM cannot deliver 5 USDC.
+  - type: pathPaymentStrictSend
+    from: sender
+    to: recipient
+    sendAsset: { code: XLM }
+    sendAmount: "1"
+    destAsset: { code: USDC, issuer: issuer }
+    destMin: "5"
+    path:
+      - { code: EUR, issuer: issuer }
+    assert:
+      stepFailedWith:
+        transactionCode: tx_failed
+        operationCodes:
+          - op_under_dest_min
+
+  # Issued-asset balances must be unchanged after the failed strict-send.
+  - type: assertBalance
+    account: recipient
+    asset: { code: USDC, issuer: issuer }
+    equals: "0"
+    assert: balanceEquals
+
+  - type: assertBalance
+    account: market-maker
+    asset: { code: USDC, issuer: issuer }
+    equals: "100"
+    assert: balanceEquals
+
+  - type: assertBalance
+    account: market-maker
+    asset: { code: EUR, issuer: issuer }
+    equals: "100"
+    assert: balanceEquals

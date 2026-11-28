@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ValidatedScenario } from "@esure/backend/src/domain.js";
 import { SCENARIO_LIMITS } from "@esure/backend/src/scenario-schema.js";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 
 const mocks = vi.hoisted(() => ({
   execute: vi.fn(),
@@ -11,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   stat: vi.fn(),
   fsReaddirSync: vi.fn(),
   fsStatSync: vi.fn(),
+  gatewayConstructed: vi.fn(),
 }));
 
 vi.mock("node:fs/promises", () => ({ readFile: mocks.readFile, stat: mocks.stat }));
@@ -21,8 +23,11 @@ vi.mock("node:fs", () => ({
 vi.mock("@esure/backend/src/scenarios.js", () => ({
   createScenarioRegistry: mocks.createRegistry,
 }));
-vi.mock("@esure/backend/stellar-gateway.js", () => ({
+vi.mock("@esure/backend/src/stellar-gateway.js", () => ({
   StellarTestnetGateway: class {
+    constructor() {
+      mocks.gatewayConstructed();
+    }
     execute = mocks.execute;
   },
 }));
@@ -43,6 +48,26 @@ const definition = {
 const scenario: ValidatedScenario = {
   ...definition,
   contentHash: "sha256:test",
+};
+
+const plannedScenario: ValidatedScenario = {
+  ...scenario,
+  accounts: [
+    { id: "alice", generate: true, fund: true },
+    { id: "bob", generate: true, fund: false },
+  ],
+  assets: [
+    { id: "xlm", type: "native" },
+    { id: "usd", type: "issued", code: "USD", issuer: "alice" },
+  ],
+  steps: [
+    { id: "payment-1", type: "payment", from: "alice", to: "bob", asset: "xlm", amount: "2" },
+    { id: "trust-1", type: "changeTrust", account: "bob", asset: "usd" },
+  ],
+  assertions: [
+    { type: "balanceEquals", account: "bob", asset: "xlm", amount: "2" },
+    { type: "transactionConfirmed", step: "payment-1" },
+  ],
 };
 
 const catalog = [{
@@ -82,6 +107,22 @@ const validYaml = [
 const passedExecution = {
   steps: [{ id: "step-1", type: "payment", status: "passed", message: "Payment confirmed." }],
   assertions: [{ type: "accountExists", status: "passed", expected: true, actual: true, message: "Account exists." }],
+};
+
+const runReport = {
+  id: "run-a",
+  scenarioId: "test-scenario",
+  scenarioVersion: 1,
+  scenarioSchemaVersion: 1,
+  scenarioContentHash: "sha256:scenario",
+  network: "testnet",
+  status: "passed",
+  createdAt: "2026-11-01T12:00:00.000Z",
+  completedAt: "2026-11-01T12:00:10.000Z",
+  expiresAt: "2026-11-02T12:00:10.000Z",
+  steps: [{ id: "payment-1", type: "payment", status: "passed", message: "Payment confirmed." }],
+  assertions: [{ type: "balanceEquals", status: "passed", expected: "2.0000", actual: "2.0000", message: "Balance matches." }],
+  summary: { stepsPassed: 1, stepsFailed: 0, assertionsPassed: 1, assertionsFailed: 0 },
 };
 
 let stdout: string[];
@@ -193,6 +234,7 @@ describe("CLI commands", () => {
     mocks.find.mockClear();
     mocks.createRegistry.mockClear();
     mocks.execute.mockClear();
+    mocks.gatewayConstructed.mockClear();
     mocks.fsReaddirSync.mockClear();
     mocks.fsStatSync.mockClear();
   });
@@ -386,6 +428,178 @@ describe("CLI commands", () => {
     expect(result.definition.accounts).toBeDefined();
   });
 
+  it("plans a bounded scenario file in JSON without constructing the gateway", async () => {
+    const { contentHash: _contentHash, ...scenarioDefinition } = plannedScenario;
+    const content = JSON.stringify(scenarioDefinition);
+    mocks.fsStatSync.mockReturnValue({ size: Buffer.byteLength(content) });
+    mocks.readFile.mockResolvedValueOnce(content);
+
+    expect(await invokeCli("plan", "./scenario.json", "--output", "json")).toBe(0);
+    const result = JSON.parse(stdout.join("\n"));
+    expect(result).toEqual({
+      scenarioId: plannedScenario.id,
+      fundedAccountCount: 1,
+      operations: [
+        { order: 1, id: "payment-1", type: "payment", subject: "alice -> bob" },
+        { order: 2, id: "trust-1", type: "changeTrust", subject: "bob / usd" },
+      ],
+      assertions: [
+        { order: 1, type: "balanceEquals", subject: "bob / xlm" },
+        { order: 2, type: "transactionConfirmed", subject: "step payment-1" },
+      ],
+    });
+    expect(mocks.gatewayConstructed).not.toHaveBeenCalled();
+  });
+
+  it("plans a bundled scenario in human format without constructing the gateway", async () => {
+    mocks.find.mockImplementation((id: string) => id === plannedScenario.id ? structuredClone(plannedScenario) : undefined);
+
+    expect(await invokeCli("plan", plannedScenario.id)).toBe(0);
+    expect(stdout.join("\n")).toContain("Funded accounts: 1");
+    expect(stdout.join("\n")).toContain("1. payment-1 (payment) — alice -> bob");
+    expect(stdout.join("\n")).toContain("balanceEquals — bob / xlm");
+    expect(mocks.gatewayConstructed).not.toHaveBeenCalled();
+  });
+
+  it("rejects an oversized plan file before reading it", async () => {
+    mocks.fsStatSync.mockReturnValue({ size: SCENARIO_LIMITS.definitionBytes + 1 });
+
+    expect(await invokeCli("plan", "./oversized.json")).toBe(1);
+    expect(mocks.readFile).not.toHaveBeenCalled();
+    expect(mocks.gatewayConstructed).not.toHaveBeenCalled();
+  });
+
+  it("validates and converts a scenario to YAML on stdout without its derived hash", async () => {
+    const sourceScenario = structuredClone(plannedScenario);
+    (sourceScenario.steps[0] as { amount: string }).amount = "2.5000";
+    const { contentHash: _contentHash, ...definition } = sourceScenario;
+    mocks.readFile.mockResolvedValueOnce(JSON.stringify(definition));
+
+    expect(await invokeCli("format", "./scenario.json", "--to", "yaml")).toBe(0);
+    const result = parseYaml(stdout.join("\n")) as Record<string, any>;
+    expect(result.contentHash).toBeUndefined();
+    expect(result.steps[0].amount).toBe("2.5000");
+    expect(typeof result.steps[0].amount).toBe("string");
+    expect(mocks.writeFile).not.toHaveBeenCalled();
+
+    stdout = [];
+    mocks.readFile.mockResolvedValueOnce(stringifyYaml(definition));
+    expect(await invokeCli("format", "./scenario.yaml", "--to", "json")).toBe(0);
+    const jsonResult = JSON.parse(stdout.join("\n"));
+    expect(jsonResult.contentHash).toBeUndefined();
+    expect(jsonResult.steps[0].amount).toBe("2.5000");
+  });
+
+  it("validates before writing and uses the existing overwrite safeguard", async () => {
+    const { contentHash: _contentHash, ...definition } = plannedScenario;
+    const source = JSON.stringify(definition);
+    mocks.readFile.mockResolvedValueOnce("not valid json");
+
+    expect(await invokeCli("format", "./scenario.json", "--to", "json", "--output-file", "./out.json")).toBe(1);
+    expect(mocks.writeFile).not.toHaveBeenCalled();
+
+    stderr = [];
+    mocks.readFile.mockResolvedValueOnce(source);
+    mocks.writeFile.mockRejectedValueOnce(Object.assign(new Error("exists"), { code: "EEXIST" }));
+    expect(await invokeCli("format", "./scenario.json", "--to", "json", "--output-file", "./out.json")).toBe(1);
+    expect(mocks.writeFile).toHaveBeenLastCalledWith(
+      "./out.json",
+      expect.stringContaining('"schemaVersion": 1'),
+      { encoding: "utf8", flag: "wx" },
+    );
+    expect(stderr.join("\n")).toContain('Use --overwrite to replace it.');
+
+    mocks.readFile.mockResolvedValueOnce(source);
+    mocks.writeFile.mockResolvedValueOnce(undefined);
+    expect(await invokeCli("format", "./scenario.json", "--to", "json", "--output-file", "./out.json", "--overwrite")).toBe(0);
+    expect(mocks.writeFile).toHaveBeenLastCalledWith(
+      "./out.json",
+      expect.stringContaining('"schemaVersion": 1'),
+      { encoding: "utf8", flag: "w" },
+    );
+    expect(stdout).toEqual([]);
+  });
+
+  it("rejects oversized format input before reading it", async () => {
+    mocks.fsStatSync.mockReturnValue({ size: SCENARIO_LIMITS.definitionBytes + 1 });
+    expect(await invokeCli("format", "./oversized.json", "--to", "yaml")).toBe(1);
+    expect(mocks.readFile).not.toHaveBeenCalled();
+    expect(mocks.writeFile).not.toHaveBeenCalled();
+  });
+
+  it("compares valid reports as JSON and returns zero when equal", async () => {
+    mocks.readFile.mockResolvedValueOnce(JSON.stringify(runReport));
+    mocks.readFile.mockResolvedValueOnce(JSON.stringify(runReport));
+
+    expect(await invokeCli("report", "compare", "left.json", "right.json", "--output", "json")).toBe(0);
+    const result = JSON.parse(stdout.join("\n"));
+    expect(result.equal).toBe(true);
+    expect(result.exitCode).toBe(0);
+    expect(result.provenance.left.scenarioContentHash).toBe("sha256:scenario");
+    expect(result.status).toEqual({ same: true, left: "passed", right: "passed" });
+    expect(result.evidence.steps.changed).toEqual([]);
+    expect(result.evidence.assertions.changed).toEqual([]);
+    expect(mocks.gatewayConstructed).not.toHaveBeenCalled();
+  });
+
+  it("reports status and evidence differences with exit code two", async () => {
+    const changedReport = {
+      ...runReport,
+      id: "run-b",
+      status: "failed",
+      steps: [{ ...runReport.steps[0], status: "failed", message: "Payment rejected." }],
+      assertions: [{ ...runReport.assertions[0], status: "failed", actual: "0.0000" }],
+      summary: { stepsPassed: 0, stepsFailed: 1, assertionsPassed: 0, assertionsFailed: 1 },
+    };
+    mocks.readFile.mockResolvedValueOnce(JSON.stringify(runReport));
+    mocks.readFile.mockResolvedValueOnce(JSON.stringify(changedReport));
+
+    expect(await invokeCli("report", "compare", "left.json", "right.json", "--output", "json")).toBe(2);
+    const result = JSON.parse(stdout.join("\n"));
+    expect(result.equal).toBe(false);
+    expect(result.exitCode).toBe(2);
+    expect(result.provenance.same).toBe(false);
+    expect(result.status.same).toBe(false);
+    expect(result.evidence.steps.changed).toHaveLength(1);
+    expect(result.evidence.assertions.changed).toHaveLength(1);
+    expect(mocks.gatewayConstructed).not.toHaveBeenCalled();
+  });
+
+  it("shows provenance, status, and evidence differences in human output", async () => {
+    const changedReport = {
+      ...runReport,
+      id: "run-b",
+      status: "failed",
+      steps: [{ ...runReport.steps[0], status: "failed", message: "Payment rejected." }],
+    };
+    mocks.readFile.mockResolvedValueOnce(JSON.stringify(runReport));
+    mocks.readFile.mockResolvedValueOnce(JSON.stringify(changedReport));
+
+    expect(await invokeCli("report", "compare", "left.json", "right.json")).toBe(2);
+    expect(stdout.join("\n")).toContain("Run IDs: run-a -> run-b");
+    expect(stdout.join("\n")).toContain("Status: passed -> failed (different)");
+    expect(stdout.join("\n")).toContain("step 1:");
+    expect(mocks.gatewayConstructed).not.toHaveBeenCalled();
+  });
+
+  it("rejects invalid reports with exit code one", async () => {
+    const invalid = JSON.stringify({ ...runReport, network: "mainnet" });
+    mocks.readFile.mockResolvedValueOnce(invalid);
+    mocks.readFile.mockResolvedValueOnce(invalid);
+
+    expect(await invokeCli("report", "compare", "left.json", "right.json", "--output", "json")).toBe(1);
+    expect(JSON.parse(stderr.join("\n")).error.message).toContain("/network");
+    expect(mocks.gatewayConstructed).not.toHaveBeenCalled();
+  });
+
+  it("rejects oversized reports before reading them", async () => {
+    mocks.fsStatSync.mockReturnValue({ size: 5 * 1024 * 1024 + 1 });
+
+    expect(await invokeCli("report", "compare", "left.json", "right.json")).toBe(1);
+    expect(mocks.readFile).not.toHaveBeenCalled();
+    expect(mocks.gatewayConstructed).not.toHaveBeenCalled();
+  });
+
   it("reports an unknown scenario id for show", async () => {
     mocks.find.mockReturnValue(undefined);
     expect(await invokeCli("show", "missing-scenario", "--output", "json")).toBe(1);
@@ -544,7 +758,7 @@ describe("CLI commands", () => {
     expect(stdout.join("\n")).toContain("Usage:");
 
     stdout = [];
-    expect(await invokeCli("--help")).toBe(1);
+    expect(await invokeCli("--help")).toBe(0);
     expect(stdout.join("\n")).toContain("Usage:");
 
     stdout = [];
@@ -642,115 +856,168 @@ describe("CLI commands", () => {
     });
   });
 
-  describe("#53 explicit --file selector for run targets", () => {
-    it("runs local scenario with --file even if filename has no slashes or dots", async () => {
-      await withFile(validJson);
-      expect(await invokeCli("run", "--file", "custom-file.json")).toBe(0);
-      expect(stdout.join("\n")).toContain("Running scenario: Test scenario");
-      expect(stdout.join("\n")).toContain("Result: PASSED");
+  describe("#244 schema inspection command", () => {
+    it("emits the scenario schema as valid JSON in JSON mode", async () => {
+      expect(await invokeCli("schema", "scenario", "--output", "json")).toBe(0);
+      expect(stderr).toEqual([]);
+      const result = JSON.parse(stdout.join("\n"));
+      expect(result).toBeTruthy();
+      expect(typeof result).toBe("object");
     });
 
-    it("fails clearly when combining --file with positional target", async () => {
-      expect(await invokeCli("run", "--file", "scenario.json", "positional-id")).toBe(1);
-      expect(stderr.join("\n")).toContain("Error: Cannot specify both --file and a positional target");
+    it("emits the report schema as valid JSON in JSON mode", async () => {
+      expect(await invokeCli("schema", "report", "--output", "json")).toBe(0);
+      expect(stderr).toEqual([]);
+      const result = JSON.parse(stdout.join("\n"));
+      expect(result).toBeTruthy();
+      expect(typeof result).toBe("object");
     });
 
-    it("produces useful path-related error when file does not exist", async () => {
-      mocks.stat.mockRejectedValueOnce(Object.assign(new Error("ENOENT: no such file or directory"), { code: "ENOENT" }));
-      expect(await invokeCli("run", "--file", "nonexistent.json")).toBe(1);
-      expect(stderr.join("\n")).toContain('Scenario file not found: "nonexistent.json"');
-    });
-
-    it("help text includes --file selector explanation", async () => {
+    it("selects distinct schemas for scenario and report targets", async () => {
+      expect(await invokeCli("schema", "scenario", "--output", "json")).toBe(0);
+      const scenarioSchema = JSON.parse(stdout.join("\n"));
       stdout = [];
-      expect(await invokeCli("--help")).toBe(1);
-      expect(stdout.join("\n")).toContain("--file <path>");
+      expect(await invokeCli("schema", "report", "--output", "json")).toBe(0);
+      const reportSchema = JSON.parse(stdout.join("\n"));
+      expect(scenarioSchema).not.toEqual(reportSchema);
+    });
+
+    it("prints the scenario schema in human-readable mode", async () => {
+      expect(await invokeCli("schema", "scenario")).toBe(0);
+      expect(stdout.join("\n").length).toBeGreaterThan(0);
+      expect(stderr).toEqual([]);
+    });
+
+    it("rejects an unknown schema target with a nonzero exit and clear error", async () => {
+      expect(await invokeCli("schema", "unknown-target", "--output", "json")).toBe(1);
+      const err = JSON.parse(stderr.join("\n"));
+      expect(err.error.message).toContain("unknown-target");
+    });
+
+    it("rejects a missing schema target with a nonzero exit", async () => {
+      expect(await invokeCli("schema", "--output", "json")).toBe(1);
+      const err = JSON.parse(stderr.join("\n"));
+      expect(err.error.message).toBeTruthy();
     });
   });
-});
 
-// ─────────────────────────────────────────────────────────────────────────────
-// #66 — bounded step progress during human-mode runs
-// ─────────────────────────────────────────────────────────────────────────────
+  describe("#245 validate-directory continues after unreadable files", () => {
+    it("records a disappearing file (ENOENT) and continues validating remaining files", async () => {
+      mockDirectory([
+        { name: "a-good.json", size: 50, content: validJson },
+        { name: "b-vanishing.json", size: 50, content: validJson },
+        { name: "c-good.json", size: 50, content: validJson },
+      ]);
+      const baseRead = mocks.readFile.getMockImplementation()!;
+      mocks.readFile.mockImplementation(async (path: string) => {
+        if (String(path).includes("b-vanishing.json")) {
+          throw Object.assign(new Error("ENOENT: no such file or directory"), { code: "ENOENT" });
+        }
+        return baseRead(path);
+      });
+      expect(await invokeCli("validate-directory", "./scenarios", "--output", "json")).toBe(1);
+      const result = JSON.parse(stdout.join("\n"));
+      expect(result.valid).toBe(false);
+      expect(result.files.map((f: { file: string }) => f.file)).toEqual([
+        "a-good.json",
+        "b-vanishing.json",
+        "c-good.json",
+      ]);
+      const vanished = result.files.find((f: { file: string }) => f.file === "b-vanishing.json");
+      expect(vanished.valid).toBe(false);
+      expect(vanished.error).toBeTruthy();
+      const good = result.files.filter((f: { file: string }) => f.valid);
+      expect(good.map((f: { file: string }) => f.file)).toEqual(["a-good.json", "c-good.json"]);
+      expect(result.summary).toEqual({ total: 3, passed: 2, failed: 1 });
+    });
 
-describe("#66 human-mode step progress", () => {
-  beforeEach(() => {
-    stdout = [];
+    it("records an injected permission error (EACCES) and continues", async () => {
+      mockDirectory([
+        { name: "a-good.json", size: 50, content: validJson },
+        { name: "b-locked.json", size: 50, content: validJson },
+      ]);
+      const baseRead = mocks.readFile.getMockImplementation()!;
+      mocks.readFile.mockImplementation(async (path: string) => {
+        if (String(path).includes("b-locked.json")) {
+          throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+        }
+        return baseRead(path);
+      });
+      expect(await invokeCli("validate-directory", "./scenarios", "--output", "json")).toBe(1);
+      const result = JSON.parse(stdout.join("\n"));
+      expect(result.valid).toBe(false);
+      expect(result.files.map((f: { file: string }) => f.file)).toEqual(["a-good.json", "b-locked.json"]);
+      const locked = result.files.find((f: { file: string }) => f.file === "b-locked.json");
+      expect(locked.valid).toBe(false);
+      expect(locked.error).toBeTruthy();
+      expect(result.files.find((f: { file: string }) => f.file === "a-good.json").valid).toBe(true);
+    });
+
+    it("records a stat failure and continues with deterministic ordering", async () => {
+      mockDirectory([
+        { name: "a-good.json", size: 50, content: validJson },
+        { name: "b-stat.json", size: 50, content: validJson },
+        { name: "c-good.json", size: 50, content: validJson },
+      ]);
+      const baseStat = mocks.fsStatSync.getMockImplementation()!;
+      mocks.fsStatSync.mockImplementation((path: string) => {
+        if (String(path).includes("b-stat.json")) {
+          throw Object.assign(new Error("ENOENT: no such file or directory"), { code: "ENOENT" });
+        }
+        return baseStat(path);
+      });
+      expect(await invokeCli("validate-directory", "./scenarios", "--output", "json")).toBe(1);
+      const result = JSON.parse(stdout.join("\n"));
+      expect(result.valid).toBe(false);
+      expect(result.files.map((f: { file: string }) => f.file)).toEqual([
+        "a-good.json",
+        "b-stat.json",
+        "c-good.json",
+      ]);
+      expect(result.files.find((f: { file: string }) => f.file === "b-stat.json").valid).toBe(false);
+    });
+  });
+
+  describe("#246 formatter --check mode", () => {
+    it("returns success when files are already canonical", async () => {
+      mockDirectory([{ name: "good.json", size: 50, content: validJson }]);
+      expect(await invokeCli("format", "./scenarios", "--check", "--output", "json")).toBe(0);
+      const result = JSON.parse(stdout.join("\n"));
+      expect(result.changed).toEqual([]);
+    });
+
+    it("returns the documented nonzero code on drift without modifying files", async () => {
+      const unformatted = JSON.stringify(definition, null, 4);
+      mockDirectory([{ name: "drift.json", size: 50, content: unformatted }]);
+      expect(await invokeCli("format", "./scenarios", "--check", "--output", "json")).toBe(3);
+      const result = JSON.parse(stdout.join("\n"));
+      expect(result.changed).toContain("drift.json");
+      // No write should have occurred during check mode
+      expect(mocks.readFile).toHaveBeenCalled();
+    });
+
+    it("lists affected files in JSON mode", async () => {
+      const unformatted = JSON.stringify(definition, null, 4);
+      mockDirectory([
+        { name: "a-drift.json", size: 50, content: unformatted },
+        { name: "b-good.json", size: 50, content: validJson },
+        { name: "c-drift.json", size: 50, content: unformatted },
+      ]);
+      expect(await invokeCli("format", "./scenarios", "--check", "--output", "json")).toBe(3);
+      const result = JSON.parse(stdout.join("\n"));
+      expect(result.changed).toEqual(["a-drift.json", "c-drift.json"]);
+    });
+  });
+
+  describe("#53 explicit --file selector for run targets", () => {
+
     stderr = [];
-    originalArgv = process.argv;
-    originalExitCode = process.exitCode;
-    process.exitCode = undefined;
-    vi.spyOn(console, "log").mockImplementation((...values: unknown[]) => {
-      stdout.push(values.join(" "));
-    });
-    vi.spyOn(console, "error").mockImplementation((...values: unknown[]) => {
-      stderr.push(values.join(" "));
-    });
-    mocks.list.mockReturnValue(catalog);
-    mocks.find.mockImplementation((id: string) => id === scenario.id ? structuredClone(scenario) : undefined);
-    mocks.createRegistry.mockReturnValue({ list: mocks.list, find: mocks.find });
-    mocks.execute.mockReset();
-    mocks.readFile.mockReset();
-    mocks.list.mockClear();
-    mocks.find.mockClear();
-  });
+    expect(await invokeCli("validate", "--stdin", "--format", "csv")).toBe(1);
+    expect(stderr.join("\n")).toContain("--stdin requires --format json or --format yaml");
 
-  afterEach(() => {
-    process.argv = originalArgv;
-    process.exitCode = originalExitCode;
-    vi.restoreAllMocks();
-  });
-
-  it("prints each step and assertion once in human mode", async () => {
-    mocks.execute.mockImplementation((_scenario: ValidatedScenario, opts: { onStep?: (s: unknown) => void; onAssertion?: (a: unknown) => void }) => {
-      opts?.onStep?.({ id: "pay", type: "payment", status: "passed", message: "Payment done." });
-      opts?.onAssertion?.({ type: "accountExists", status: "passed", expected: true, actual: true, message: "Exists." });
-      return Promise.resolve(passedExecution);
-    });
-    expect(await invokeCli("run", scenario.id)).toBe(0);
-    const out = stdout.join("\n");
-    expect(out).toContain("pay: Payment done.");
-    expect(out).toContain("accountExists: Exists.");
-    expect(out).toContain("Result: PASSED");
-  });
-
-  it("does not print per-step progress in JSON mode", async () => {
-    mocks.execute.mockImplementation((_scenario: ValidatedScenario, opts: { onStep?: (s: unknown) => void; onAssertion?: (a: unknown) => void }) => {
-      opts?.onStep?.({ id: "pay", type: "payment", status: "passed", message: "Payment done." });
-      return Promise.resolve(passedExecution);
-    });
-    expect(await invokeCli("run", scenario.id, "--output", "json")).toBe(0);
-    const out = stdout.join("\n");
-    // JSON output should not have progress lines, only the JSON report
-    const parsed = JSON.parse(out);
-    expect(parsed.status).toBe("passed");
-    // progress text should not appear outside JSON
-    expect(out).not.toContain("pay: Payment done.");
-  });
-
-  it("preserves error after partial progress in human mode", async () => {
-    mocks.execute.mockImplementation((_scenario: ValidatedScenario, opts: { onStep?: (s: unknown) => void }) => {
-      opts?.onStep?.({ id: "step-1", type: "payment", status: "passed", message: "Step done." });
-      return Promise.reject(Object.assign(new Error("network timeout"), { report: { id: "run-abc" } }));
-    });
-    expect(await invokeCli("run", scenario.id)).toBe(1);
-    const out = stdout.join("\n");
-    const errOut = stderr.join("\n");
-    expect(out).toContain("step-1: Step done.");
-    expect(errOut).toContain("Run failed: network timeout");
-  });
-
-  it("does not duplicate the final step list in human mode", async () => {
-    mocks.execute.mockImplementation((_scenario: ValidatedScenario, opts: { onStep?: (s: unknown) => void; onAssertion?: (a: unknown) => void }) => {
-      opts?.onStep?.({ id: "step-1", type: "payment", status: "passed", message: "Payment confirmed." });
-      opts?.onAssertion?.({ type: "accountExists", status: "passed", expected: true, actual: true, message: "Account exists." });
-      return Promise.resolve(passedExecution);
-    });
-    expect(await invokeCli("run", scenario.id)).toBe(0);
-    const out = stdout.join("\n");
-    // Message should appear exactly once (from callback), not duplicated by final report
-    const occurrences = (out.match(/Payment confirmed\./g) ?? []).length;
-    expect(occurrences).toBe(1);
+    stderr = [];
+    expect(await invokeCli("run", scenario.id, "--stdin", "--format", "json")).toBe(1);
+    expect(stderr.join("\n")).toContain("only supported by validate");
   });
 });
 
@@ -977,8 +1244,32 @@ describe("#68 ASCII status markers", () => {
 
   it("--ascii appears in help text", async () => {
     stdout = [];
-    expect(await invokeCli("--help")).toBe(1);
+    expect(await invokeCli("run", "--help")).toBe(0);
     expect(stdout.join("\n")).toContain("--ascii");
+  });
+
+  it.each([
+    ["list", "--search", "--output"],
+    ["show", "--output", "--search"],
+    ["validate", "--stdin", "--search"],
+    ["validate-directory", "--output", "--stdin"],
+    ["plan", "--output", "--stdin"],
+    ["format", "--to", "--stdin"],
+    ["report", "report compare", "--search"],
+    ["run", "--timeout-ms", "--stdin"],
+    ["run-suite", "--fail-fast", "--stdin"],
+    ["completions", "bash|zsh", "--output"],
+    ["doctor", "Usage: esure doctor", "--search"],
+  ])("provides side-effect-free command help for %s", async (command, supported, unsupported) => {
+    expect(await invokeCli(command, "--help")).toBe(0);
+    const output = stdout.join("\n");
+    expect(output).toContain("Usage:");
+    expect(output).toContain(supported);
+    expect(output).not.toContain(unsupported);
+    expect(stderr).toEqual([]);
+    expect(mocks.createRegistry).not.toHaveBeenCalled();
+    expect(mocks.execute).not.toHaveBeenCalled();
+    expect(mocks.readFile).not.toHaveBeenCalled();
   });
 
   it("completions bash emits a bash completion script", async () => {

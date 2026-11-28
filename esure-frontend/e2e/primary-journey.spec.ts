@@ -1,3 +1,5 @@
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import type { AddressInfo } from "node:net";
 import { expect, test } from "@playwright/test";
 import type { RunReport, ScenarioSummary } from "../src/lib/api";
 
@@ -157,45 +159,121 @@ const failedRun: RunReport = {
   },
 };
 
-test.describe("Primary User Journey", () => {
-  test("selects a scenario, starts a run, polls for completion, and verifies a passed report", async ({ page }) => {
-    // 1. Mock scenarios list at the browser boundary
-    await page.route("**/api/backend/api/v1/scenarios", async (route) => {
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({ items: mockScenarios }),
-      });
-    });
+type RecordedRequest = {
+  method: string;
+  path: string;
+  headers: Record<string, string | string[] | undefined>;
+  body: string;
+};
 
-    let pollCount = 0;
-    // 2. Mock start run (POST) and subsequent get run polls (GET)
-    await page.route("**/api/backend/api/v1/runs", async (route) => {
-      if (route.request().method() === "POST") {
-        const postData = route.request().postDataJSON();
-        expect(postData).toEqual({ scenarioId: "issued-asset-payment", inputs: {} });
-        await route.fulfill({
-          status: 200,
-          contentType: "application/json",
-          body: JSON.stringify(runningRun),
-        });
-      } else {
-        await route.continue();
-      }
-    });
+type FakeBackend = {
+  server: Server;
+  baseUrl: string;
+  requests: RecordedRequest[];
+  reset: () => void;
+};
 
-    await page.route("**/api/backend/api/v1/runs/run-e2e-123", async (route) => {
+const REPORT_BODY = JSON.stringify(passedRun);
+
+function readBody(request: IncomingMessage): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    request.on("data", (chunk: Buffer) => chunks.push(chunk));
+    request.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    request.on("error", reject);
+  });
+}
+
+function sendJson(response: ServerResponse, status: number, body: unknown): void {
+  response.writeHead(status, { "content-type": "application/json" });
+  response.end(JSON.stringify(body));
+}
+
+/**
+ * Deterministic local HTTP backend that stands in for the Esure Backend.
+ * It records every request so tests can assert what the Next.js proxy forwarded.
+ * No Stellar or network calls are made.
+ */
+async function startFakeBackend(): Promise<FakeBackend> {
+  const requests: RecordedRequest[] = [];
+  let pollCount = 0;
+
+  const server = createServer(async (request, response) => {
+    const method = request.method ?? "GET";
+    const path = request.url ?? "/";
+    const body = await readBody(request);
+    requests.push({ method, path, headers: { ...request.headers }, body });
+
+    if (method === "GET" && path === "/api/v1/scenarios") {
+      sendJson(response, 200, { items: mockScenarios });
+      return;
+    }
+
+    if (method === "POST" && path === "/api/v1/runs") {
+      sendJson(response, 200, runningRun);
+      return;
+    }
+
+    if (method === "GET" && path === "/api/v1/runs/run-e2e-123") {
       pollCount += 1;
       // First poll returns running state, subsequent poll returns terminal passed report
-      const body = pollCount === 1 ? runningRun : passedRun;
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify(body),
-      });
-    });
+      sendJson(response, 200, pollCount === 1 ? runningRun : passedRun);
+      return;
+    }
 
-    // 3. Navigate to application
+    if (method === "GET" && path === "/api/v1/runs/run-e2e-123/report") {
+      response.writeHead(200, {
+        "content-type": "application/json",
+        "content-disposition": 'attachment; filename="run-e2e-123.json"',
+      });
+      response.end(REPORT_BODY);
+      return;
+    }
+
+    sendJson(response, 404, {
+      error: { code: "NOT_FOUND", message: `Unexpected fake backend request: ${method} ${path}` },
+    });
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+
+  const { port } = server.address() as AddressInfo;
+
+  return {
+    server,
+    baseUrl: `http://127.0.0.1:${port}`,
+    requests,
+    reset: () => {
+      requests.length = 0;
+      pollCount = 0;
+    },
+  };
+}
+
+test.describe("Primary User Journey", () => {
+  let backend: FakeBackend;
+
+  test.beforeEach(async () => {
+    backend = await startFakeBackend();
+    // Point the real Next.js proxy at the deterministic local backend.
+    process.env.ESURE_BACKEND_URL = backend.baseUrl;
+  });
+
+  test.afterEach(async () => {
+    delete process.env.ESURE_BACKEND_URL;
+    await new Promise<void>((resolve, reject) => {
+      backend.server.close((error) => (error ? reject(error) : resolve()));
+    });
+  });
+
+  test("selects a scenario, starts a run, polls for completion, and verifies a passed report", async ({ page }) => {
+    // 1. Navigate to application; scenarios are served by the fake backend via the real proxy
     await page.goto("/");
 
     // Verify initial scenario list and count
@@ -259,6 +337,57 @@ test.describe("Primary User Journey", () => {
     // Verify run button re-enabled after completion
     await expect(runButton).toHaveText(/Run on Testnet/);
     await expect(runButton).toBeEnabled();
+
+    // 7. Download the report through the proxy and confirm the fake backend payload
+    const downloadPromise = page.waitForEvent("download");
+    await downloadLink.click();
+    const download = await downloadPromise;
+    expect(download.suggestedFilename()).toBe("run-e2e-123.json");
+    const downloadPath = await download.path();
+    expect(downloadPath).not.toBeNull();
+    const { readFile } = await import("node:fs/promises");
+    const downloaded = JSON.parse(await readFile(downloadPath as string, "utf8")) as RunReport;
+    expect(downloaded.id).toBe("run-e2e-123");
+    expect(downloaded.status).toBe("passed");
+
+    // 8. Assert the proxy forwarded the run creation request and its headers
+    const createRequests = backend.requests.filter(
+      (recorded) => recorded.method === "POST" && recorded.path === "/api/v1/runs",
+    );
+    expect(createRequests).toHaveLength(1);
+    const createRequest = createRequests[0];
+    expect(JSON.parse(createRequest.body)).toEqual({ scenarioId: "issued-asset-payment", inputs: {} });
+    expect(createRequest.headers["idempotency-key"]).toBeTruthy();
+    expect(createRequest.headers["x-request-id"]).toBeTruthy();
+    expect(createRequest.headers["x-retry-attempt"]).toBe("0");
+
+    // 9. Assert polling and report download requests reached the backend through the proxy
+    const pollRequests = backend.requests.filter(
+      (recorded) => recorded.method === "GET" && recorded.path === "/api/v1/runs/run-e2e-123",
+    );
+    expect(pollRequests.length).toBeGreaterThanOrEqual(2);
+    for (const pollRequest of pollRequests) {
+      expect(pollRequest.headers["x-request-id"]).toBeTruthy();
+      expect(pollRequest.headers["x-retry-attempt"]).toBeDefined();
+    }
+
+    const reportRequests = backend.requests.filter(
+      (recorded) => recorded.method === "GET" && recorded.path === "/api/v1/runs/run-e2e-123/report",
+    );
+    expect(reportRequests).toHaveLength(1);
+    expect(reportRequests[0].headers["x-request-id"]).toBeTruthy();
+
+    // 10. No Stellar calls: the fake backend only saw the expected API surface
+    const unexpected = backend.requests.filter(
+      (recorded) =>
+        ![
+          "/api/v1/scenarios",
+          "/api/v1/runs",
+          "/api/v1/runs/run-e2e-123",
+          "/api/v1/runs/run-e2e-123/report",
+        ].includes(recorded.path),
+    );
+    expect(unexpected).toEqual([]);
   });
 });
 
@@ -410,6 +539,92 @@ test.describe("Failed Run and Error States", () => {
     // Download link is still provided for failed runs for inspection
     await page.emulateMedia({ media: "screen" });
     await expect(page.locator("a.download")).toBeVisible();
+  });
+
+  test("prints a terminal report with long evidence without overflow", async ({ page }) => {
+    const longEvidence = "Recipient balance evidence: ".repeat(40);
+    const printRun: RunReport = {
+      ...failedRun,
+      assertions: [
+        {
+          type: "balanceEquals",
+          status: "passed",
+          expected: "100",
+          actual: "100",
+          message: "Passing balance assertion.",
+        },
+        {
+          type: "paymentDelivered",
+          status: "failed",
+          expected: true,
+          actual: false,
+          message: `Failed payment assertion with long structured evidence. ${longEvidence}`,
+        },
+      ],
+    };
+
+    await page.route("**/api/backend/api/v1/scenarios", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ items: mockScenarios }),
+      });
+    });
+
+    await page.route("**/api/backend/api/v1/runs", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(runningRun),
+      });
+    });
+
+    await page.route("**/api/backend/api/v1/runs/run-e2e-123", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(printRun),
+      });
+    });
+
+    await page.goto("/");
+    await page.locator(".launch-panel .run-button").click();
+    await expect(page.locator(".status-badge")).toContainText("Failed", { timeout: 10_000 });
+
+    await page.emulateMedia({ media: "print" });
+
+    // Provenance header remains visible in print media
+    const printHeader = page.locator(".print-report-header");
+    await expect(printHeader).toBeVisible();
+    await expect(printHeader).toContainText("Issued Asset Payment");
+    await expect(printHeader).toContainText("sha256:2222222222222222222222222222222222222222222222222222222222222222");
+
+    // Long structured assertion evidence remains visible
+    const longAssertion = page.locator(".assertion", { hasText: "Failed payment assertion with long structured evidence." });
+    await expect(longAssertion).toBeVisible();
+    await expect(longAssertion).toContainText(longEvidence.trim());
+
+    // Interactive controls are hidden in print media
+    await expect(page.locator(".launch-panel")).toBeHidden();
+    await expect(page.locator(".scenario-grid")).toBeHidden();
+    await expect(page.getByRole("group", { name: "Report filter" })).toBeHidden();
+    await expect(page.locator("a.download")).toBeHidden();
+
+    // No horizontal page-width overflow
+    const overflow = await page.evaluate(() => {
+      const doc = document.documentElement;
+      const body = document.body;
+      return {
+        docScroll: doc.scrollWidth,
+        docClient: doc.clientWidth,
+        bodyScroll: body.scrollWidth,
+        bodyClient: body.clientWidth,
+      };
+    });
+    expect(overflow.docScroll).toBeLessThanOrEqual(overflow.docClient);
+    expect(overflow.bodyScroll).toBeLessThanOrEqual(overflow.bodyClient);
+
+    await page.emulateMedia({ media: "screen" });
   });
 
   test("displays error banner when starting a run fails", async ({ page }) => {

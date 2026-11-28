@@ -81,6 +81,104 @@ assertions:
     expect(contentHash(reordered)).toBe(contentHash(definition));
   });
 
+  describe("golden canonical hash corpus", () => {
+    // Small reviewed definitions with expected canonical hashes. These pin the
+    // persistence integrity boundary: any change to canonicalization (ordering,
+    // JSON/YAML equivalence, decimal string handling, Unicode) must be reviewed.
+    const corpus: Array<{ label: string; definition: ScenarioDefinition; expectedHash: string }> = [
+      {
+        label: "unicode descriptions",
+        definition: {
+          schemaVersion: 1,
+          id: "golden-unicode",
+          version: 1,
+          name: "Unicode scenario — 日本語 🚀",
+          description: "Démo: accents éàü, emoji 🚀, CJK 日本語, RTL עברית.",
+          network: "testnet",
+          accounts: [
+            { id: "sender", generate: true, fund: true },
+            { id: "recipient", generate: true, fund: true },
+          ],
+          assets: [{ id: "xlm", type: "native" }],
+          steps: [{ id: "pay", type: "payment", from: "sender", to: "recipient", asset: "xlm", amount: "1" }],
+          assertions: [{ type: "stepSucceeded", step: "pay" }],
+        },
+        expectedHash: "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      },
+      {
+        label: "reordered object keys",
+        definition: {
+          assertions: [{ step: "pay", type: "stepSucceeded" }],
+          steps: [{ amount: "1", asset: "xlm", to: "recipient", from: "sender", type: "payment", id: "pay" }],
+          assets: [{ type: "native", id: "xlm" }],
+          accounts: [
+            { fund: true, generate: true, id: "recipient" },
+            { fund: true, generate: true, id: "sender" },
+          ],
+          network: "testnet",
+          description: "Keys intentionally reordered.",
+          name: "Reordered scenario",
+          version: 1,
+          id: "golden-reordered",
+          schemaVersion: 1,
+        } as unknown as ScenarioDefinition,
+        expectedHash: "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      },
+      {
+        label: "decimal strings",
+        definition: {
+          schemaVersion: 1,
+          id: "golden-decimals",
+          version: 1,
+          name: "Decimal scenario",
+          description: "Decimal amounts preserved as strings.",
+          network: "testnet",
+          accounts: [
+            { id: "sender", generate: true, fund: true },
+            { id: "recipient", generate: true, fund: true },
+          ],
+          assets: [{ id: "xlm", type: "native" }],
+          steps: [
+            { id: "pay-1", type: "payment", from: "sender", to: "recipient", asset: "xlm", amount: "0.0000001" },
+            { id: "pay-2", type: "payment", from: "sender", to: "recipient", asset: "xlm", amount: "1000000.1234567" },
+          ],
+          assertions: [
+            { type: "stepSucceeded", step: "pay-1" },
+            { type: "stepSucceeded", step: "pay-2" },
+          ],
+        },
+        expectedHash: "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      },
+    ];
+
+    it.each(corpus)("matches the expected canonical hash for $label", ({ definition, expectedHash }) => {
+      expect(contentHash(definition)).toBe(expectedHash);
+      expect(prepareScenario(definition).contentHash).toBe(expectedHash);
+    });
+
+    it("treats JSON and YAML encodings of the corpus as hash-equivalent", () => {
+      for (const { definition, expectedHash } of corpus) {
+        const fromJson = parseScenario(JSON.stringify(definition), "json");
+        expect(contentHash(fromJson)).toBe(expectedHash);
+      }
+    });
+
+    it("is insensitive to object key order for every corpus entry", () => {
+      const reverseKeys = (value: unknown): unknown => {
+        if (Array.isArray(value)) return value.map(reverseKeys);
+        if (value && typeof value === "object") {
+          return Object.fromEntries(Object.entries(value as Record<string, unknown>).reverse().map(([key, inner]) => [key, reverseKeys(inner)]));
+        }
+        return value;
+      };
+      for (const { definition, expectedHash } of corpus) {
+        const reordered = reverseKeys(definition) as ScenarioDefinition;
+        expect(canonicalJson(reordered)).toBe(canonicalJson(definition));
+        expect(contentHash(reordered)).toBe(expectedHash);
+      }
+    });
+  });
+
   it("loads a completely new external fixture without source-code registration", () => {
     const directory = mkdtempSync(join(tmpdir(), "esure-scenarios-"));
     temporaryDirectories.push(directory);
@@ -106,6 +204,31 @@ assertions:
     expect(scenario?.accounts).toHaveLength(4);
   });
 
+  it("loads the bundled direct path payment scenario with an empty path", () => {
+    const scenario = createScenarioRegistry().find("path-payment-direct");
+    expect(scenario).toBeDefined();
+    expect(scenario).toMatchObject({
+      id: "path-payment-direct",
+      steps: expect.arrayContaining([
+        expect.objectContaining({
+          type: "pathPaymentStrictReceive",
+          sendAsset: "xlm",
+          destAsset: "usdc",
+          path: [],
+        }),
+      ]),
+    });
+    const { contentHash: _directHash, ...definition } = structuredClone(scenario!);
+    expect(() => prepareScenario(definition)).not.toThrow();
+    expect(scenario?.assertions).toEqual(
+      expect.arrayContaining([
+        { type: "stepSucceeded", step: "pay-usdc-direct" },
+        { type: "transactionConfirmed", step: "pay-usdc-direct" },
+        { type: "balanceEquals", account: "recipient", asset: "usdc", amount: "5" },
+      ]),
+    );
+  });
+
   it("loads the bundled sender missing-trustline scenario", () => {
     const scenario = createScenarioRegistry().find("sender-missing-trustline");
     expect(scenario?.accounts.map((account) => account.id)).toEqual(["issuer", "sender", "recipient"]);
@@ -117,6 +240,66 @@ assertions:
         { type: "balanceEquals", account: "recipient", asset: "test-usd", amount: "50" },
       ]),
     );
+  });
+
+  it("loads the bundled strict-send below destMin scenario", () => {
+    const scenario = createScenarioRegistry().find("strict-send-below-dest-min");
+    expect(scenario).toBeDefined();
+    const { contentHash: _hash, ...definition } = structuredClone(scenario!);
+    expect(prepareScenario(definition)).toMatchObject({ id: "strict-send-below-dest-min" });
+    expect(scenario?.steps).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "pathPaymentStrictSend", destMin: expect.any(String) }),
+      ]),
+    );
+    expect(scenario?.assertions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "stepFailedWith", operationCodes: expect.arrayContaining(["op_under_dest_min"]) }),
+      ]),
+    );
+  });
+
+  it("loads the bundled path-payment no-liquidity scenario", () => {
+    const scenario = createScenarioRegistry().find("path-payment-no-liquidity");
+    expect(scenario).toBeDefined();
+    const { contentHash: _hash, ...definition } = structuredClone(scenario!);
+    expect(prepareScenario(definition)).toMatchObject({ id: "path-payment-no-liquidity" });
+    expect(scenario?.steps.some((step) => step.type === "manageSellOffer")).toBe(false);
+    expect(scenario?.assertions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "stepFailedWith", operationCodes: expect.arrayContaining(["op_no_issuer"]) }),
+        expect.objectContaining({ type: "balanceEquals", asset: expect.any(String), amount: "0" }),
+      ]),
+    );
+  });
+
+  it("loads the bundled path-payment trustline-limit-exceeded scenario", () => {
+    const scenario = createScenarioRegistry().find("path-payment-trustline-limit-exceeded");
+    expect(scenario).toBeDefined();
+    const { contentHash: _hash, ...definition } = structuredClone(scenario!);
+    expect(prepareScenario(definition)).toMatchObject({ id: "path-payment-trustline-limit-exceeded" });
+    expect(scenario?.steps).toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: "pathPaymentStrictReceive" })]),
+    );
+    expect(scenario?.assertions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "stepFailedWith", operationCodes: expect.arrayContaining(["op_line_full"]) }),
+        expect.objectContaining({ type: "balanceEquals", asset: expect.any(String), amount: "0" }),
+      ]),
+    );
+  });
+
+  it("rejects strict-send steps with missing or non-positive destMin", () => {
+    const scenario = createScenarioRegistry().find("strict-send-below-dest-min")!;
+    const { contentHash: _missingHash, ...missing } = structuredClone(scenario);
+    const missingStep = missing.steps.find((step) => step.type === "pathPaymentStrictSend");
+    if (missingStep?.type === "pathPaymentStrictSend") delete (missingStep as { destMin?: string }).destMin;
+    expect(() => prepareScenario(missing)).toThrow(ScenarioValidationError);
+
+    const { contentHash: _zeroHash, ...zero } = structuredClone(scenario);
+    const zeroStep = zero.steps.find((step) => step.type === "pathPaymentStrictSend");
+    if (zeroStep?.type === "pathPaymentStrictSend") zeroStep.destMin = "0";
+    expect(() => prepareScenario(zero)).toThrow(ScenarioValidationError);
   });
 
   it("rejects unresolved or endpoint assets in path payment paths", () => {

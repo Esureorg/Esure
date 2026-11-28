@@ -1,12 +1,29 @@
 export type RunStatus = "requested" | "validating" | "running" | "passed" | "failed";
 export type StepStatus = "passed" | "failed";
 
+/**
+ * Bounded set of operation categories derivable from a scenario's steps and
+ * assertions without executing it. This lets dashboard clients filter by
+ * category without re-parsing step/assertion lists or inferring meaning from
+ * free-text names and descriptions.
+ *
+ * Values:
+ *   - "payment"           – at least one payment step is present
+ *   - "trust"             – at least one changeTrust step is present
+ *   - "offer"             – at least one manageSellOffer step is present
+ *   - "path-payment"      – at least one pathPaymentStrictReceive or pathPaymentStrictSend step
+ *   - "failure-assertion" – at least one stepFailedWith assertion is present
+ */
+export type ScenarioCategory = "payment" | "trust" | "offer" | "path-payment" | "failure-assertion";
+
 export interface ScenarioSummary {
   id: string;
   version: number;
   name: string;
   description: string;
   contentHash: string;
+  /** Bounded categories derived from the scenario's validated operations and assertions (issue #230). */
+  categories: ScenarioCategory[];
 }
 
 export interface ScenarioAccount {
@@ -24,7 +41,20 @@ export type ScenarioStep =
   | { id: string; type: "payment"; from: string; to: string; asset: string; amount: string; memo?: string }
   | { id: string; type: "manageSellOffer"; account: string; sellingAsset: string; buyingAsset: string; amount: string; price: string }
   | { id: string; type: "pathPaymentStrictReceive"; from: string; to: string; sendAsset: string; sendMax: string; destAsset: string; destAmount: string; path: string[] }
-  | { id: string; type: "pathPaymentStrictSend"; from: string; to: string; sendAsset: string; sendAmount: string; destAsset: string; destMin: string; path: string[] };
+  | {
+      id: string;
+      type: "pathPaymentStrictSend";
+      from: string;
+      to: string;
+      sendAsset: string;
+      /** Exact amount of `sendAsset` debited from `from` (integer string in asset units). */
+      sendAmount: string;
+      destAsset: string;
+      /** Minimum acceptable amount of `destAsset` credited to `to` (integer string in asset units). */
+      destMin: string;
+      path: string[];
+      memo?: string;
+    };
 
 export type ScenarioAssertion =
   | { type: "transactionMemoEquals"; step: string; memo: string }
