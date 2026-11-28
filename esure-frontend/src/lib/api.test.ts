@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiError, compareReports, getRun, listScenarios, parseReportJson, startRun, type RunReport, type ScenarioSummary } from "./api";
-import { ApiError, RateLimitError, getRun, listScenarios, parseRetryAfter, startRun, type RunReport, type ScenarioSummary } from "./api";
+import { ApiError, compareReports, getRun, listScenarios, parseReportJson, parseRetryAfter, RateLimitError, startRun, type RunReport, type ScenarioSummary } from "./api";
+import {
+  completeAdditiveReportFixture,
+  minimalLegacyReportFixture,
+  reportFixtureVersion,
+} from "../../../shared/report-fixtures";
 
 const scenario: ScenarioSummary = {
   id: "xlm-payment",
@@ -118,7 +122,51 @@ describe("frontend API response validation", () => {
     expect(result.error?.failedStepId).toBe("pay");
 
     mockResponse(JSON.stringify(run));
-    await expect(startRun("xlm-payment")).resolves.toEqual(run);
+    await expect(startRun("xlm-payment", 1)).resolves.toEqual(run);
+  });
+
+  it("sends the explicitly selected version with a new run request", async () => {
+    mockResponse(JSON.stringify(run));
+
+    await startRun("xlm-payment", 4, "request-key");
+
+    expect(fetch).toHaveBeenCalledWith("/api/backend/api/v1/runs", expect.objectContaining({
+      body: JSON.stringify({ scenarioId: "xlm-payment", scenarioVersion: 4, inputs: {} }),
+      headers: expect.objectContaining({ "idempotency-key": "request-key" }),
+    }));
+  });
+
+  it("fetches paginated history and exact version details", async () => {
+    const history = {
+      items: [{ version: 2, schemaVersion: 1, contentHash: "hash", createdAt: "2026-10-16T00:00:00.000Z" }],
+      nextCursor: 2,
+    };
+    mockResponse(JSON.stringify(history));
+    await expect(getScenarioVersions("xlm-payment", 10, 3)).resolves.toEqual(history);
+    expect(fetch).toHaveBeenLastCalledWith(
+      "/api/backend/api/v1/scenarios/xlm-payment/versions?limit=10&cursor=3",
+      expect.any(Object),
+    );
+
+    const detail = {
+      id: "xlm-payment",
+      version: 2,
+      name: "XLM payment",
+      description: "Testnet payment.",
+      contentHash: "hash",
+      network: "testnet",
+      schemaVersion: 1,
+      accounts: [],
+      assets: [],
+      steps: [],
+      assertions: [],
+    };
+    mockResponse(JSON.stringify(detail));
+    await expect(getScenarioVersion("xlm-payment", 2)).resolves.toEqual(detail);
+    expect(fetch).toHaveBeenLastCalledWith(
+      "/api/backend/api/v1/scenarios/xlm-payment/versions/2",
+      expect.any(Object),
+    );
   });
 
   it("accepts optional expiry metadata without rejecting a report with malformed metadata", async () => {
@@ -142,6 +190,57 @@ describe("frontend API response validation", () => {
     });
     if (!(error instanceof ApiError)) throw new Error("Expected ApiError");
     expect(error.message).not.toContain("private upstream diagnostic");
+  });
+});
+
+describe("shared report fixtures (Issue #279)", () => {
+  it("exposes a versioned fixture set", () => {
+    expect(reportFixtureVersion).toBeGreaterThanOrEqual(1);
+    expect(minimalLegacyReportFixture.id).toBeTruthy();
+    expect(completeAdditiveReportFixture.id).toBeTruthy();
+  });
+
+  it("accepts the minimal legacy report via getRun", async () => {
+    mockResponse(JSON.stringify(minimalLegacyReportFixture));
+    const result = await getRun(minimalLegacyReportFixture.id);
+    expect(result.id).toBe(minimalLegacyReportFixture.id);
+    expect(result.steps).toHaveLength(minimalLegacyReportFixture.steps.length);
+    expect(result.assertions).toHaveLength(minimalLegacyReportFixture.assertions.length);
+  });
+
+  it("accepts the complete additive-field report via getRun", async () => {
+    mockResponse(JSON.stringify(completeAdditiveReportFixture));
+    const result = await getRun(completeAdditiveReportFixture.id);
+    expect(result.id).toBe(completeAdditiveReportFixture.id);
+    expect(result.steps).toHaveLength(completeAdditiveReportFixture.steps.length);
+    expect(result.assertions).toHaveLength(completeAdditiveReportFixture.assertions.length);
+  });
+
+  it("preserves optional timing, fee, and subject fields from the additive fixture", async () => {
+    mockResponse(JSON.stringify(completeAdditiveReportFixture));
+    const result = await getRun(completeAdditiveReportFixture.id);
+    const step = result.steps[0] as Record<string, unknown>;
+    expect(step.startedAt).toBe(completeAdditiveReportFixture.steps[0].startedAt);
+    expect(step.completedAt).toBe(completeAdditiveReportFixture.steps[0].completedAt);
+    expect(step.durationMs).toBe(completeAdditiveReportFixture.steps[0].durationMs);
+    expect(step.feeCharged).toBe(completeAdditiveReportFixture.steps[0].feeCharged);
+    expect(step.subject).toEqual(completeAdditiveReportFixture.steps[0].subject);
+  });
+
+  it("parses both fixtures offline with parseReportJson", () => {
+    const legacy = parseReportJson(JSON.stringify(minimalLegacyReportFixture));
+    expect(legacy.id).toBe(minimalLegacyReportFixture.id);
+    expect(legacy.steps).toHaveLength(minimalLegacyReportFixture.steps.length);
+
+    const additive = parseReportJson(JSON.stringify(completeAdditiveReportFixture));
+    expect(additive.id).toBe(completeAdditiveReportFixture.id);
+    expect(additive.steps).toHaveLength(completeAdditiveReportFixture.steps.length);
+    const step = additive.steps[0] as Record<string, unknown>;
+    expect(step.startedAt).toBe(completeAdditiveReportFixture.steps[0].startedAt);
+    expect(step.completedAt).toBe(completeAdditiveReportFixture.steps[0].completedAt);
+    expect(step.durationMs).toBe(completeAdditiveReportFixture.steps[0].durationMs);
+    expect(step.feeCharged).toBe(completeAdditiveReportFixture.steps[0].feeCharged);
+    expect(step.subject).toEqual(completeAdditiveReportFixture.steps[0].subject);
   });
 });
 
@@ -243,6 +342,158 @@ describe("report comparison (Issue #48)", () => {
     const comp = compareReports(baseRun, mismatched);
     expect(comp.scenariosMatch).toBe(false);
     expect(comp.scenarioIdMatch).toBe(false);
+  });
+});
+
+describe("report comparison property invariants (Issue #283)", () => {
+  // Deterministic PRNG so generated reports are reproducible across runs.
+  function mulberry32(seed: number): () => number {
+    let a = seed >>> 0;
+    return () => {
+      a = (a + 0x6d2b79f5) >>> 0;
+      let t = a;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  const STEP_TYPES = ["payment", "balance", "trustline", "offer"];
+  const ASSERTION_TYPES = ["balanceEquals", "trustlineExists", "offerExists"];
+  const MAX_STEPS = 4;
+  const MAX_ASSERTIONS = 5;
+
+  function generateReport(rand: () => number, index: number): RunReport {
+    const pick = <T>(items: readonly T[]): T => items[Math.floor(rand() * items.length)];
+    const int = (max: number) => Math.floor(rand() * (max + 1));
+    const status = (): "passed" | "failed" => (rand() < 0.5 ? "passed" : "failed");
+
+    const stepCount = int(MAX_STEPS);
+    const steps = Array.from({ length: stepCount }, (_, i) => ({
+      id: `step-${i}`,
+      type: pick(STEP_TYPES),
+      status: status(),
+      message: `Step ${i}.`,
+    }));
+
+    // Repeated assertion types exercise the `${type}#${index}` occurrence keys.
+    const assertionCount = int(MAX_ASSERTIONS);
+    const assertions = Array.from({ length: assertionCount }, (_, i) => ({
+      type: pick(ASSERTION_TYPES),
+      status: status(),
+      expected: `${i}.0000000`,
+      actual: `${i}.0000000`,
+      message: `Assertion ${i}.`,
+    }));
+
+    const stepsPassed = steps.filter((s) => s.status === "passed").length;
+    const assertionsPassed = assertions.filter((a) => a.status === "passed").length;
+
+    return {
+      ...run,
+      id: `run-prop-${index}`,
+      status: stepsFailedCount(steps) === 0 ? "passed" : "failed",
+      createdAt: "2026-10-16T00:00:00.000Z",
+      completedAt: `2026-10-16T00:00:${String(int(59)).padStart(2, "0")}.000Z`,
+      steps,
+      assertions,
+      summary: {
+        stepsPassed,
+        stepsFailed: steps.length - stepsPassed,
+        assertionsPassed,
+        assertionsFailed: assertions.length - assertionsPassed,
+      },
+      error: undefined,
+    };
+  }
+
+  function stepsFailedCount(steps: RunReport["steps"]): number {
+    return steps.filter((s) => s.status === "failed").length;
+  }
+
+  function stepIds(report: RunReport): Set<string> {
+    return new Set(report.steps.map((s) => s.id));
+  }
+
+  function assertionKeys(report: RunReport): Set<string> {
+    const seen = new Map<string, number>();
+    const keys = new Set<string>();
+    for (const assertion of report.assertions) {
+      const occurrence = seen.get(assertion.type) ?? 0;
+      seen.set(assertion.type, occurrence + 1);
+      keys.add(`${assertion.type}#${occurrence}`);
+    }
+    return keys;
+  }
+
+  function union<T>(a: Set<T>, b: Set<T>): Set<T> {
+    return new Set([...a, ...b]);
+  }
+
+  const SEED = 0x5eed_0283;
+  const PAIRS = 25;
+
+  it("self-comparison yields no changes and unchanged counts", () => {
+    const rand = mulberry32(SEED);
+    for (let i = 0; i < PAIRS; i++) {
+      const report = generateReport(rand, i);
+      const comp = compareReports(report, report);
+
+      expect(comp.scenariosMatch).toBe(true);
+      expect(comp.statusChanged).toBe(false);
+      expect(comp.durationDiffMs).toBe(0);
+
+      for (const entry of [...comp.steps, ...comp.assertions]) {
+        expect(entry.statusChange).toBe("unchanged");
+      }
+
+      expect(comp.stepsAdded).toBe(0);
+      expect(comp.stepsRemoved).toBe(0);
+      expect(comp.stepsChanged).toBe(0);
+      expect(comp.stepsUnchanged).toBe(stepIds(report).size);
+      expect(comp.assertionsAdded).toBe(0);
+      expect(comp.assertionsRemoved).toBe(0);
+      expect(comp.assertionsChanged).toBe(0);
+      expect(comp.assertionsUnchanged).toBe(assertionKeys(report).size);
+    }
+  });
+
+  it("A/B reversal swaps added/removed and preserves changed/unchanged", () => {
+    const rand = mulberry32(SEED);
+    for (let i = 0; i < PAIRS; i++) {
+      const a = generateReport(rand, i * 2);
+      const b = generateReport(rand, i * 2 + 1);
+      const ab = compareReports(a, b);
+      const ba = compareReports(b, a);
+
+      expect(ba.stepsAdded).toBe(ab.stepsRemoved);
+      expect(ba.stepsRemoved).toBe(ab.stepsAdded);
+      expect(ba.stepsChanged).toBe(ab.stepsChanged);
+      expect(ba.stepsUnchanged).toBe(ab.stepsUnchanged);
+
+      expect(ba.assertionsAdded).toBe(ab.assertionsRemoved);
+      expect(ba.assertionsRemoved).toBe(ab.assertionsAdded);
+      expect(ba.assertionsChanged).toBe(ab.assertionsChanged);
+      expect(ba.assertionsUnchanged).toBe(ab.assertionsUnchanged);
+    }
+  });
+
+  it("counts are conserved over the union of step ids and assertion keys", () => {
+    const rand = mulberry32(SEED);
+    for (let i = 0; i < PAIRS; i++) {
+      const a = generateReport(rand, i * 2);
+      const b = generateReport(rand, i * 2 + 1);
+      const comp = compareReports(a, b);
+
+      expect(comp.stepsAdded + comp.stepsRemoved + comp.stepsChanged + comp.stepsUnchanged)
+        .toBe(union(stepIds(a), stepIds(b)).size);
+      expect(comp.assertionsAdded + comp.assertionsRemoved + comp.assertionsChanged + comp.assertionsUnchanged)
+        .toBe(union(assertionKeys(a), assertionKeys(b)).size);
+
+      // Every reported entry is classified exactly once.
+      expect(comp.steps).toHaveLength(union(stepIds(a), stepIds(b)).size);
+      expect(comp.assertions).toHaveLength(union(assertionKeys(a), assertionKeys(b)).size);
+    }
   });
 });
 

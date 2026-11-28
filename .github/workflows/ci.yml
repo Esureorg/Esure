@@ -8,11 +8,21 @@ on:
 permissions:
   contents: read
 
+# One run per workflow and ref. Superseded pull request runs are cancelled;
+# pushes to main are never cancelled, so each push keeps its own result.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   backend:
-    name: Backend checks
+    name: Backend checks (Node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [20, 22]
     defaults:
       run:
         working-directory: esure-backend
@@ -20,17 +30,24 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: ${{ matrix.node-version }}
           cache: npm
           cache-dependency-path: esure-backend/package-lock.json
-      - run: npm ci
+      - run: npm ci --no-workspaces
       - run: npm run check
       - run: npm run build
+      - name: Check Markdown links (offline)
+        working-directory: .
+        run: node esure-backend/scripts/check-links.mjs
 
   frontend:
-    name: Frontend checks
+    name: Frontend checks (Node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [20, 22]
     defaults:
       run:
         working-directory: esure-frontend
@@ -38,10 +55,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: ${{ matrix.node-version }}
           cache: npm
           cache-dependency-path: esure-frontend/package-lock.json
-      - run: npm ci
+      - run: npm ci --no-workspaces
       - run: npm run check
       - run: npm run build
       - run: npx playwright install --with-deps chromium
@@ -50,15 +67,50 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: playwright-report-${{ matrix.node-version || 'default' }}
+          name: playwright-report-node${{ matrix.node-version }}
           path: esure-frontend/playwright-report/
           retention-days: 7
           if-no-files-found: ignore
 
   cli:
-    name: CLI checks
+    name: CLI checks (Node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+      - name: Install backend dependencies
+        working-directory: esure-backend
+        run: npm ci --no-workspaces
+      - name: Install CLI dependencies
+        working-directory: esure-cli
+        run: npm ci --no-workspaces
+      - name: Typecheck CLI
+        working-directory: esure-cli
+        run: npm run typecheck
+      - name: Test CLI
+        working-directory: esure-cli
+        run: npm run test
+      - name: Build CLI
+        working-directory: esure-cli
+        run: npm run build
+
+  windows:
+    name: Windows checks
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      # Skip database integration tests deterministically on Windows.
+      ESURE_SKIP_DB_TESTS: "1"
+      # Keep live Testnet calls disabled.
+      TESTNET_ENABLED: "false"
+      ESURE_LIVE_NETWORK: "false"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -70,6 +122,15 @@ jobs:
       - name: Install CLI dependencies
         working-directory: esure-cli
         run: npm ci
+      - name: Install frontend dependencies
+        working-directory: esure-frontend
+        run: npm ci
+      - name: Backend check
+        working-directory: esure-backend
+        run: npm run check
+      - name: Backend build
+        working-directory: esure-backend
+        run: npm run build
       - name: Typecheck CLI
         working-directory: esure-cli
         run: npm run typecheck
@@ -79,4 +140,10 @@ jobs:
       - name: Build CLI
         working-directory: esure-cli
         run: npm run build
+      - name: Typecheck frontend
+        working-directory: esure-frontend
+        run: npm run typecheck
+      - name: Test frontend
+        working-directory: esure-frontend
+        run: npm test
 

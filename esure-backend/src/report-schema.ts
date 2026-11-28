@@ -1,5 +1,6 @@
 import { Ajv } from "ajv";
 import type { RunReport } from "./domain.js";
+import { describe, expect, it } from "vitest";
 
 const jsonValue = {
   anyOf: [
@@ -145,3 +146,155 @@ function isIsoDateTime(value: string): boolean {
   return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value)
     && Number.isFinite(Date.parse(value));
 }
+
+// Shared sanitized versioned report fixtures. These are consumed by the backend,
+// CLI, and frontend test suites so all three surfaces agree on the report shape.
+export const reportFixturesV1 = {
+  // Minimal legacy report: only required fields, no optional timing/fee/subject data.
+  minimalLegacy: {
+    id: "run-minimal-1",
+    scenarioId: "scenario-minimal",
+    scenarioVersion: 1,
+    scenarioSchemaVersion: 1,
+    scenarioContentHash: "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    network: "testnet",
+    status: "passed",
+    createdAt: "2024-01-01T00:00:00.000Z",
+    steps: [
+      {
+        id: "step-1",
+        type: "payment",
+        status: "passed",
+        message: "Payment submitted.",
+      },
+    ],
+    assertions: [
+      {
+        type: "stepSucceeded",
+        status: "passed",
+        expected: true,
+        actual: true,
+        message: "Step succeeded.",
+      },
+    ],
+    summary: {
+      stepsPassed: 1,
+      stepsFailed: 0,
+      assertionsPassed: 1,
+      assertionsFailed: 0,
+    },
+  },
+  // Complete report: every additive optional field populated.
+  completeAdditive: {
+    id: "run-complete-1",
+    scenarioId: "scenario-complete",
+    scenarioVersion: 2,
+    scenarioSchemaVersion: 1,
+    scenarioContentHash: "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    network: "testnet",
+    status: "failed",
+    createdAt: "2024-02-01T10:00:00.000Z",
+    completedAt: "2024-02-01T10:00:05.500Z",
+    expiresAt: "2024-02-01T11:00:00.000Z",
+    steps: [
+      {
+        id: "step-1",
+        type: "payment",
+        status: "passed",
+        transactionHash: "a".repeat(64),
+        ledger: 12345,
+        feeCharged: "100",
+        stellarTransactionCode: "tx_success",
+        stellarOperationCodes: ["op_success"],
+        message: "Payment submitted.",
+        startedAt: "2024-02-01T10:00:00.000Z",
+        completedAt: "2024-02-01T10:00:02.000Z",
+        durationMs: 2000,
+      },
+      {
+        id: "step-2",
+        type: "trustline",
+        status: "failed",
+        message: "Trustline missing.",
+        startedAt: "2024-02-01T10:00:02.000Z",
+        completedAt: "2024-02-01T10:00:05.500Z",
+        durationMs: 3500,
+      },
+    ],
+    assertions: [
+      {
+        type: "feeAwareNativeBalanceDelta",
+        status: "passed",
+        expected: { delta: "-100" },
+        actual: { delta: "-100" },
+        message: "Fee-aware delta matched.",
+      },
+      {
+        type: "trustlineExists",
+        status: "failed",
+        expected: true,
+        actual: false,
+        message: "Trustline was not found.",
+      },
+    ],
+    summary: {
+      stepsPassed: 1,
+      stepsFailed: 1,
+      assertionsPassed: 1,
+      assertionsFailed: 1,
+    },
+    error: {
+      code: "trustline_missing",
+      message: "Expected trustline was not found.",
+      category: "validation",
+      retryable: false,
+      failedStepId: "step-2",
+      stellarTransactionCode: "tx_failed",
+      stellarOperationCodes: ["op_no_trust"],
+    },
+  },
+} as const;
+
+describe("shared report fixtures v1", () => {
+  it("accepts the minimal legacy report", () => {
+    const report = validateRunReport(reportFixturesV1.minimalLegacy);
+    expect(report.id).toBe("run-minimal-1");
+    expect(report.completedAt).toBeUndefined();
+    expect(report.expiresAt).toBeUndefined();
+    expect(report.error).toBeUndefined();
+    expect(report.steps[0]?.startedAt).toBeUndefined();
+    expect(report.steps[0]?.feeCharged).toBeUndefined();
+  });
+
+  it("accepts the complete additive-field report", () => {
+    const report = validateRunReport(reportFixturesV1.completeAdditive);
+    expect(report.completedAt).toBe("2024-02-01T10:00:05.500Z");
+    expect(report.expiresAt).toBe("2024-02-01T11:00:00.000Z");
+    expect(report.steps[0]?.feeCharged).toBe("100");
+    expect(report.steps[0]?.durationMs).toBe(2000);
+    expect(report.steps[0]?.stellarOperationCodes).toEqual(["op_success"]);
+    expect(report.error?.failedStepId).toBe("step-2");
+  });
+
+  it("rejects a report with an invalid optional timestamp", () => {
+    const invalid = {
+      ...reportFixturesV1.completeAdditive,
+      steps: [
+        { ...reportFixturesV1.completeAdditive.steps[0], startedAt: "not-a-date" },
+        reportFixturesV1.completeAdditive.steps[1],
+      ],
+    };
+    expect(() => validateRunReport(invalid)).toThrow(RunReportValidationError);
+  });
+
+  it("rejects a report with a non-canonical fee", () => {
+    const invalid = {
+      ...reportFixturesV1.completeAdditive,
+      steps: [
+        { ...reportFixturesV1.completeAdditive.steps[0], feeCharged: "0100" },
+        reportFixturesV1.completeAdditive.steps[1],
+      ],
+    };
+    expect(() => validateRunReport(invalid)).toThrow(RunReportValidationError);
+  });
+});

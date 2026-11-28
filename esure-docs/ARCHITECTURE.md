@@ -96,6 +96,54 @@ Requested -> Validating -> Running -> Passed
 | Contracts | Not in the runtime; future integration is proposal-only |
 | Documentation | Markdown first; framework deferred |
 
+## Shutdown and deployment drain
+
+The backend drains in-flight work on process shutdown. The sequence below is
+implemented in `esure-backend/src/server.ts` and `esure-backend/src/app.ts`
+(`closeAfterDrain`); verify against those files before relying on it.
+
+### Signals and shutdown sequence
+
+- `SIGTERM` and `SIGINT` each trigger shutdown exactly once; a second signal
+  during an in-progress drain is ignored.
+- The sequence is:
+  1. Mark `RunService` as draining. New run-creation `POST` requests are
+     rejected immediately with `503` and reason `"draining"`, and are counted in
+     `esure_rejected_run_starts_total{reason="draining"}`.
+  2. Wait for active executions to finish, capped at a fixed
+     `DRAIN_TIMEOUT_MS` of 30 000 ms.
+  3. Close Fastify, firing `onClose` hooks that release database pools and
+     timers.
+  4. Exit with code `0`, or `1` if an error occurred during shutdown.
+
+### Persistence implications
+
+- If the drain deadline elapses, in-flight runs may be abandoned; their final
+  reports are not guaranteed to be recorded.
+- In-memory run state is lost on restart.
+- Reports persisted to PostgreSQL (when run-report persistence is enabled)
+  survive restarts. See the [persistence guide](PERSISTENCE.md).
+
+### Health and readiness checks
+
+- `GET /health` is a cheap liveness probe and is exempt from rate limiting.
+- `GET /ready` returns `200` with database status when persistence is
+  available, or `503` when it is unavailable.
+
+### Deployment drain sequence
+
+1. Stop routing new traffic to the instance (remove it from the load balancer).
+2. Send `SIGTERM` to the process.
+3. Poll `GET /ready` until it returns `503` or the process exits.
+4. Wait up to 30 s for the drain to complete.
+5. Force-kill the process if it has not exited.
+
+### Planned work
+
+Deadline cancellation of in-flight runs (actively aborting executions when
+`DRAIN_TIMEOUT_MS` elapses) is **planned and not yet implemented**. Today the
+drain simply stops waiting at the deadline; it does not cancel running work.
+
 ## Cross-repository contract
 
 The backend owns the canonical OpenAPI document and scenario JSON Schema. The

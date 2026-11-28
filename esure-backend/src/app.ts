@@ -19,7 +19,7 @@ export async function closeAfterDrain(app: { close: () => Promise<void>; runs: P
 }
 import type { AppConfig } from "./config.js";
 import type { LedgerGateway, RunReport, ValidatedScenario } from "./domain.js";
-import { RunCapacityError } from "./errors.js";
+import { RunCapacityError, RunDrainingError } from "./errors.js";
 import { DatabaseUnavailableError } from "./database.js";
 import { openApiDocument } from "./openapi.js";
 import { FixedWindowRateLimiter } from "./rate-limiter.js";
@@ -27,13 +27,14 @@ import { RunService, type RunLifecycleLogger } from "./run-service.js";
 import { InMemoryRunStore } from "./run-store.js";
 import { parseScenario, prepareScenario, canonicalJson } from "./scenario-loader.js";
 import { scenarioSchemaV1, ScenarioValidationError } from "./scenario-schema.js";
+import { runReportSchemaV1 } from "./report-schema.js";
 import { createScenarioRegistry } from "./scenarios.js";
 import { StellarTestnetGateway } from "./stellar-gateway.js";
 import { PersistenceCoordinator } from "./persistence.js";
 import { ScenarioIntegrityError } from "./published-scenarios.js";
 import { IdempotencyStore } from "./idempotency-store.js";
 
-interface BuildAppOptions { config: AppConfig; ledger?: LedgerGateway; logger?: boolean; runLogger?: RunLifecycleLogger; clock?: () => number; }
+interface BuildAppOptions { config: AppConfig; ledger?: LedgerGateway; logger?: boolean | { level: string }; runLogger?: RunLifecycleLogger; clock?: () => number; }
 
 const runBodySchema = {
   type: "object", additionalProperties: false, required: ["scenarioId"],
@@ -49,6 +50,25 @@ const scenarioIdParamsSchema = {
   additionalProperties: false,
   required: ["scenarioId"],
   properties: { scenarioId: { type: "string", minLength: 1, maxLength: 64, pattern: "^[a-z0-9-]+$" } },
+} as const;
+
+/**
+ * Params schema for run routes that accept a runId path parameter.
+ * Validates UUID v4 format before hitting the store, returning a stable 400
+ * instead of letting PostgreSQL reject the value mid-query. Issue #220.
+ */
+const runIdParamsSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["runId"],
+  properties: {
+    runId: {
+      type: "string",
+      minLength: 36,
+      maxLength: 36,
+      pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    },
+  },
 } as const;
 
 const versionParamsSchema = {
@@ -79,15 +99,6 @@ const exportQuerySchema = {
 /** Maximum Idempotency-Key length accepted (issue #72). */
 const IDEMPOTENCY_KEY_MAX_LENGTH = 128;
 
-/** Maximum number of in-flight idempotency entries (issue #72). */
-const IDEMPOTENCY_MAX_ENTRIES = 1_000;
-
-/**
- * Retention window for idempotency entries: 24 h (issue #72).
- * Entries older than this are pruned lazily on the next lookup.
- */
-const IDEMPOTENCY_RETENTION_MS = 86_400_000;
-
 export function buildApp(options: BuildAppOptions): AppInstance {
   const clock = options.clock ?? Date.now;
   const app = Fastify({ logger: options.logger ?? false, bodyLimit: options.config.bodyLimitBytes, ajv: { customOptions: { removeAdditional: false } } });
@@ -108,8 +119,8 @@ export function buildApp(options: BuildAppOptions): AppInstance {
   // Idempotency store shared across both run-creation endpoints (issue #72).
   // RunService.start returns Promise<RunReport>, so T = RunReport.
   const idempotency = new IdempotencyStore<RunReport>(
-    IDEMPOTENCY_MAX_ENTRIES,
-    IDEMPOTENCY_RETENTION_MS,
+    options.config.idempotencyMaxEntries,
+    options.config.idempotencyRetentionMs,
   );
 
   app.addHook("onRequest", async (request, reply) => {
@@ -126,9 +137,11 @@ export function buildApp(options: BuildAppOptions): AppInstance {
     if (!result.allowed) { reply.header("retry-after", result.retryAfterSeconds); return reply.code(429).send(apiError("RATE_LIMITED", "Request limit exceeded. Try again later.", request.id)); }
   });
   const ledger = options.ledger ?? new StellarTestnetGateway(options.config.horizonUrl, options.config.friendbotUrl, {
-    fundingConcurrency: options.config.maxConcurrentFriendbotRequests,
+    maxConcurrentFriendbotRequests: options.config.maxConcurrentFriendbotRequests,
   });
-  const clock = options.clock ?? Date.now;
+  const runs = new RunService(persistence.runStore ?? new InMemoryRunStore(options.config.maxStoredRuns, options.config.runRetentionMs), ledger, {
+    maxConcurrentRuns: options.config.maxConcurrentRuns, runTimeoutMs: options.config.runTimeoutMs, stepTimeoutMs: options.config.stepTimeoutMs,
+  });
   const runs = new RunService(persistence.runStore ?? new InMemoryRunStore(options.config.maxStoredRuns, options.config.runRetentionMs, clock), ledger, {
     maxConcurrentRuns: options.config.maxConcurrentRuns, runTimeoutMs: options.config.runTimeoutMs, stepTimeoutMs: options.config.stepTimeoutMs,
   }, clock, options.runLogger ?? app.log);
@@ -137,6 +150,10 @@ export function buildApp(options: BuildAppOptions): AppInstance {
   if (options.config.metricsEnabled) {
     app.get("/metrics", async (_request, reply) => {
       const metrics = runs.getMetrics();
+      // Issue #224: gateway retry counters — only available when using the real gateway.
+      const retryMetrics = ledger instanceof StellarTestnetGateway ? ledger.getRetryMetrics() : undefined;
+      // Issue #225: pool health — only available when a database is wired up.
+      const pool = persistence.database?.poolHealth();
       const body = [
         "# HELP esure_active_runs Number of currently admitted active runs.",
         "# TYPE esure_active_runs gauge",
@@ -155,6 +172,30 @@ export function buildApp(options: BuildAppOptions): AppInstance {
         "# HELP esure_run_duration_seconds_count Number of terminal runs included in duration.",
         "# TYPE esure_run_duration_seconds_count counter",
         `esure_run_duration_seconds_count ${metrics.runDuration.count}`,
+        // Issue #224: gateway retry counters with fixed service+outcome labels only.
+        ...(retryMetrics ? [
+          "# HELP esure_gateway_retries_total Retry attempts by fixed service and outcome labels.",
+          "# TYPE esure_gateway_retries_total counter",
+          `esure_gateway_retries_total{service="friendbot",outcome="succeeded"} ${retryMetrics.retries.friendbot.succeeded}`,
+          `esure_gateway_retries_total{service="friendbot",outcome="exhausted"} ${retryMetrics.retries.friendbot.exhausted}`,
+          `esure_gateway_retries_total{service="horizon",outcome="succeeded"} ${retryMetrics.retries.horizon.succeeded}`,
+          `esure_gateway_retries_total{service="horizon",outcome="exhausted"} ${retryMetrics.retries.horizon.exhausted}`,
+        ] : []),
+        // Issue #225: sanitized pool health counters — no connection string or query data.
+        ...(pool ? [
+          "# HELP esure_db_pool_total Total clients in the connection pool.",
+          "# TYPE esure_db_pool_total gauge",
+          `esure_db_pool_total ${pool.totalCount}`,
+          "# HELP esure_db_pool_idle Idle clients in the connection pool.",
+          "# TYPE esure_db_pool_idle gauge",
+          `esure_db_pool_idle ${pool.idleCount}`,
+          "# HELP esure_db_pool_waiting Requests waiting for a pool client.",
+          "# TYPE esure_db_pool_waiting gauge",
+          `esure_db_pool_waiting ${pool.waitingCount}`,
+          "# HELP esure_db_pool_errors_total Pool idle-error events (sanitized count only).",
+          "# TYPE esure_db_pool_errors_total counter",
+          `esure_db_pool_errors_total ${pool.poolErrorCount}`,
+        ] : []),
         "",
       ].join("\n");
       return reply
@@ -171,9 +212,20 @@ export function buildApp(options: BuildAppOptions): AppInstance {
   });
   app.get("/openapi.json", async () => openApiDocument());
 
-  // ── Issue #70: canonical schema endpoint ──────────────────────────────────
-  app.get("/api/v1/schemas/scenario-v1.json", async (_request, reply) => {
-    return reply.type("application/json").send(scenarioSchemaV1);
+  // ── Issue #70: canonical schema endpoint / #222: conditional GET ──────────
+  app.get("/api/v1/schemas/scenario-v1.json", async (request, reply) => {
+    const body = JSON.stringify(scenarioSchemaV1);
+    const etag = `"${createHash("sha256").update(body).digest("hex")}"`;
+    reply.header("ETag", etag).header("Cache-Control", "no-cache");
+    const ifNoneMatchHeader = request.headers["if-none-match"];
+    const ifNoneMatch = Array.isArray(ifNoneMatchHeader) ? ifNoneMatchHeader.join(",") : ifNoneMatchHeader;
+    if (ifNoneMatch && matchesETag(ifNoneMatch, etag)) return reply.code(304).send();
+    return reply.type("application/json").send(body);
+  });
+
+  // ── Issue #231: canonical run-report schema endpoint ─────────────────────
+  app.get("/api/v1/schemas/run-report-v1.json", async (_request, reply) => {
+    return reply.type("application/json").send(runReportSchemaV1);
   });
 
   // ── Issue #69: conditional GET for scenario catalogue ─────────────────────
@@ -184,7 +236,7 @@ export function buildApp(options: BuildAppOptions): AppInstance {
     // reverse proxies know the resource must be revalidated before reuse.
     reply.header("ETag", etag).header("Cache-Control", "no-cache");
     const ifNoneMatch = (request.headers["if-none-match"] as string | undefined)?.trim();
-    if (ifNoneMatch && (ifNoneMatch === etag || ifNoneMatch === `W/${etag}`)) {
+    if (ifNoneMatch && matchesETag(ifNoneMatch, etag)) {
       return reply.code(304).send();
     }
     return { items };
@@ -193,6 +245,11 @@ export function buildApp(options: BuildAppOptions): AppInstance {
   app.get<{ Params: { scenarioId: string } }>("/api/v1/scenarios/:scenarioId", async (request, reply) => {
     const scenario = persistence.repository ? await persistence.repository.latest(request.params.scenarioId) : registry.find(request.params.scenarioId);
     if (!scenario) return reply.code(404).send(apiError("SCENARIO_NOT_FOUND", "The requested scenario is not available.", request.id));
+    const etag = `"${createHash("sha256").update(scenario.contentHash).digest("hex")}"`;
+    reply.header("ETag", etag).header("Cache-Control", "no-cache");
+    const ifNoneMatchHeader = request.headers["if-none-match"];
+    const ifNoneMatch = Array.isArray(ifNoneMatchHeader) ? ifNoneMatchHeader.join(",") : ifNoneMatchHeader;
+    if (ifNoneMatch && matchesETag(ifNoneMatch, etag)) return reply.code(304).send();
     return scenario;
   });
   app.get<{ Params: { scenarioId: string }; Querystring: { limit?: string; cursor?: string } }>("/api/v1/scenarios/:scenarioId/versions", { schema: { params: scenarioIdParamsSchema, querystring: historyQuerySchema } }, async (request, reply) => {
@@ -274,7 +331,14 @@ export function buildApp(options: BuildAppOptions): AppInstance {
       }
       // Both "created" and "existing" return the settled result of the original
       // promise, which may be from a concurrent or prior request.
-      return reply.code(202).send(await outcome.entry.result);
+      // Release the key on pre-admission failures (issue #215) so a subsequent
+      // request with the same key can succeed without being treated as a duplicate.
+      try {
+        return reply.code(202).send(await outcome.entry.result);
+      } catch (err) {
+        if (err instanceof RunCapacityError) idempotency.release(idempotencyKey);
+        throw err;
+      }
     }
 
     return reply.code(202).send(await runs.start(scenario, request.id));
@@ -296,18 +360,23 @@ export function buildApp(options: BuildAppOptions): AppInstance {
       if (outcome.status === "capacity") {
         return reply.code(503).send(apiError("IDEMPOTENCY_CAPACITY", "The idempotency store is at capacity. Retry without an Idempotency-Key or try again later.", request.id));
       }
-      return reply.code(202).send(await outcome.entry.result);
+      try {
+        return reply.code(202).send(await outcome.entry.result);
+      } catch (err) {
+        if (err instanceof RunCapacityError) idempotency.release(idempotencyKey);
+        throw err;
+      }
     }
 
     return reply.code(202).send(await runs.start(scenario, request.id));
   });
 
-  app.get<{ Params: { runId: string } }>("/api/v1/runs/:runId", async (request, reply) => {
+  app.get<{ Params: { runId: string } }>("/api/v1/runs/:runId", { schema: { params: runIdParamsSchema } }, async (request, reply) => {
     const run = await runs.get(request.params.runId);
     if (!run) return reply.code(404).send(apiError("RUN_NOT_FOUND", "The requested run does not exist.", request.id));
     return sendConditionalRunReport(request, reply, withRetentionMetadata(run, options.config.runRetentionMs));
   });
-  app.get<{ Params: { runId: string } }>("/api/v1/runs/:runId/report", async (request, reply) => {
+  app.get<{ Params: { runId: string } }>("/api/v1/runs/:runId/report", { schema: { params: runIdParamsSchema } }, async (request, reply) => {
     const run = await runs.get(request.params.runId);
     if (!run) return reply.code(404).send(apiError("RUN_NOT_FOUND", "The requested run does not exist.", request.id));
     if (run.status !== "passed" && run.status !== "failed") return reply.code(409).send(apiError("RUN_NOT_COMPLETE", "The requested run is not complete.", request.id));
@@ -316,7 +385,17 @@ export function buildApp(options: BuildAppOptions): AppInstance {
   });
 
   app.setErrorHandler((error, request, reply) => {
-    if (error instanceof RunCapacityError) return reply.code(503).send({ error: { ...error.report, requestId: request.id, details: [] } });
+    if (error instanceof RunDrainingError) {
+      // Issue #223: draining responses signal a permanent (until restart) state;
+      // suggest a longer retry window and use a distinct code so clients can
+      // differentiate from a temporary capacity limit.
+      return reply.code(503).header("retry-after", "60").send({ error: { ...error.report, requestId: request.id, details: [] } });
+    }
+    if (error instanceof RunCapacityError) {
+      // Issue #223: capacity is temporary — the runner may free a slot within
+      // seconds. Suggest a short retry window so clients back off predictably.
+      return reply.code(503).header("retry-after", "5").send({ error: { ...error.report, requestId: request.id, details: [] } });
+    }
     if (error instanceof DatabaseUnavailableError) return reply.code(503).send(apiError("DATABASE_UNAVAILABLE", "The persistent scenario catalogue is temporarily unavailable.", request.id));
     // Issue #81: a persisted scenario row failed its integrity re-check. Respond with a
     // sanitized availability error — never the underlying ScenarioIntegrityError detail.
@@ -348,11 +427,31 @@ export function buildApp(options: BuildAppOptions): AppInstance {
  * regardless of the order in which items are returned from the database.
  */
 function catalogueETag(items: { id: string; version: number; contentHash: string }[]): string {
-  const sorted = [...items].sort((a, b) => a.id.localeCompare(b.id));
+  const sorted = [...items].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   const digest = createHash("sha256")
     .update(canonicalJson(sorted.map(({ id, version, contentHash }) => ({ id, version, contentHash }))))
     .digest("hex");
   return `"${digest}"`;
+}
+
+/**
+ * Returns true when the If-None-Match header value matches the given strong
+ * ETag.  Handles:
+ *   - wildcard: `*`
+ *   - comma-separated lists of quoted tags (RFC 9110 §13.1.2)
+ *   - weak tags: W/"..." is treated as equivalent to its strong counterpart
+ *     for the purpose of conditional GETs (issue #221).
+ * The list is bounded to 32 candidates to prevent linear-scan abuse.
+ */
+function matchesETag(ifNoneMatch: string, etag: string): boolean {
+  if (!ifNoneMatch) return false;
+  const candidates = ifNoneMatch.split(",").slice(0, 32);
+  return candidates.some((candidate) => {
+    const tag = candidate.trim();
+    if (tag === "*") return true;
+    const normalized = tag.startsWith("W/") ? tag.slice(2) : tag;
+    return normalized === etag;
+  });
 }
 
 function sendConditionalRunReport(
@@ -367,10 +466,7 @@ function sendConditionalRunReport(
 
   const ifNoneMatchHeader = request.headers["if-none-match"];
   const ifNoneMatch = Array.isArray(ifNoneMatchHeader) ? ifNoneMatchHeader.join(",") : ifNoneMatchHeader;
-  if (ifNoneMatch && ifNoneMatch.split(",").some((candidate) => {
-    const tag = candidate.trim();
-    return tag === "*" || (tag.startsWith("W/") ? tag.slice(2) : tag) === etag;
-  })) {
+  if (ifNoneMatch && matchesETag(ifNoneMatch, etag)) {
     return reply.code(304).send();
   }
 
